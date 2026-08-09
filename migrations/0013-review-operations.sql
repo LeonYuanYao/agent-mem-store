@@ -5,6 +5,7 @@ CREATE TABLE review_inbox_state (
   item_counts_json TEXT NOT NULL,
   path TEXT NOT NULL
 ) STRICT;
+
 CREATE TABLE reminder_obligations (
   reminder_id TEXT PRIMARY KEY,
   digest_key TEXT NOT NULL UNIQUE,
@@ -54,3 +55,4 @@ CREATE TABLE runtime_backups (
   sha256 TEXT,
   created_at TEXT NOT NULL
 ) STRICT;
+
