@@ -1,0 +1,555 @@
+{
+  "schemaVersion": 1,
+  "status": "candidate_only_not_activated",
+  "generatedAt": "2026-08-07T09:20:24.257Z",
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.17.0",
+    "transformers": "4.2.0",
+    "cacheLocationClass": "operating_system_temporary_directory"
+  },
+  "corpus": {
+    "documentCount": 10,
+    "queryCount": 9,
+    "coverage": [
+      "Chinese",
+      "English",
+      "code",
+      "path",
+      "error",
+      "Git",
+      "Obsidian",
+      "command"
+    ]
+  },
+  "limitations": [
+    "Synthetic corpus with ten documents and nine positive queries is directional evidence only.",
+    "No real Shadow workload or task-outcome labels were available in Outcome 7.",
+    "Artifact checksums are benchmark candidates and are not frozen or activated.",
+    "Model thresholds require review because cosine score calibration differs by adapter."
+  ],
+  "activationDecision": null,
+  "results": [
+    {
+      "role": "lightweight",
+      "modelIdentity": "onnx-community/minilm-student-L6_uniform_distilled-ONNX",
+      "dtype": "q8",
+      "adapterIdentity": {
+        "adapterVersion": "transformers-4.2.0:q8:mean-l2:v1",
+        "modelIdentity": "onnx-community/minilm-student-L6_uniform_distilled-ONNX",
+        "artifactSha256": "811a637351736331df416ec3f590a65c9bd360b549558e48647080a13b08a39c",
+        "dimensions": 384,
+        "normalization": "l2"
+      },
+      "pipelineLoadMilliseconds": 838.92275,
+      "artifactFingerprintMilliseconds": 26.753834000000097,
+      "artifactBytes": 28661119,
+      "artifactFileCount": 4,
+      "artifactCandidateSha256": "811a637351736331df416ec3f590a65c9bd360b549558e48647080a13b08a39c",
+      "rssDeltaBytes": 182124544,
+      "corpusDocuments": 10,
+      "corpusEmbeddingMilliseconds": 23.24633300000005,
+      "corpusDocumentsPerSecond": 430.17537432678,
+      "warmQueryP50Milliseconds": 1.7760829999999714,
+      "warmQueryP95Milliseconds": 1.9555410000000393,
+      "recallAt1": 0.4444444444444444,
+      "recallAt3": 0.8888888888888888,
+      "meanReciprocalRank": 0.6944444444444444,
+      "semanticOnlyGate": {
+        "minimumScore": 0.82,
+        "minimumTop1Margin": 0.02
+      },
+      "semanticOnlyGateRecall": 0,
+      "negativeCalibration": [
+        {
+          "query": "quantum chemistry orbital symmetry",
+          "top": {
+            "id": "test-command",
+            "score": 0.39170036218113397
+          },
+          "top1Margin": 0.08977472232629591,
+          "semanticOnlyGatePassed": false
+        },
+        {
+          "query": "NBA playoff ticket prices",
+          "top": {
+            "id": "error-busy",
+            "score": 0.25107124017705706
+          },
+          "top1Margin": 0.015190008472950989,
+          "semanticOnlyGatePassed": false
+        },
+        {
+          "query": "medieval European painting restoration",
+          "top": {
+            "id": "path-marker",
+            "score": 0.5032957194904597
+          },
+          "top1Margin": 0.14498762187685926,
+          "semanticOnlyGatePassed": false
+        }
+      ],
+      "samples": [
+        {
+          "kind": "chinese",
+          "query": "一个小时的长任务如何分批沉淀知识",
+          "expected": "zh-batch",
+          "expectedRank": 1,
+          "top1Margin": 0.18667431054614164,
+          "semanticOnlyGatePassed": false,
+          "top3": [
+            {
+              "id": "zh-batch",
+              "score": 0.653924807356997
+            },
+            {
+              "id": "zh-secret",
+              "score": 0.46725049681085534
+            },
+            {
+              "id": "error-busy",
+              "score": 0.4217703379792986
+            }
+          ]
+        },
+        {
+          "kind": "english",
+          "query": "durable SQLite concurrency configuration",
+          "expected": "en-sqlite",
+          "expectedRank": 4,
+          "top1Margin": 0.002000624058513867,
+          "semanticOnlyGatePassed": false,
+          "top3": [
+            {
+              "id": "obsidian",
+              "score": 0.5148320194233557
+            },
+            {
+              "id": "zh-batch",
+              "score": 0.5128313953648418
+            },
+            {
+              "id": "code-typescript",
+              "score": 0.45618061979893143
+            }
+          ]
+        },
+        {
+          "kind": "code",
+          "query": "avoid unsafe any in TypeScript",
+          "expected": "code-typescript",
+          "expectedRank": 2,
+          "top1Margin": 0.09276598920764201,
+          "semanticOnlyGatePassed": false,
+          "top3": [
+            {
+              "id": "obsidian",
+              "score": 0.5697377639991308
+            },
+            {
+              "id": "code-typescript",
+              "score": 0.4769717747914888
+            },
+            {
+              "id": "en-sqlite",
+              "score": 0.3689850643401264
+            }
+          ]
+        },
+        {
+          "kind": "path",
+          "query": "where is .memstore-project located",
+          "expected": "path-marker",
+          "expectedRank": 1,
+          "top1Margin": 0.23163074862448174,
+          "semanticOnlyGatePassed": false,
+          "top3": [
+            {
+              "id": "path-marker",
+              "score": 0.5812823543064104
+            },
+            {
+              "id": "en-sqlite",
+              "score": 0.34965160568192866
+            },
+            {
+              "id": "obsidian",
+              "score": 0.31463403989890504
+            }
+          ]
+        },
+        {
+          "kind": "error",
+          "query": "database failed with SQLITE_BUSY",
+          "expected": "error-busy",
+          "expectedRank": 2,
+          "top1Margin": 0.0013011566054612622,
+          "semanticOnlyGatePassed": false,
+          "top3": [
+            {
+              "id": "obsidian",
+              "score": 0.3461049188942218
+            },
+            {
+              "id": "error-busy",
+              "score": 0.34480376228876053
+            },
+            {
+              "id": "code-typescript",
+              "score": 0.30597697159365334
+            }
+          ]
+        },
+        {
+          "kind": "chinese",
+          "query": "哪些敏感凭据不能保存到记忆中",
+          "expected": "zh-secret",
+          "expectedRank": 1,
+          "top1Margin": 0.0665091318995158,
+          "semanticOnlyGatePassed": false,
+          "top3": [
+            {
+              "id": "zh-secret",
+              "score": 0.5373813178522117
+            },
+            {
+              "id": "obsidian",
+              "score": 0.47087218595269587
+            },
+            {
+              "id": "error-busy",
+              "score": 0.397640148009569
+            }
+          ]
+        },
+        {
+          "kind": "git",
+          "query": "do worktrees share project knowledge",
+          "expected": "git-worktree",
+          "expectedRank": 1,
+          "top1Margin": 0.08632466664874583,
+          "semanticOnlyGatePassed": false,
+          "top3": [
+            {
+              "id": "git-worktree",
+              "score": 0.5401188243484285
+            },
+            {
+              "id": "path-marker",
+              "score": 0.4537941576996827
+            },
+            {
+              "id": "zh-batch",
+              "score": 0.34235466427008354
+            }
+          ]
+        },
+        {
+          "kind": "obsidian",
+          "query": "human editable canonical markdown vault",
+          "expected": "obsidian",
+          "expectedRank": 2,
+          "top1Margin": 0.03861901752296104,
+          "semanticOnlyGatePassed": false,
+          "top3": [
+            {
+              "id": "test-command",
+              "score": 0.49495700202706183
+            },
+            {
+              "id": "obsidian",
+              "score": 0.4563379845041008
+            },
+            {
+              "id": "path-marker",
+              "score": 0.409209495359184
+            }
+          ]
+        },
+        {
+          "kind": "command",
+          "query": "verification commands before completion",
+          "expected": "test-command",
+          "expectedRank": 2,
+          "top1Margin": 0.0048968246566230555,
+          "semanticOnlyGatePassed": false,
+          "top3": [
+            {
+              "id": "zh-batch",
+              "score": 0.48666219309284575
+            },
+            {
+              "id": "test-command",
+              "score": 0.4817653684362227
+            },
+            {
+              "id": "code-typescript",
+              "score": 0.38786533256784206
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "quality",
+      "modelIdentity": "onnx-community/multilingual-e5-base-ONNX",
+      "dtype": "q8",
+      "adapterIdentity": {
+        "adapterVersion": "transformers-4.2.0:q8:mean-l2:v1",
+        "modelIdentity": "onnx-community/multilingual-e5-base-ONNX",
+        "artifactSha256": "b17da479f058a2cd4dd677c0f50c7cb9ba87d274fe2a94a31c136ef465830cc2",
+        "dimensions": 768,
+        "normalization": "l2"
+      },
+      "pipelineLoadMilliseconds": 927.05675,
+      "artifactFingerprintMilliseconds": 232.22633300000007,
+      "artifactBytes": 295266514,
+      "artifactFileCount": 4,
+      "artifactCandidateSha256": "b17da479f058a2cd4dd677c0f50c7cb9ba87d274fe2a94a31c136ef465830cc2",
+      "rssDeltaBytes": 1119223808,
+      "corpusDocuments": 10,
+      "corpusEmbeddingMilliseconds": 40.66079200000013,
+      "corpusDocumentsPerSecond": 245.93716718552776,
+      "warmQueryP50Milliseconds": 3.834208000000217,
+      "warmQueryP95Milliseconds": 4.430417000000034,
+      "recallAt1": 1,
+      "recallAt3": 1,
+      "meanReciprocalRank": 1,
+      "semanticOnlyGate": {
+        "minimumScore": 0.82,
+        "minimumTop1Margin": 0.02
+      },
+      "semanticOnlyGateRecall": 0.8888888888888888,
+      "negativeCalibration": [
+        {
+          "query": "quantum chemistry orbital symmetry",
+          "top": {
+            "id": "obsidian",
+            "score": 0.7675113154459481
+          },
+          "top1Margin": 0.003878902845808052,
+          "semanticOnlyGatePassed": false
+        },
+        {
+          "query": "NBA playoff ticket prices",
+          "top": {
+            "id": "en-sqlite",
+            "score": 0.7512386300139602
+          },
+          "top1Margin": 0.009485951807562065,
+          "semanticOnlyGatePassed": false
+        },
+        {
+          "query": "medieval European painting restoration",
+          "top": {
+            "id": "obsidian",
+            "score": 0.7434636667294079
+          },
+          "top1Margin": 0.011491863627905441,
+          "semanticOnlyGatePassed": false
+        }
+      ],
+      "samples": [
+        {
+          "kind": "chinese",
+          "query": "一个小时的长任务如何分批沉淀知识",
+          "expected": "zh-batch",
+          "expectedRank": 1,
+          "top1Margin": 0.05031000590490964,
+          "semanticOnlyGatePassed": true,
+          "top3": [
+            {
+              "id": "zh-batch",
+              "score": 0.8702813484140829
+            },
+            {
+              "id": "zh-secret",
+              "score": 0.8199713425091733
+            },
+            {
+              "id": "error-busy",
+              "score": 0.7776493972826358
+            }
+          ]
+        },
+        {
+          "kind": "english",
+          "query": "durable SQLite concurrency configuration",
+          "expected": "en-sqlite",
+          "expectedRank": 1,
+          "top1Margin": 0.010664241984172818,
+          "semanticOnlyGatePassed": false,
+          "top3": [
+            {
+              "id": "en-sqlite",
+              "score": 0.8420197634594774
+            },
+            {
+              "id": "error-busy",
+              "score": 0.8313555214753046
+            },
+            {
+              "id": "git-worktree",
+              "score": 0.780670783056873
+            }
+          ]
+        },
+        {
+          "kind": "code",
+          "query": "avoid unsafe any in TypeScript",
+          "expected": "code-typescript",
+          "expectedRank": 1,
+          "top1Margin": 0.09007511922886202,
+          "semanticOnlyGatePassed": true,
+          "top3": [
+            {
+              "id": "code-typescript",
+              "score": 0.8862654972363584
+            },
+            {
+              "id": "test-command",
+              "score": 0.7961903780074964
+            },
+            {
+              "id": "en-sqlite",
+              "score": 0.7746271763101646
+            }
+          ]
+        },
+        {
+          "kind": "path",
+          "query": "where is .memstore-project located",
+          "expected": "path-marker",
+          "expectedRank": 1,
+          "top1Margin": 0.07921026205131876,
+          "semanticOnlyGatePassed": true,
+          "top3": [
+            {
+              "id": "path-marker",
+              "score": 0.8628724059681347
+            },
+            {
+              "id": "git-worktree",
+              "score": 0.783662143916816
+            },
+            {
+              "id": "en-sqlite",
+              "score": 0.7656818646121524
+            }
+          ]
+        },
+        {
+          "kind": "error",
+          "query": "database failed with SQLITE_BUSY",
+          "expected": "error-busy",
+          "expectedRank": 1,
+          "top1Margin": 0.07744638165680284,
+          "semanticOnlyGatePassed": true,
+          "top3": [
+            {
+              "id": "error-busy",
+              "score": 0.9105285106401877
+            },
+            {
+              "id": "en-sqlite",
+              "score": 0.8330821289833849
+            },
+            {
+              "id": "test-command",
+              "score": 0.7952927032802666
+            }
+          ]
+        },
+        {
+          "kind": "chinese",
+          "query": "哪些敏感凭据不能保存到记忆中",
+          "expected": "zh-secret",
+          "expectedRank": 1,
+          "top1Margin": 0.03996374955541193,
+          "semanticOnlyGatePassed": true,
+          "top3": [
+            {
+              "id": "zh-secret",
+              "score": 0.8885727544208389
+            },
+            {
+              "id": "zh-batch",
+              "score": 0.848609004865427
+            },
+            {
+              "id": "path-marker",
+              "score": 0.7778876627531124
+            }
+          ]
+        },
+        {
+          "kind": "git",
+          "query": "do worktrees share project knowledge",
+          "expected": "git-worktree",
+          "expectedRank": 1,
+          "top1Margin": 0.05191251905048688,
+          "semanticOnlyGatePassed": true,
+          "top3": [
+            {
+              "id": "git-worktree",
+              "score": 0.8461814662433719
+            },
+            {
+              "id": "path-marker",
+              "score": 0.794268947192885
+            },
+            {
+              "id": "test-command",
+              "score": 0.7643851823291546
+            }
+          ]
+        },
+        {
+          "kind": "obsidian",
+          "query": "human editable canonical markdown vault",
+          "expected": "obsidian",
+          "expectedRank": 1,
+          "top1Margin": 0.09421836258339256,
+          "semanticOnlyGatePassed": true,
+          "top3": [
+            {
+              "id": "obsidian",
+              "score": 0.8686878743269665
+            },
+            {
+              "id": "error-busy",
+              "score": 0.7744695117435739
+            },
+            {
+              "id": "en-sqlite",
+              "score": 0.7671755249268654
+            }
+          ]
+        },
+        {
+          "kind": "command",
+          "query": "verification commands before completion",
+          "expected": "test-command",
+          "expectedRank": 1,
+          "top1Margin": 0.07479703088999745,
+          "semanticOnlyGatePassed": true,
+          "top3": [
+            {
+              "id": "test-command",
+              "score": 0.8613192216436616
+            },
+            {
+              "id": "error-busy",
+              "score": 0.7865221907536641
+            },
+            {
+              "id": "en-sqlite",
+              "score": 0.7811312716431753
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

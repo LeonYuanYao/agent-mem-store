@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "candidateId": "gate5-shadow-v1",
+  "mode": "shadow",
+  "embedding": {
+    "modelIdentity": "onnx-community/multilingual-e5-base-ONNX",
+    "dtype": "q8",
+    "role": "quality",
+    "artifactSha256": "b17da479f058a2cd4dd677c0f50c7cb9ba87d274fe2a94a31c136ef465830cc2",
+    "dimensions": 768,
+    "normalization": "l2",
+    "adapterVersion": "transformers-4.2.0:q8:mean-l2:v1",
+    "queryPrefix": "query: ",
+    "documentPrefix": "passage: ",
+    "installation": {
+      "managedRuntimePath": "models/e5-base-q8",
+      "localFilesOnlyAtRuntime": true,
+      "rejectArtifactDrift": true
+    },
+    "semanticOnlyMinimumScore": 0.82,
+    "semanticOnlyMinimumTop1Margin": 0.02
+  },
+  "luna": {
+    "provider": "codex_cli",
+    "model": "gpt-5.6-luna",
+    "ephemeral": true,
+    "sandbox": "read-only",
+    "fallbackModel": null,
+    "timeoutMilliseconds": 120000,
+    "maximumConcurrency": 1,
+    "authentication": "named_codex_home_reference"
+  },
+  "retrieval": {
+    "sessionStart": {
+      "tokenLimit": 1200,
+      "alwaysTokenLimit": 600,
+      "itemLimit": 12,
+      "identityLimit": 4
+    },
+    "userPrompt": {
+      "targetTokens": 600,
+      "perTurnHardLimit": 1024,
+      "itemLimit": 6,
+      "maxProbableItems": 2,
+      "semanticDeadlineMilliseconds": 300
+    },
+    "contextEpoch": {
+      "softTargetTokens": 8192,
+      "hardLimitTokens": 12288,
+      "shadowSoftTargetComparisons": [4096, 8192, 12288, 16384],
+      "shadowProbableItemComparisons": [0, 1, 2, 3]
+    }
+  },
+  "automaticInjection": false,
+  "nativeMemory": {
+    "generateMemories": "preserve",
+    "useMemories": "preserve",
+    "import": false,
+    "delete": false
+  },
+  "hookEvents": [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PostToolUse",
+    "Stop",
+    "SessionEnd"
+  ],
+  "excludedHookEvents": ["PreToolUse"],
+  "hookContract": {
+    "provider": "codex",
+    "eventIdentity": "local_from_official_fields",
+    "receivedAt": "local_clock",
+    "captureOnly": true,
+    "failureVisibility": "systemMessage"
+  },
+  "skills": ["memstore-remember", "memstore-recall", "memstore-repair"],
+  "notifier": {
+    "source": "native/memstore-notifier",
+    "manualNotificationProofRequiredBeforeLiveInstall": true
+  },
+  "worker": {
+    "launchAgentLabel": "com.leonyuanyaoyao.memstore.worker",
+    "missedRunCatchUp": true
+  },
+  "governance": {
+    "weekly": "MONDAY 19:00",
+    "monthly": "FIRST_MONDAY 19:00"
+  },
+  "cutover": {
+    "generateMemories": false,
+    "useMemories": false,
+    "automaticInjection": true
+  }
+}

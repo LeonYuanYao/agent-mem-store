@@ -1,0 +1,4 @@
+interface:
+  display_name: "MemStore Remember"
+  short_description: "Save or distill durable coding knowledge"
+  default_prompt: "Use $memstore-remember to save or distill this knowledge into the correct MemStore scope."

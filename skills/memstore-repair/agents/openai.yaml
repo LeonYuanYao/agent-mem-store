@@ -1,0 +1,4 @@
+interface:
+  display_name: "MemStore Repair"
+  short_description: "Repair stored MemStore Bad Cases with two review gates"
+  default_prompt: "Use $memstore-repair to diagnose and repair the selected MemStore Bad Case through the reviewed foreground workflow."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "MemStore Recall"
+  short_description: "Search and deepen durable coding knowledge"
+  default_prompt: "Use $memstore-recall to search MemStore and progressively read the relevant durable knowledge."
