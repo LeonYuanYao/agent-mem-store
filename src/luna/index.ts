@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 
 import {
@@ -595,6 +595,9 @@ export class CodexLunaAdapter {
         ["PATH", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"]
           .flatMap((name) => process.env[name] === undefined ? [] : [[name, process.env[name]]])
       );
+      const lunaPath = process.env.PATH === undefined
+        ? dirname(process.execPath)
+        : `${dirname(process.execPath)}:${process.env.PATH}`;
       const result = await (this.#options.runProcess ?? runLunaProcess)({
         executable: this.#options.codexExecutable,
         arguments: [
@@ -642,6 +645,7 @@ export class CodexLunaAdapter {
         currentWorkingDirectory: isolatedDirectory,
         environment: {
           ...inheritedEnvironment,
+          PATH: lunaPath,
           CODEX_HOME: this.#options.codexHome
         },
         standardInput: JSON.stringify(prompt),

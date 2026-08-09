@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, expect, test, vi } from "vitest";
 
 import {
   CodexLunaAdapter,
@@ -12,10 +12,41 @@ import {
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       rm(directory, { recursive: true, force: true })
     )
+  );
+});
+
+test("the Luna adapter makes the running Node executable discoverable in a restricted Worker PATH", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-path-"));
+  temporaryDirectories.push(root);
+  const requests: LunaProcessRequest[] = [];
+  vi.stubEnv("PATH", "/opt/homebrew/bin:/usr/bin:/bin");
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "/opt/bin/codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      requests.push(request);
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({ schemaVersion: 1, kind: "distillation", candidates: [] }),
+        stderr: ""
+      });
+    }
+  });
+
+  await adapter.distillBatch({
+    operationId: "msop-path-contract",
+    scope: { kind: "global" },
+    evidence: []
+  });
+
+  expect(requests[0]?.environment.PATH).toBe(
+    `${dirname(process.execPath)}:/opt/homebrew/bin:/usr/bin:/bin`
   );
 });
 
