@@ -461,7 +461,42 @@ export class CodexLunaAdapter {
   public async consolidateSession(
     request: ConsolidateSessionRequest
   ): Promise<ConsolidationOutput> {
-    const output = await this.#invokeStructured(
+    const availableEvidenceIds = [
+      ...new Set(request.batchResults.flatMap((batch) => batch.evidenceIds))
+    ];
+    const aliasByEvidenceId = new Map(
+      availableEvidenceIds.map((evidenceId, index) => [evidenceId, `e${String(index + 1)}`])
+    );
+    const evidenceIdByAlias = new Map(
+      [...aliasByEvidenceId].map(([evidenceId, alias]) => [alias, evidenceId])
+    );
+    const alias = (evidenceId: string): string => {
+      const value = aliasByEvidenceId.get(evidenceId);
+      if (value === undefined) {
+        throw new LunaInvocationError(
+          "schema_invalid",
+          true,
+          "A structured Batch result contains an unavailable evidence identity."
+        );
+      }
+      return value;
+    };
+    const aliasedRequest = {
+      ...request,
+      batchResults: request.batchResults.map((batch) => ({
+        ...batch,
+        evidenceIds: batch.evidenceIds.map(alias),
+        candidates: batch.candidates.map((candidate) => ({
+          ...candidate,
+          evidenceIds: candidate.evidenceIds.map(alias),
+          importanceReasons: candidate.importanceReasons.map((reason) => ({
+            ...reason,
+            evidenceIds: reason.evidenceIds.map(alias)
+          }))
+        }))
+      }))
+    };
+    const aliasedOutput = await this.#invokeStructured(
       "consolidation-output.schema.json",
       consolidationOutputJsonSchema,
       {
@@ -470,23 +505,46 @@ export class CodexLunaAdapter {
         task: "consolidate_session_candidates",
         rules: [
           "Use only structured Batch results and their evidence identities.",
+          "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Do not infer from raw transcripts or execute commands.",
           "Preserve material conditions, exclusions, certainty, and negations.",
           "Return at most one importance reason for each tag; MemStore derives importance tags from these reasons.",
           "Deduplicate without broadening claims."
         ],
-        request
+        request: aliasedRequest
       },
       consolidationOutputSchema
     );
+    const restore = (evidenceAlias: string): string => {
+      const evidenceId = evidenceIdByAlias.get(evidenceAlias);
+      if (evidenceId === undefined) {
+        throw new LunaInvocationError(
+          "schema_invalid",
+          true,
+          "Luna structured output cites unavailable evidence."
+        );
+      }
+      return evidenceId;
+    };
+    const output = consolidationOutputSchema.parse({
+      ...aliasedOutput,
+      candidates: aliasedOutput.candidates.map((candidate) => ({
+        ...candidate,
+        evidenceIds: candidate.evidenceIds.map(restore),
+        importanceReasons: candidate.importanceReasons.map((reason) => ({
+          ...reason,
+          evidenceIds: reason.evidenceIds.map(restore)
+        }))
+      }))
+    });
     requireKnownEvidenceIds(
       output.candidates.flatMap((candidate) => candidate.evidenceIds),
-      request.batchResults.flatMap((batch) => batch.evidenceIds),
+      availableEvidenceIds,
       false
     );
     requireValidImportanceReasons(
       output.candidates,
-      request.batchResults.flatMap((batch) => batch.evidenceIds)
+      availableEvidenceIds
     );
     return output;
   }

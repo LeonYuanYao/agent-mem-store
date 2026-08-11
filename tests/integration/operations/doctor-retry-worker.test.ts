@@ -27,6 +27,7 @@ test("doctor diagnoses an initialized isolated installation without repairing it
   expect(result.checks.map((check) => [check.name, check.state])).toEqual([
     ["configuration", "ok"],
     ["sqlite_integrity", "ok"],
+    ["candidate_pipeline", "ok"],
     ["vault_catalog", "ok"]
   ]);
 });

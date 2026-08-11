@@ -132,6 +132,7 @@ interface PlannedTarget {
   readonly expectedSource?: string;
   readonly expectedSourceBase64?: string;
   readonly linkTarget?: string;
+  readonly writeMode?: number;
 }
 
 export interface ManagedIntegrationPreview {
@@ -143,6 +144,17 @@ export interface ManagedIntegrationPreview {
   readonly requestIdentity: string;
   readonly candidateSha256: string;
   readonly targets: readonly PlannedTarget[];
+  readonly explicitNoEffects: readonly string[];
+}
+
+export interface ManagedIntegrationUpgradePreview {
+  readonly schemaVersion: 1;
+  readonly state: "upgrade_preview";
+  readonly dryRun: true;
+  readonly installationId: string;
+  readonly requestIdentity: string;
+  readonly targets: readonly PlannedTarget[];
+  readonly observedDivergedTargetLabels: readonly string[];
   readonly explicitNoEffects: readonly string[];
 }
 
@@ -314,6 +326,20 @@ function requireInstallableBefore(path: string, before: PathIdentity): void {
   }
 }
 
+async function plannedCliTarget(request: ManagedRequest): Promise<PlannedTarget> {
+  const path = join(resolve(request.homeRoot), ".local", "bin", "memstore");
+  const source = `#!/bin/sh\nexec ${shellQuote(resolve(request.nodeExecutable))} ${shellQuote(join(resolve(request.repositoryRoot), "dist", "cli", "main.js"))} "$@"\n`;
+  return {
+    label: "memstore_cli",
+    path,
+    kind: "owned_file",
+    before: await identity(path),
+    expectedPost: { state: "file", sha256: sha256(source) },
+    expectedSource: source,
+    writeMode: 0o700
+  };
+}
+
 export async function previewManagedIntegration(request: ManagedRequest): Promise<ManagedIntegrationPreview> {
   z.iso.datetime().parse(request.installedAt);
   const { candidate, sha256: candidateSha256 } = await loadCandidate();
@@ -427,7 +453,8 @@ export async function previewManagedIntegration(request: ManagedRequest): Promis
       before: await identity(launchPath),
       expectedPost: { state: "file", sha256: sha256(launchSource) },
       expectedSource: launchSource
-    }
+    },
+    await plannedCliTarget(request)
   ];
   for (const skill of candidate.skills) {
     const path = join(resolve(request.homeRoot), ".agents", "skills", skill);
@@ -495,6 +522,14 @@ async function preflightTargets(targets: readonly PlannedTarget[], expected: "be
   }
 }
 
+async function divergedTargetLabels(targets: readonly PlannedTarget[]): Promise<readonly string[]> {
+  const labels: string[] = [];
+  for (const target of targets) {
+    if (!sameIdentity(await identity(target.path), target.expectedPost)) labels.push(target.label);
+  }
+  return labels;
+}
+
 async function writeManifest(runtimeRoot: string, manifest: OwnershipManifest): Promise<void> {
   const path = join(resolve(runtimeRoot), "install", "ownership-manifest.json");
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -540,7 +575,7 @@ async function applyTarget(target: PlannedTarget): Promise<void> {
     );
     return;
   }
-  await writeFileAtomically(target.path, source, 0o600);
+  await writeFileAtomically(target.path, source, target.writeMode ?? 0o600);
 }
 
 export async function applyManagedIntegration(
@@ -607,6 +642,81 @@ export async function repairManagedIntegration(request: ManagedRequest): Promise
   await preflightTargets(manifest.targets, "expectedPost");
   return {
     state: repairable.length === 0 ? "healthy" : "repaired",
+    installationId: manifest.installationId
+  };
+}
+
+export async function previewManagedIntegrationUpgrade(
+  request: ManagedRequest
+): Promise<ManagedIntegrationUpgradePreview> {
+  const manifest = await readManifest(request.runtimeRoot);
+  if (manifest.state !== "installed") throw new Error("Managed integration is not installed.");
+  if (manifest.requestIdentity !== requestIdentity(request)) {
+    throw new Error("Managed integration request diverged from its ownership manifest.");
+  }
+  const observedDivergedTargetLabels = await divergedTargetLabels(manifest.targets);
+  if (manifest.targets.some((target) => target.label === "memstore_cli")) {
+    return {
+      schemaVersion: 1,
+      state: "upgrade_preview",
+      dryRun: true,
+      installationId: manifest.installationId,
+      requestIdentity: manifest.requestIdentity,
+      targets: [],
+      observedDivergedTargetLabels,
+      explicitNoEffects: ["Installation already owns the MemStore CLI"]
+    };
+  }
+  const cli = await plannedCliTarget(request);
+  requireInstallableBefore(cli.path, cli.before);
+  return {
+    schemaVersion: 1,
+    state: "upgrade_preview",
+    dryRun: true,
+    installationId: manifest.installationId,
+    requestIdentity: manifest.requestIdentity,
+    targets: [cli],
+    observedDivergedTargetLabels,
+    explicitNoEffects: [
+      "No Codex config or Hook change",
+      "No Vault or Runtime data change",
+      "No worker restart"
+    ]
+  };
+}
+
+export async function applyManagedIntegrationUpgrade(
+  request: ManagedRequest,
+  preview: ManagedIntegrationUpgradePreview
+): Promise<{ readonly state: "healthy" | "upgraded"; readonly installationId: string }> {
+  if (preview.requestIdentity !== requestIdentity(request)) {
+    throw new Error("Managed upgrade preview does not match this request.");
+  }
+  const manifest = await readManifest(request.runtimeRoot);
+  if (manifest.state !== "installed" || manifest.installationId !== preview.installationId) {
+    throw new Error("Managed installation changed after upgrade preview.");
+  }
+  const fresh = await previewManagedIntegrationUpgrade(request);
+  if (
+    JSON.stringify(fresh.targets) !== JSON.stringify(preview.targets) ||
+    JSON.stringify(fresh.observedDivergedTargetLabels) !==
+      JSON.stringify(preview.observedDivergedTargetLabels)
+  ) {
+    throw new Error("Managed upgrade inputs diverged after preview; generate a fresh preview.");
+  }
+  await preflightTargets(preview.targets, "before");
+  for (const target of preview.targets) {
+    await applyTarget(target);
+  }
+  await preflightTargets(preview.targets, "expectedPost");
+  if (preview.targets.length > 0) {
+    await writeManifest(request.runtimeRoot, {
+      ...manifest,
+      targets: [...manifest.targets, ...preview.targets]
+    });
+  }
+  return {
+    state: preview.targets.length === 0 ? "healthy" : "upgraded",
     installationId: manifest.installationId
   };
 }

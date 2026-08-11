@@ -16,6 +16,7 @@ import {
 } from "../retrieval/index.js";
 import { runNextShadowEvaluation } from "../retrieval/shadow-worker.js";
 import {
+  prepareNextCandidateEvaluation,
   runNextCandidateAssessment,
   type CandidateAssessmentAdapter
 } from "./governance.js";
@@ -28,6 +29,8 @@ import {
   runNextLunaWork,
   type LunaWorkerAdapter
 } from "./distillation.js";
+import { captureAbandonedSessionEnd } from "./session-catchup.js";
+import { runNextCandidateMaintenance } from "./candidate-maintenance.js";
 
 export interface WorkerAdapters {
   readonly luna?: LunaWorkerAdapter & CandidateAssessmentAdapter & HumanConflictAssessmentAdapter;
@@ -74,6 +77,14 @@ export async function runWorkerOnce(request: {
 
   const activities: string[] = [];
   let shouldRefreshReview = false;
+  const sessionCatchUp = await captureAbandonedSessionEnd({
+    runtimeRoot: request.runtimeRoot,
+    now,
+    inactivityMilliseconds: 24 * 60 * 60 * 1_000
+  });
+  if (sessionCatchUp.state !== "empty") {
+    activities.push("session-end:catch-up");
+  }
   if (request.adapters?.embedding !== undefined) {
     if (await retrievalIndexNeedsRebuild({
       runtimeRoot: request.runtimeRoot,
@@ -99,7 +110,8 @@ export async function runWorkerOnce(request: {
     const prepared = await prepareNextDistillationBatch({
       runtimeRoot: request.runtimeRoot,
       maximumEvents: 64,
-      preparedAt: now
+      preparedAt: now,
+      minimumEventAgeMilliseconds: 30_000
     });
     if (prepared.state !== "empty") {
       activities.push(`distillation:${prepared.state}`);
@@ -126,6 +138,17 @@ export async function runWorkerOnce(request: {
       activities.push(`human-conflict:${conflict.state}`);
       shouldRefreshReview = true;
     }
+  }
+  const candidatePreparation = await prepareNextCandidateEvaluation({
+    runtimeRoot: request.runtimeRoot,
+    vaultRoot: request.vaultRoot,
+    now
+  });
+  if (candidatePreparation.state !== "empty") {
+    activities.push(`candidate:${candidatePreparation.state}`);
+    shouldRefreshReview = true;
+  }
+  if (request.adapters?.luna !== undefined) {
     const candidate = await runNextCandidateAssessment({
       runtimeRoot: request.runtimeRoot,
       vaultRoot: request.vaultRoot,
@@ -154,6 +177,16 @@ export async function runWorkerOnce(request: {
     });
     if (governance.state !== "idle") activities.push(`governance:${governance.state}`);
     if (!["idle", "busy", "blocked", "yielded"].includes(governance.state)) {
+      shouldRefreshReview = true;
+    }
+  }
+  if (scheduleExists) {
+    const maintenance = await runNextCandidateMaintenance({
+      runtimeRoot: request.runtimeRoot,
+      now
+    });
+    if (maintenance.state !== "empty") {
+      activities.push("candidate-maintenance:completed");
       shouldRefreshReview = true;
     }
   }

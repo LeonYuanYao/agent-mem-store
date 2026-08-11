@@ -1,16 +1,21 @@
+import { execFile } from "node:child_process";
 import { lstat, mkdtemp, mkdir, readFile, readlink, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, expect, test } from "vitest";
 
 import {
   applyManagedIntegration,
+  applyManagedIntegrationUpgrade,
   previewManagedIntegration,
+  previewManagedIntegrationUpgrade,
   repairManagedIntegration,
   uninstallManagedIntegration
 } from "../../../src/integration/managed.js";
 
 const roots: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -29,6 +34,10 @@ async function fixture() {
   await mkdir(join(repositoryRoot, "skills", "memstore-remember"), { recursive: true });
   await mkdir(join(repositoryRoot, "skills", "memstore-recall"), { recursive: true });
   await mkdir(join(repositoryRoot, "skills", "memstore-repair"), { recursive: true });
+  await writeFile(
+    join(repositoryRoot, "dist", "cli", "main.js"),
+    "process.stdout.write(JSON.stringify(process.argv.slice(2)));\n"
+  );
   const notifierSource = join(root, "artifacts", "MemStore Notifier.app");
   await mkdir(join(notifierSource, "Contents", "MacOS"), { recursive: true });
   await mkdir(join(notifierSource, "Contents", "_CodeSignature"), { recursive: true });
@@ -109,6 +118,9 @@ test("preview is mutation-free and install, repair, and uninstall preserve unrel
   expect(installedHooks.hooks).not.toHaveProperty("PreToolUse.1");
   expect(await readlink(join(data.homeRoot, ".agents", "skills", "memstore-repair")))
     .toBe(join(data.repositoryRoot, "skills", "memstore-repair"));
+  const cliPath = join(data.homeRoot, ".local", "bin", "memstore");
+  await expect(execFileAsync(cliPath, ["probe"], { encoding: "utf8" }))
+    .resolves.toMatchObject({ stdout: "[\"probe\"]" });
   const launchAgent = await readFile(
     join(data.homeRoot, "Library", "LaunchAgents", "com.leonyuanyaoyao.memstore.worker.plist"),
     "utf8"
@@ -148,6 +160,47 @@ test("preview is mutation-free and install, repair, and uninstall preserve unrel
   expect((await lstat(data.hooksPath)).isSymbolicLink()).toBe(true);
   await expect(lstat(join(data.homeRoot, ".agents", "skills", "memstore-repair")))
     .rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(cliPath)).rejects.toMatchObject({ code: "ENOENT" });
   await expect(lstat(data.vaultRoot)).resolves.toBeDefined();
   await expect(lstat(data.runtimeRoot)).resolves.toBeDefined();
+});
+
+test("upgrade safely adds the CLI to a legacy managed installation", async () => {
+  const data = await fixture();
+  const request = {
+    ...data,
+    lunaCodexHome: join(data.homeRoot, ".codex"),
+    codexExecutable: "/opt/homebrew/bin/codex",
+    embeddingModelDirectory: join(data.runtimeRoot, "models", "e5-base-q8"),
+    installedAt: "2026-08-08T12:00:00.000Z"
+  };
+  await applyManagedIntegration(request, await previewManagedIntegration(request));
+
+  const manifestPath = join(data.runtimeRoot, "install", "ownership-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    targets: Array<{ label: string }>;
+  };
+  manifest.targets = manifest.targets.filter((target) => target.label !== "memstore_cli");
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const cliPath = join(data.homeRoot, ".local", "bin", "memstore");
+  await unlink(cliPath);
+  const userEditedConfig = `${await readFile(data.configPath, "utf8")}\n# user edit after installation\n`;
+  await writeFile(data.configPath, userEditedConfig);
+
+  const preview = await previewManagedIntegrationUpgrade(request);
+  expect(preview).toMatchObject({ state: "upgrade_preview", dryRun: true });
+  expect(preview.targets.map((target) => target.label)).toEqual(["memstore_cli"]);
+  expect(preview.observedDivergedTargetLabels).toEqual(["codex_config"]);
+  await expect(lstat(cliPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+  await expect(applyManagedIntegrationUpgrade(request, preview)).resolves.toMatchObject({
+    state: "upgraded"
+  });
+  await expect(execFileAsync(cliPath, ["probe"], { encoding: "utf8" }))
+    .resolves.toMatchObject({ stdout: "[\"probe\"]" });
+  expect(await readFile(data.configPath, "utf8")).toBe(userEditedConfig);
+  const upgraded = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    targets: Array<{ label: string }>;
+  };
+  expect(upgraded.targets.filter((target) => target.label === "memstore_cli")).toHaveLength(1);
 });

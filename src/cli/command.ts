@@ -53,7 +53,9 @@ import { CodexLunaAdapter } from "../luna/index.js";
 import { runCodexHook } from "./codex-hook.js";
 import {
   applyManagedIntegration,
+  applyManagedIntegrationUpgrade,
   previewManagedIntegration,
+  previewManagedIntegrationUpgrade,
   rehearseNativeMemoryCutover,
   repairManagedIntegration,
   uninstallManagedIntegration
@@ -183,6 +185,12 @@ async function runIntegration(arguments_: readonly string[]): Promise<unknown> {
     const preview = await previewManagedIntegration(request);
     return applyManagedIntegration(request, preview);
   }
+  if (action === "upgrade") {
+    const preview = await previewManagedIntegrationUpgrade(request);
+    return parsed.values.preview
+      ? preview
+      : applyManagedIntegrationUpgrade(request, preview);
+  }
   if (action === "repair") return repairManagedIntegration(request);
   if (action === "uninstall") {
     if (parsed.values.preview) {
@@ -209,7 +217,7 @@ async function runIntegration(arguments_: readonly string[]): Promise<unknown> {
       rehearsedAt: new Date().toISOString()
     });
   }
-  throw new MemStoreCommandError("unknown_command", "Use integration prepare-model, preview, install, repair, uninstall, or rehearse-cutover.");
+  throw new MemStoreCommandError("unknown_command", "Use integration prepare-model, preview, install, upgrade, repair, uninstall, or rehearse-cutover.");
 }
 
 async function readJsonFile(path: string | undefined): Promise<Record<string, unknown>> {
@@ -441,7 +449,12 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
     if (action === "status") {
       return {
         command: "shadow.status",
-        result: await inspectOfficialShadowWindow({ runtimeRoot: location.runtimeRoot, now }),
+        result: await inspectOfficialShadowWindow({
+          runtimeRoot: location.runtimeRoot,
+          repositoryRoot: resolve(parsed.values.repo ?? process.cwd()),
+          homeRoot: resolve(parsed.values.home ?? homedir()),
+          now
+        }),
         json: parsed.values.json
       };
     }

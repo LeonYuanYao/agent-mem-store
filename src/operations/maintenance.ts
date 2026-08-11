@@ -88,6 +88,33 @@ export async function inspectDoctor(request: {
       state: integrity === "ok" ? "ok" : "error",
       detail: integrity
     });
+    const candidates = database.prepare(
+      `SELECT COUNT(*) AS waiting_count,
+              SUM(CASE WHEN successful_evaluation_at IS NULL THEN 1 ELSE 0 END)
+                AS unevaluated_count,
+              MIN(created_at) AS oldest_waiting_at
+       FROM memory_candidates WHERE state = 'waiting'`
+    ).get();
+    const semantic = database.prepare(
+      `SELECT COUNT(*) AS count FROM luna_operations
+       WHERE operation_kind = 'semantic_assessment'
+         AND state IN ('pending', 'processing', 'retrying', 'blocked')`
+    ).get();
+    const waitingCount = z.number().int().nonnegative().parse(candidates?.waiting_count);
+    const unevaluatedCount = z.number().int().nonnegative().parse(candidates?.unevaluated_count ?? 0);
+    const semanticCount = z.number().int().nonnegative().parse(semantic?.count);
+    const oldestWaitingAt = typeof candidates?.oldest_waiting_at === "string"
+      ? candidates.oldest_waiting_at
+      : null;
+    const stale = oldestWaitingAt !== null &&
+      Date.now() - Date.parse(oldestWaitingAt) >= 15 * 60 * 1_000;
+    checks.push({
+      name: "candidate_pipeline",
+      state: stale ? "warning" : "ok",
+      detail: waitingCount === 0
+        ? "No Candidate is waiting."
+        : `${String(waitingCount)} Candidates are waiting; ${String(unevaluatedCount)} are unevaluated and ${String(semanticCount)} semantic assessments are active. Oldest: ${oldestWaitingAt ?? "unknown"}.`
+    });
     if (request.deep) checks.push(await inspectCatalogFiles(database, vaultRoot));
   } catch (error) {
     checks.push({

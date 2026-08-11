@@ -29,6 +29,76 @@ export interface CandidateAssessmentAdapter {
   ): Promise<SemanticAssessmentOutput>;
 }
 
+export type PrepareCandidateEvaluationResult =
+  | { readonly state: "empty" }
+  | {
+      readonly state: "evaluated";
+      readonly candidateId: string;
+      readonly evaluationState: "promoted" | "wait" | "rejected" | "conflict";
+    }
+  | {
+      readonly state: "assessment_queued";
+      readonly candidateId: string;
+      readonly operationId: string;
+    };
+
+export async function prepareNextCandidateEvaluation(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly now: string;
+}): Promise<PrepareCandidateEvaluationResult> {
+  const now = z.iso.datetime().parse(request.now);
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  let candidateId: string | undefined;
+  try {
+    const candidate = database.prepare(
+      `SELECT candidate.candidate_id
+       FROM memory_candidates AS candidate
+       WHERE candidate.state = 'waiting'
+         AND candidate.promotion_generation IS NULL
+         AND candidate.successful_evaluation_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM luna_operations AS operation
+           WHERE operation.operation_kind = 'semantic_assessment'
+             AND operation.state IN ('pending', 'processing', 'retrying', 'blocked')
+             AND json_extract(operation.payload_json, '$.candidateId') = candidate.candidate_id
+             AND json_extract(operation.payload_json, '$.evidenceGeneration') = candidate.evidence_generation
+         )
+       ORDER BY candidate.updated_at, candidate.candidate_id LIMIT 1`
+    ).get();
+    if (typeof candidate?.candidate_id === "string") {
+      candidateId = candidate.candidate_id;
+    }
+  } finally {
+    database.close();
+  }
+  if (candidateId === undefined) return { state: "empty" };
+
+  const evaluation = await evaluateCandidate({
+    runtimeRoot: request.runtimeRoot,
+    vaultRoot: request.vaultRoot,
+    candidateId,
+    evaluatedAt: now
+  });
+  if (evaluation.state !== "wait" || evaluation.reason !== "semantic_assessment_required") {
+    return {
+      state: "evaluated",
+      candidateId,
+      evaluationState: evaluation.state
+    };
+  }
+  const operation = await enqueueCandidateAssessment({
+    runtimeRoot: request.runtimeRoot,
+    candidateId,
+    createdAt: now
+  });
+  return {
+    state: "assessment_queued",
+    candidateId,
+    operationId: operation.operationId
+  };
+}
+
 export async function enqueueCandidateAssessment(request: {
   readonly runtimeRoot: string;
   readonly candidateId: string;

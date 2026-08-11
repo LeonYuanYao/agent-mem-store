@@ -94,6 +94,11 @@ const migrations: readonly Migration[] = [
     version: 17,
     name: "official_shadow_window",
     path: new URL("../../migrations/0017-official-shadow-window.sql", import.meta.url)
+  },
+  {
+    version: 18,
+    name: "candidate_maintenance",
+    path: new URL("../../migrations/0018-candidate-maintenance.sql", import.meta.url)
   }
 ];
 

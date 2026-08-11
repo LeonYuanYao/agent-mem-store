@@ -17,7 +17,6 @@ import {
 } from "../../src/retrieval/packs.js";
 import { inspectReviewInbox } from "../../src/review/inbox.js";
 import { writeCanonicalMemory } from "../../src/vault/index.js";
-import { enqueueCandidateAssessment } from "../../src/worker/governance.js";
 import { runWorkerOnce, type WorkerAdapters } from "../../src/worker/main.js";
 import { makeCanonicalMemory } from "../helpers/canonical-memory.js";
 
@@ -173,19 +172,6 @@ test("the uninstalled Shadow loop reaches review without injecting or touching g
   })).resolves.toMatchObject({ state: "worked" });
   const candidates = await listSessionCandidates(runtimeRoot, "gate4-session");
   expect(candidates).toHaveLength(1);
-  await enqueueCandidateAssessment({
-    runtimeRoot,
-    candidateId: candidates[0]?.candidateId ?? "missing",
-    createdAt: "2026-08-09T01:01:01.000Z"
-  });
-  await expect(runWorkerOnce({
-    runtimeRoot,
-    vaultRoot,
-    workerId: "gate4-worker",
-    now: "2026-08-09T01:02:00.000Z",
-    workerStartedAt: "2026-08-09T01:00:00.000Z",
-    adapters
-  })).resolves.toMatchObject({ state: "worked" });
   expect(await listSessionCandidates(runtimeRoot, "gate4-session")).toEqual([
     { candidateId: candidates[0]?.candidateId, state: "promoted" }
   ]);

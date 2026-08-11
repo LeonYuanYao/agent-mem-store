@@ -244,3 +244,68 @@ test("recovery requires a successful probe and a real queued Luna operation", as
     lastSuccessAt: "2026-08-07T06:10:04.000Z"
   });
 });
+
+test("two successful real operations recover health without a separate model call", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-automatic-probe-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const first = await enqueueLunaOperation({
+    runtimeRoot,
+    kind: "distill_batch",
+    idempotencyKey: "automatic-probe:first",
+    payload: { batchId: "first" },
+    createdAt: "2026-08-07T06:00:00.000Z"
+  });
+  await enqueueLunaOperation({
+    runtimeRoot,
+    kind: "distill_batch",
+    idempotencyKey: "automatic-probe:second",
+    payload: { batchId: "second" },
+    createdAt: "2026-08-07T06:00:01.000Z"
+  });
+  const failedClaim = await claimLunaOperation({
+    runtimeRoot, workerId: "worker-1", now: "2026-08-07T06:00:02.000Z", leaseSeconds: 60
+  });
+  if (failedClaim.state !== "claimed") throw new Error("Expected failed claim.");
+  await failLunaOperation({
+    runtimeRoot,
+    operationId: first.operationId,
+    leaseToken: failedClaim.leaseToken,
+    failedAt: "2026-08-07T06:00:03.000Z",
+    error: new LunaInvocationError("invalid_model", false, "model missing")
+  });
+  await retryBlockedLunaOperations({
+    runtimeRoot,
+    requestedAt: "2026-08-07T06:00:04.000Z"
+  });
+
+  const probeClaim = await claimLunaOperation({
+    runtimeRoot, workerId: "worker-1", now: "2026-08-07T06:00:05.000Z", leaseSeconds: 60
+  });
+  if (probeClaim.state !== "claimed") throw new Error("Expected probe claim.");
+  await completeLunaOperation({
+    runtimeRoot,
+    operationId: probeClaim.operation.operationId,
+    leaseToken: probeClaim.leaseToken,
+    completedAt: "2026-08-07T06:00:06.000Z"
+  });
+  await expect(inspectLunaHealth({
+    runtimeRoot,
+    now: "2026-08-07T06:00:07.000Z"
+  })).resolves.toMatchObject({ state: "unavailable", lastSuccessAt: "2026-08-07T06:00:06.000Z" });
+
+  const recoveryClaim = await claimLunaOperation({
+    runtimeRoot, workerId: "worker-1", now: "2026-08-07T06:00:08.000Z", leaseSeconds: 60
+  });
+  if (recoveryClaim.state !== "claimed") throw new Error("Expected recovery claim.");
+  await completeLunaOperation({
+    runtimeRoot,
+    operationId: recoveryClaim.operation.operationId,
+    leaseToken: recoveryClaim.leaseToken,
+    completedAt: "2026-08-07T06:00:09.000Z"
+  });
+  await expect(inspectLunaHealth({
+    runtimeRoot,
+    now: "2026-08-07T06:00:10.000Z"
+  })).resolves.toMatchObject({ state: "healthy", reasonCategory: null, consecutiveFailures: 0 });
+});

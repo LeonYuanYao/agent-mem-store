@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -41,11 +41,20 @@ test("an official Shadow window requires a completed real-Hook probe and records
   const runtimeRoot = join(root, "runtime");
   const vaultRoot = join(root, "vault");
   const projectRoot = join(root, "project");
+  const repositoryRoot = join(root, "repository");
   await Promise.all([
     mkdir(join(homeRoot, ".codex"), { recursive: true }),
     mkdir(join(runtimeRoot, "install"), { recursive: true }),
-    mkdir(projectRoot, { recursive: true })
+    mkdir(projectRoot, { recursive: true }),
+    mkdir(join(repositoryRoot, "config"), { recursive: true }),
+    mkdir(join(repositoryRoot, "dist", "cli"), { recursive: true })
   ]);
+  await writeFile(
+    join(repositoryRoot, "config", "gate5-shadow-v1.json"),
+    await readFile(join(process.cwd(), "config", "gate5-shadow-v1.json"), "utf8")
+  );
+  const programPath = join(repositoryRoot, "dist", "cli", "main.js");
+  await writeFile(programPath, "export const fixture = true;\n");
   await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
   await writeFile(join(projectRoot, ".memstore-project"), JSON.stringify({
     schema_version: 1,
@@ -95,7 +104,7 @@ test("an official Shadow window requires a completed real-Hook probe and records
 
   const request = {
     runtimeRoot,
-    repositoryRoot: process.cwd(),
+    repositoryRoot,
     homeRoot,
     probeEventId: captured.eventId,
     startedAt: "2026-08-09T03:00:02.000Z"
@@ -110,8 +119,14 @@ test("an official Shadow window requires a completed real-Hook probe and records
     dryRun: false,
     minimumEndAt: "2026-08-16T03:00:02.000Z"
   });
+  await expect(startOfficialShadowWindow({
+    ...request,
+    startedAt: "2026-08-09T03:00:03.000Z"
+  })).rejects.toThrow("An official Shadow window is already active.");
   await expect(inspectOfficialShadowWindow({
     runtimeRoot,
+    repositoryRoot,
+    homeRoot,
     now: "2026-08-16T03:00:02.000Z"
   })).resolves.toMatchObject({
     state: "active",
@@ -121,5 +136,52 @@ test("an official Shadow window requires a completed real-Hook probe and records
     coverage: {
       completed_evaluations: { baseline: 1, current: 1, delta: 0 }
     }
+  });
+  await writeFile(programPath, "export const fixture = false;\n");
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:02.500Z"
+  })).resolves.toMatchObject({
+    state: "invalidated",
+    gate6ReviewEligible: false,
+    invalidationReasons: ["program_changed"]
+  });
+  await writeFile(programPath, "export const fixture = true;\n");
+  await writeFile(join(homeRoot, ".codex", "config.toml"), [
+    "[memories]",
+    "generate_memories = true",
+    "use_memories = true",
+    "# user changed another Codex setting during Shadow",
+    ""
+  ].join("\n"));
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:03.000Z"
+  })).resolves.toMatchObject({
+    state: "invalidated",
+    gate6ReviewEligible: false,
+    invalidationReasons: ["codex_config_changed"]
+  });
+  await expect(startOfficialShadowWindow({
+    ...request,
+    startedAt: "2026-08-16T03:00:04.000Z"
+  })).resolves.toMatchObject({
+    state: "active",
+    dryRun: false,
+    minimumEndAt: "2026-08-23T03:00:04.000Z"
+  });
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:05.000Z"
+  })).resolves.toMatchObject({
+    state: "active",
+    invalidationReasons: [],
+    gate6ReviewEligible: false
   });
 });

@@ -53,8 +53,15 @@ export async function prepareNextDistillationBatch(request: {
   readonly runtimeRoot: string;
   readonly maximumEvents: number;
   readonly preparedAt: string;
+  readonly minimumEventAgeMilliseconds?: number;
 }): Promise<PrepareDistillationBatchResult> {
   const preparedAt = z.iso.datetime().parse(request.preparedAt);
+  const minimumEventAgeMilliseconds = z.number().int().min(0).max(86_400_000).parse(
+    request.minimumEventAgeMilliseconds ?? 0
+  );
+  const eligibleBefore = new Date(
+    Date.parse(preparedAt) - minimumEventAgeMilliseconds
+  ).toISOString();
   if (
     !Number.isInteger(request.maximumEvents) ||
     request.maximumEvents < 1 ||
@@ -75,9 +82,20 @@ export async function prepareNextDistillationBatch(request: {
                SELECT 1 FROM distillation_batch_events AS assigned
                WHERE assigned.event_id = capture.event_id
              )
+             AND (
+               capture.event_kind = 'SessionEnd'
+               OR capture.occurred_at <= ?
+               OR EXISTS (
+                 SELECT 1 FROM capture_events AS ending
+                 WHERE ending.state = 'pending'
+                   AND ending.event_kind = 'SessionEnd'
+                   AND COALESCE(ending.session_id, 'event:' || ending.event_id) =
+                     COALESCE(capture.session_id, 'event:' || capture.event_id)
+               )
+             )
            ORDER BY capture.created_at ASC LIMIT 1`
         )
-        .get();
+        .get(eligibleBefore);
       if (first === undefined) {
         database.exec("COMMIT");
         return { state: "empty" };
@@ -87,6 +105,14 @@ export async function prepareNextDistillationBatch(request: {
         typeof first.session_id === "string"
           ? first.session_id
           : `event:${firstEventId}`;
+      const flushSession = database
+        .prepare(
+          `SELECT 1 AS present FROM capture_events
+           WHERE state = 'pending' AND event_kind = 'SessionEnd'
+             AND COALESCE(session_id, 'event:' || event_id) = ?
+           LIMIT 1`
+        )
+        .get(sessionId) !== undefined;
       const rows = database
         .prepare(
           `SELECT capture.event_id, capture.project_id
@@ -97,9 +123,10 @@ export async function prepareNextDistillationBatch(request: {
                SELECT 1 FROM distillation_batch_events AS assigned
                WHERE assigned.event_id = capture.event_id
              )
+             AND (? = 1 OR capture.occurred_at <= ?)
            ORDER BY capture.created_at ASC LIMIT ?`
         )
-        .all(sessionId, request.maximumEvents);
+        .all(sessionId, flushSession ? 1 : 0, eligibleBefore, request.maximumEvents);
       if (rows.length === 0) throw new Error("Distillation batch selection failed.");
       const projectIds = new Set(
         rows
@@ -246,7 +273,11 @@ async function ingestDistilledCandidates(request: {
   if (scope === undefined) return;
   const evidenceById = new Map(request.evidence.map((item) => [item.evidenceId, item]));
   for (const distilled of request.output.candidates) {
-    const evidence = distilled.evidenceIds.flatMap((evidenceId) => {
+    const referencedEvidenceIds = [...new Set([
+      ...distilled.evidenceIds,
+      ...distilled.importanceReasons.flatMap((reason) => reason.evidenceIds)
+    ])];
+    const evidence = referencedEvidenceIds.flatMap((evidenceId) => {
       const item = evidenceById.get(evidenceId);
       if (item === undefined || item.occurredAt === undefined) return [];
       return [{
@@ -611,7 +642,10 @@ export async function runNextLunaWork(request: {
         return {
           batchId: z.string().parse(row.batch_id),
           candidates: output.candidates,
-          evidenceIds: [...new Set(output.candidates.flatMap((item) => item.evidenceIds))]
+          evidenceIds: [...new Set(output.candidates.flatMap((item) => [
+            ...item.evidenceIds,
+            ...item.importanceReasons.flatMap((reason) => reason.evidenceIds)
+          ]))]
         };
       });
       const output = await request.adapter.consolidateSession({

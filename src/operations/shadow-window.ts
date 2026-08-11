@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 
@@ -8,6 +8,30 @@ import { approvedShadowEmbeddingProfile } from "../retrieval/shadow-profile.js";
 
 function sha256(source: string): string {
   return createHash("sha256").update(source).digest("hex");
+}
+
+async function programSha256(repositoryRoot: string): Promise<string> {
+  const distRoot = join(resolve(repositoryRoot), "dist");
+  const files: string[] = [];
+  async function visit(directory: string, relativeDirectory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const relative = join(relativeDirectory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(join(directory, entry.name), relative);
+      } else if (entry.isFile() && entry.name.endsWith(".js")) {
+        files.push(relative);
+      }
+    }
+  }
+  await visit(distRoot, "");
+  files.sort((left, right) => left.localeCompare(right, "en-US"));
+  if (files.length === 0) throw new Error("The MemStore dist directory has no executable JavaScript.");
+  const hash = createHash("sha256");
+  for (const file of files) {
+    hash.update(file).update("\0").update(await readFile(join(distRoot, file))).update("\0");
+  }
+  return hash.digest("hex");
 }
 
 function memoryFlag(source: string, key: "generate_memories" | "use_memories"): boolean {
@@ -36,11 +60,12 @@ async function validatedBaseline(request: {
   readonly baseline: Record<string, unknown>;
 }> {
   const startedAt = z.iso.datetime().parse(request.startedAt);
-  const [candidateSource, manifestSource, configSource, hooksSource] = await Promise.all([
+  const [candidateSource, manifestSource, configSource, hooksSource, programSha] = await Promise.all([
     readFile(join(resolve(request.repositoryRoot), "config", "gate5-shadow-v1.json"), "utf8"),
     readFile(join(resolve(request.runtimeRoot), "install", "ownership-manifest.json"), "utf8"),
     readFile(join(resolve(request.homeRoot), ".codex", "config.toml"), "utf8"),
-    readFile(join(resolve(request.homeRoot), ".codex", "hooks.json"), "utf8")
+    readFile(join(resolve(request.homeRoot), ".codex", "hooks.json"), "utf8"),
+    programSha256(request.repositoryRoot)
   ]);
   const candidate = z.looseObject({
     candidateId: z.literal("gate5-shadow-v1"),
@@ -100,6 +125,7 @@ async function validatedBaseline(request: {
       schemaVersion: 1,
       configSha256: sha256(configSource),
       hooksSha256: sha256(hooksSource),
+      programSha256: programSha,
       nativeMemory: { generateMemories, useMemories },
       probe: {
         eventId: request.probeEventId,
@@ -150,9 +176,26 @@ export async function startOfficialShadowWindow(request: {
       baselineSha256
     };
   }
+  const existing = await inspectOfficialShadowWindow({
+    runtimeRoot: request.runtimeRoot,
+    repositoryRoot: request.repositoryRoot,
+    homeRoot: request.homeRoot,
+    now: request.startedAt
+  });
+  if (existing?.state === "active") {
+    throw new Error("An official Shadow window is already active.");
+  }
   const windowId = `msshadow_${randomUUID()}`;
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
+    if (existing?.state === "invalidated") {
+      const reasons = z.array(z.string()).parse(existing.invalidationReasons);
+      database.prepare(
+        `UPDATE official_shadow_windows
+         SET state = 'invalidated', ended_at = ?, invalidation_reason = ?
+         WHERE state = 'active'`
+      ).run(request.startedAt, reasons.join(","));
+    }
     database.prepare(
       `INSERT INTO official_shadow_windows(
          window_id, candidate_id, candidate_sha256, installation_id,
@@ -186,6 +229,8 @@ export async function startOfficialShadowWindow(request: {
 
 export async function inspectOfficialShadowWindow(request: {
   readonly runtimeRoot: string;
+  readonly repositoryRoot: string;
+  readonly homeRoot: string;
   readonly now: string;
 }): Promise<Record<string, unknown> | undefined> {
   const now = z.iso.datetime().parse(request.now);
@@ -196,7 +241,25 @@ export async function inspectOfficialShadowWindow(request: {
        ORDER BY started_at DESC LIMIT 1`
     ).get();
     if (row === undefined) return undefined;
-    const baseline = z.looseObject({ counts: z.record(z.string(), z.number()) })
+    const [candidateSource, manifestSource, configSource, hooksSource, programSha] = await Promise.all([
+      readFile(join(resolve(request.repositoryRoot), "config", "gate5-shadow-v1.json"), "utf8"),
+      readFile(join(resolve(request.runtimeRoot), "install", "ownership-manifest.json"), "utf8"),
+      readFile(join(resolve(request.homeRoot), ".codex", "config.toml"), "utf8"),
+      readFile(join(resolve(request.homeRoot), ".codex", "hooks.json"), "utf8"),
+      programSha256(request.repositoryRoot)
+    ]);
+    const manifest = z.looseObject({
+      installationId: z.string().min(1),
+      candidateId: z.string().min(1),
+      state: z.string().min(1)
+    }).parse(JSON.parse(manifestSource));
+    const baseline = z.looseObject({
+      configSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+      hooksSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+      programSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+      activeIndexRevisionId: z.string().min(1),
+      counts: z.record(z.string(), z.number())
+    })
       .parse(JSON.parse(z.string().parse(row.baseline_json)));
     const current = z.record(z.string(), z.number()).parse(database.prepare(
       `SELECT
@@ -208,15 +271,52 @@ export async function inspectOfficialShadowWindow(request: {
     ).get());
     const startedAt = z.string().parse(row.started_at);
     const minimumEndAt = z.string().parse(row.minimum_end_at);
+    const activeIndex = database.prepare(
+      `SELECT revision.index_revision_id, revision.artifact_sha256
+       FROM active_retrieval_index AS active
+       JOIN retrieval_index_revisions AS revision
+         ON revision.index_revision_id = active.index_revision_id
+       WHERE active.singleton = 1 AND revision.state = 'complete'`
+    ).get();
+    const invalidationReasons: string[] = [];
+    if (sha256(candidateSource) !== row.candidate_sha256) {
+      invalidationReasons.push("candidate_changed");
+    }
+    if (
+      manifest.state !== "installed" ||
+      manifest.candidateId !== row.candidate_id ||
+      manifest.installationId !== row.installation_id
+    ) {
+      invalidationReasons.push("installation_changed");
+    }
+    if (sha256(configSource) !== baseline.configSha256) {
+      invalidationReasons.push("codex_config_changed");
+    }
+    if (sha256(hooksSource) !== baseline.hooksSha256) {
+      invalidationReasons.push("hooks_changed");
+    }
+    if (baseline.programSha256 === undefined) {
+      invalidationReasons.push("program_identity_missing");
+    } else if (programSha !== baseline.programSha256) {
+      invalidationReasons.push("program_changed");
+    }
+    if (
+      activeIndex?.index_revision_id !== baseline.activeIndexRevisionId ||
+      activeIndex.artifact_sha256 !== approvedShadowEmbeddingProfile.artifactSha256
+    ) {
+      invalidationReasons.push("retrieval_index_changed");
+    }
+    const effectiveState = invalidationReasons.length === 0 ? row.state : "invalidated";
     return {
       windowId: row.window_id,
-      state: row.state,
+      state: effectiveState,
+      invalidationReasons,
       candidateSha256: row.candidate_sha256,
       startedAt,
       minimumEndAt,
       elapsedCalendarDays: Math.max(0, Math.floor((Date.parse(now) - Date.parse(startedAt)) / (24 * 60 * 60 * 1000))),
       minimumDurationMet: now >= minimumEndAt,
-      gate6ReviewEligible: row.state === "active" && now >= minimumEndAt,
+      gate6ReviewEligible: effectiveState === "active" && now >= minimumEndAt,
       coverage: Object.fromEntries(Object.entries(current).map(([key, value]) => [
         key,
         { baseline: baseline.counts[key] ?? 0, current: value, delta: value - (baseline.counts[key] ?? 0) }

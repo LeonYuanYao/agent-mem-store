@@ -1,6 +1,6 @@
 # Gate 5 Full-Cutover-Prerequisite Review
 
-Status: refreshed mandatory human stop. Repository-local and uninstalled.
+Status: approved prerequisite; subsequent live Shadow changes remain separately reviewed.
 
 The first Gate 5 approval exposed two live-installation defects before any real
 machine mutation: the Hook adapter expected fields Codex does not send, and the
@@ -32,5 +32,5 @@ is captured with local event identity and time, the Worker maintains the
 approved retrieval index and evaluates eligible events asynchronously, its
 LaunchAgent receives explicit Luna, embedding, and notifier locations, and the
 official window can start only from a completed trusted-Hook probe. Its baseline
-records exact candidate/config/Hook/index identities and the earliest Gate 6
+records exact candidate/program/config/Hook/install/index identities and the earliest Gate 6
 review time seven consecutive days later.

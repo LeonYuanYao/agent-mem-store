@@ -83,15 +83,29 @@ test("a long Session is distilled in batches and consolidated from structured re
             preservedNegations: [],
             certainty: "asserted",
             sensitivity: "normal",
-            evidenceIds: request.evidence.map((item) => item.evidenceId),
-            importanceTags: [],
-            importanceReasons: []
+            evidenceIds: [request.evidence[0]?.evidenceId ?? "missing-evidence"],
+            importanceTags: ["constraint"],
+            importanceReasons: [{
+              tag: "constraint",
+              reason: "Preserve the evidence from the end of this Batch.",
+              evidenceIds: [request.evidence.at(-1)?.evidenceId ?? "missing-evidence"]
+            }]
           }
         ]
       });
     },
     consolidateSession(request) {
       consolidationInput = JSON.stringify(request);
+      for (const batch of request.batchResults) {
+        const available = new Set(batch.evidenceIds);
+        for (const evidenceId of batch.candidates.flatMap((candidate) =>
+          candidate.importanceReasons.flatMap((reason) => reason.evidenceIds)
+        )) {
+          if (!available.has(evidenceId)) {
+            throw new Error("Importance-reason evidence was omitted from consolidation aliases.");
+          }
+        }
+      }
       return Promise.resolve({
         schemaVersion: 1,
         kind: "consolidation",
@@ -105,9 +119,13 @@ test("a long Session is distilled in batches and consolidated from structured re
             preservedNegations: [],
             certainty: "asserted",
             sensitivity: "normal",
-            evidenceIds: request.batchResults.flatMap((batch) => batch.evidenceIds),
-            importanceTags: [],
-            importanceReasons: []
+            evidenceIds: [request.batchResults[0]?.evidenceIds[0] ?? "missing-evidence"],
+            importanceTags: ["constraint"],
+            importanceReasons: [{
+              tag: "constraint",
+              reason: "Preserve the final supporting evidence.",
+              evidenceIds: [request.batchResults.at(-1)?.evidenceIds.at(-1) ?? "missing-evidence"]
+            }]
           }
         ]
       });
@@ -138,10 +156,52 @@ test("a long Session is distilled in batches and consolidated from structured re
   });
   expect(consolidationInput).not.toContain("RAW-EVIDENCE");
   expect(consolidationInput).toContain("Batch statement");
+  for (const eventId of eventIds) expect(consolidationInput).toContain(eventId);
   await expect(listSessionCandidates(runtimeRoot, "long-session")).resolves.toHaveLength(1);
   for (const eventId of eventIds) {
     await expect(inspectCaptureEventState(runtimeRoot, eventId)).resolves.toMatchObject({
       state: "completed"
     });
   }
+});
+
+test("the Worker coalescing window waits briefly but SessionEnd flushes the whole Session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-coalescing-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  for (const [index, eventKind] of ["UserPromptSubmit", "Stop", "SessionEnd"].entries()) {
+    await captureEvent({
+      runtimeRoot,
+      event: {
+        schemaVersion: 1,
+        eventId: `msevent_coalescing_${String(index)}`,
+        deduplicationKey: `codex:coalescing:${String(index)}`,
+        agent: "codex",
+        eventKind: eventKind as "UserPromptSubmit" | "Stop" | "SessionEnd",
+        occurredAt: `2026-08-07T08:00:0${String(index)}.000Z`,
+        projectId: "msproj_coalescing",
+        sessionId: "coalescing-session",
+        payload: { index }
+      }
+    });
+    if (index === 1) {
+      await expect(prepareNextDistillationBatch({
+        runtimeRoot,
+        maximumEvents: 64,
+        preparedAt: "2026-08-07T08:00:10.000Z",
+        minimumEventAgeMilliseconds: 30_000
+      })).resolves.toEqual({ state: "empty" });
+    }
+  }
+
+  await expect(prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 64,
+    preparedAt: "2026-08-07T08:00:03.000Z",
+    minimumEventAgeMilliseconds: 30_000
+  })).resolves.toMatchObject({
+    state: "queued",
+    sessionId: "coalescing-session",
+    eventCount: 3
+  });
 });

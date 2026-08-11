@@ -96,6 +96,18 @@ export async function inspectStatus(request: {
        WHERE state IN ('pending', 'processing', 'retrying', 'blocked')
        ORDER BY created_at LIMIT 1`
     ).get();
+    const candidates = database.prepare(
+      `SELECT COUNT(*) AS waiting_count,
+              SUM(CASE WHEN successful_evaluation_at IS NULL THEN 1 ELSE 0 END)
+                AS unevaluated_count,
+              MIN(created_at) AS oldest_waiting_at
+       FROM memory_candidates WHERE state = 'waiting'`
+    ).get();
+    const semanticAssessments = database.prepare(
+      `SELECT COUNT(*) AS count FROM luna_operations
+       WHERE operation_kind = 'semantic_assessment'
+         AND state IN ('pending', 'processing', 'retrying', 'blocked')`
+    ).get();
     return {
       mode: "read_only_inspection",
       runtime_root: request.runtimeRoot,
@@ -136,6 +148,16 @@ export async function inspectStatus(request: {
         state: governance.state,
         phase: governance.current_phase,
         coverage_through: governance.coverage_through
+      },
+      candidates: {
+        waiting_count: z.number().int().nonnegative().parse(candidates?.waiting_count),
+        unevaluated_count: z.number().int().nonnegative().parse(candidates?.unevaluated_count ?? 0),
+        pending_semantic_assessment_count: z.number().int().nonnegative().parse(
+          semanticAssessments?.count
+        ),
+        oldest_waiting_at: typeof candidates?.oldest_waiting_at === "string"
+          ? candidates.oldest_waiting_at
+          : null
       }
     };
   } finally {

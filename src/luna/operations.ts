@@ -365,8 +365,13 @@ function updateHealthForSuccess(
       .run(completedAt);
   } else {
     database
-      .prepare("UPDATE luna_health_state SET last_success_at = ? WHERE singleton = 1")
-      .run(completedAt);
+      .prepare(
+        `UPDATE luna_health_state
+         SET last_success_at = ?,
+             successful_probe_at = COALESCE(successful_probe_at, ?)
+         WHERE singleton = 1`
+      )
+      .run(completedAt, completedAt);
   }
 }
 
@@ -595,7 +600,7 @@ export async function completeLunaOperation(request: {
           `UPDATE luna_operations
            SET state = 'completed', lease_token = NULL, leased_by = NULL,
                lease_until = NULL, next_retry_at = NULL, completed_at = ?,
-               updated_at = ? WHERE operation_id = ?`
+               last_error_category = NULL, updated_at = ? WHERE operation_id = ?`
         )
         .run(completedAt, completedAt, request.operationId);
       updateHealthForSuccess(database, completedAt);

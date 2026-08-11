@@ -380,6 +380,78 @@ test("consolidation and semantic assessment use distinct versioned structured ta
   expect(prompts[2]).toContain('"task":"assess_human_memory_conflict"');
 });
 
+test("consolidation uses short evidence aliases and restores exact source identities", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-consolidation-alias-"));
+  temporaryDirectories.push(root);
+  const originalEvidenceId = "msevidence_very_specific_original_identity_123456789";
+  let promptSource = "";
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      promptSource = request.standardInput;
+      const prompt = JSON.parse(promptSource) as {
+        request: { batchResults: Array<{ candidates: Array<{ evidenceIds: string[] }> }> };
+      };
+      const alias = prompt.request.batchResults[0]?.candidates[0]?.evidenceIds[0];
+      if (alias === undefined) throw new Error("Expected an evidence alias.");
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "consolidation",
+          candidates: [{
+            statement: "Consolidated statement.",
+            category: "lesson",
+            applicabilitySummary: "test",
+            conditions: [],
+            exclusions: [],
+            preservedNegations: [],
+            certainty: "asserted",
+            sensitivity: "normal",
+            evidenceIds: [alias],
+            importanceReasons: [{ tag: "constraint", reason: "Preserved constraint.", evidenceIds: [alias] }]
+          }]
+        }),
+        stderr: ""
+      });
+    }
+  });
+
+  const output = await adapter.consolidateSession({
+    operationId: "msop-consolidation-alias",
+    sessionId: "session-alias",
+    batchResults: [{
+      batchId: "batch-alias",
+      evidenceIds: [originalEvidenceId],
+      candidates: [{
+        statement: "Source statement.",
+        category: "lesson",
+        applicabilitySummary: "test",
+        conditions: [],
+        exclusions: [],
+        preservedNegations: [],
+        certainty: "asserted",
+        sensitivity: "normal",
+        evidenceIds: [originalEvidenceId],
+        importanceTags: ["constraint"],
+        importanceReasons: [{
+          tag: "constraint",
+          reason: "Source constraint.",
+          evidenceIds: [originalEvidenceId]
+        }]
+      }]
+    }]
+  });
+
+  expect(promptSource).not.toContain(originalEvidenceId);
+  expect(output.candidates[0]).toMatchObject({
+    evidenceIds: [originalEvidenceId],
+    importanceReasons: [{ evidenceIds: [originalEvidenceId] }]
+  });
+});
+
 test("structured output cannot cite evidence that MemStore did not supply", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-evidence-binding-"));
   temporaryDirectories.push(root);

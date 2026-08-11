@@ -1,6 +1,6 @@
 # Outcome 13 repair and managed integration
 
-Status: Gate 5 review candidate. Repository-local and uninstalled.
+Status: implemented and hardened for managed Gate 5 Shadow operation.
 
 ## Foreground repair
 
@@ -21,8 +21,8 @@ push, or resolve a case silently.
 ## Managed integration
 
 `src/integration/managed.ts` prepares one owned Shadow merge for five Codex
-Hook events, one MCP server, three Skill links, the notifier, and one Worker
-LaunchAgent. It adds no `PreToolUse` Hook, calls no Luna model inline, preserves
+Hook events, one MCP server, three Skill links, the `memstore` CLI, the notifier,
+and one Worker LaunchAgent. It adds no `PreToolUse` Hook, calls no Luna model inline, preserves
 native-memory settings, and keeps automatic foreground injection disabled.
 Managed Hooks use a dedicated lightweight process entrypoint; the stable legacy
 CLI Hook route dispatches to the same adapter before loading other CLI modules.
@@ -39,6 +39,27 @@ the expected installed identity before making any change, then restores exact
 configuration bytes and removes only owned created surfaces. Vault and Runtime
 data are retained.
 
+Legacy managed installations can use `integration upgrade --preview` and then
+`integration upgrade` to add the missing CLI. Upgrade first verifies the exact
+installation request, reports existing owned-target drift, and requires the new
+CLI path to remain absent through apply. Existing drift does not block this
+independent addition and is never rewritten. Upgrade does not change Codex
+configuration, Hooks, Vault data, Runtime data, or Worker process state.
+
+Worker hardening adds a 30-second coalescing window for ordinary capture events,
+immediate SessionEnd flush, and a body-free SessionEnd catch-up only after 24
+hours of inactivity. Candidate evaluation is automatically scheduled, while
+retention, anomaly evaluation, and six-month Candidate Tombstone cleanup run
+once after each completed weekly governance window with a durable completion
+marker. `status` and `doctor` expose a stale Candidate pipeline rather than
+hiding it behind overall Luna health.
+
+Session consolidation replaces long evidence identities with deterministic
+short aliases before invoking Luna, restores exact identities locally, and then
+applies the original strict provenance checks. The available alias set includes
+both Candidate evidence and evidence cited by importance reasons; unknown or
+invented aliases remain retryable schema failures.
+
 ## Cutover rehearsal and frozen candidate
 
 `config/gate5-shadow-v1.json` freezes E5-base q8, the Hook set, Skill set,
@@ -52,7 +73,8 @@ rewritten, or deleted.
 ## Boundary
 
 Gate 5 evidence uses the current real Codex topology only as read-only input to
-an isolated temporary HOME. No real Hook, MCP, Skill, LaunchAgent, notifier,
-Vault, Runtime, native-memory setting, or native-memory data is changed. Gate 5
-approval is still required before installing this frozen candidate and
-starting the official seven-day Shadow window.
+an isolated temporary HOME. Repository tests and evidence generation do not
+change a real Hook, MCP, Skill, LaunchAgent, notifier, Vault, Runtime,
+native-memory setting, or native-memory data. Applying an upgrade, restarting
+the Worker, or starting a replacement official Shadow window remains a named
+live-operation review boundary.
