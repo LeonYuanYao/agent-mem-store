@@ -126,6 +126,58 @@ test("three retryable failures spanning two minutes degrade Luna with bounded ba
   expect(health.nextRetryAt).toMatch(/^2026-08-07T06:/u);
 });
 
+test("a successful queued operation clears a transient healthy-state failure streak", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-transient-health-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const operation = await enqueueLunaOperation({
+    runtimeRoot,
+    kind: "distill_batch",
+    idempotencyKey: "transient:batch-1",
+    payload: { evidenceIds: ["msevent_1"] },
+    createdAt: "2026-08-07T06:00:00.000Z"
+  });
+  const firstClaim = await claimLunaOperation({
+    runtimeRoot,
+    workerId: "worker-1",
+    now: "2026-08-07T06:00:01.000Z",
+    leaseSeconds: 60
+  });
+  if (firstClaim.state !== "claimed") throw new Error("Expected first claim.");
+  await failLunaOperation({
+    runtimeRoot,
+    operationId: operation.operationId,
+    leaseToken: firstClaim.leaseToken,
+    failedAt: "2026-08-07T06:00:02.000Z",
+    error: new LunaInvocationError("unavailable", true, "temporary failure"),
+    retryAfter: "2026-08-07T06:00:03.000Z"
+  });
+  const secondClaim = await claimLunaOperation({
+    runtimeRoot,
+    workerId: "worker-1",
+    now: "2026-08-07T06:00:03.000Z",
+    leaseSeconds: 60
+  });
+  if (secondClaim.state !== "claimed") throw new Error("Expected retry claim.");
+  await completeLunaOperation({
+    runtimeRoot,
+    operationId: operation.operationId,
+    leaseToken: secondClaim.leaseToken,
+    completedAt: "2026-08-07T06:00:04.000Z"
+  });
+
+  await expect(inspectLunaHealth({
+    runtimeRoot,
+    now: "2026-08-07T06:00:05.000Z"
+  })).resolves.toMatchObject({
+    state: "healthy",
+    reasonCategory: null,
+    consecutiveFailures: 0,
+    pendingOperationCount: 0,
+    lastSuccessAt: "2026-08-07T06:00:04.000Z"
+  });
+});
+
 test("recovery requires a successful probe and a real queued Luna operation", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-recovery-"));
   temporaryDirectories.push(root);

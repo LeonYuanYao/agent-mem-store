@@ -10,6 +10,8 @@ import {
 import { initializeGovernanceSchedule } from "../governance/scheduling.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 
+const DEFAULT_GOVERNANCE_TIME_ZONE = "Asia/Shanghai";
+
 export interface InitializationRequest {
   readonly vaultRoot: string;
   readonly runtimeRoot: string;
@@ -98,7 +100,7 @@ export async function initializeMemStore(
   await mkdir(join(vaultRoot, "_MemStore"), { recursive: true, mode: 0o700 });
   await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
 
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const timezone = DEFAULT_GOVERNANCE_TIME_ZONE;
   const policy = stringify({
     schema_version: 1,
     retention: { archive_months: 6, candidate_tombstone_days: 180 },

@@ -213,6 +213,66 @@ test("the Responses API output schema gives every const field an explicit JSON t
   });
 });
 
+test("importance reasons are the Luna wire source of truth and deterministically derive tags", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-importance-source-"));
+  temporaryDirectories.push(root);
+  let outputSchema: unknown;
+  let prompt = "";
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: async (request) => {
+      const schemaIndex = request.arguments.indexOf("--output-schema") + 1;
+      const schemaPath = request.arguments[schemaIndex];
+      if (schemaPath === undefined) throw new Error("Expected an output schema path.");
+      outputSchema = JSON.parse(await readFile(schemaPath, "utf8"));
+      prompt = request.standardInput;
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "distillation",
+          candidates: [{
+            statement: "Keep program code separate from canonical personal data.",
+            category: "architecture",
+            applicabilitySummary: "MemStore",
+            conditions: [],
+            exclusions: [],
+            preservedNegations: [],
+            certainty: "asserted",
+            sensitivity: "normal",
+            evidenceIds: ["evidence-1"],
+            importanceReasons: [{
+              tag: "architecture_invariant",
+              reason: "This boundary applies to every installation.",
+              evidenceIds: ["evidence-1"]
+            }]
+          }]
+        }),
+        stderr: ""
+      };
+    }
+  });
+
+  const result = await adapter.distillBatch({
+    operationId: "msop-importance-source",
+    scope: { kind: "project", projectId: "msproj-test" },
+    evidence: [{
+      evidenceId: "evidence-1",
+      evidenceClass: "explicit_user_statement",
+      content: "Keep program code separate from canonical personal data.",
+      sourceIdentity: "source-1",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  });
+
+  expect(result.candidates[0]?.importanceTags).toEqual(["architecture_invariant"]);
+  expect(JSON.stringify(outputSchema)).not.toContain('"importanceTags"');
+  expect(prompt).toContain("Return at most one importance reason for each tag");
+});
+
 test("an API invalid_json_schema response is classified as a visible non-retryable configuration fault", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-api-schema-"));
   temporaryDirectories.push(root);
@@ -348,7 +408,7 @@ test("structured output cannot cite evidence that MemStore did not supply", asyn
   })).rejects.toMatchObject({ category: "schema_invalid", retryable: true });
 });
 
-test("every Luna importance tag needs one bounded evidence-bound reason", async () => {
+test("duplicate Luna importance reasons for the same tag are rejected", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-importance-"));
   temporaryDirectories.push(root);
   const adapter = new CodexLunaAdapter({
@@ -370,8 +430,15 @@ test("every Luna importance tag needs one bounded evidence-bound reason", async 
           certainty: "asserted",
           sensitivity: "normal",
           evidenceIds: ["evidence-1"],
-          importanceTags: ["architecture_invariant"],
-          importanceReasons: []
+          importanceReasons: [{
+            tag: "architecture_invariant",
+            reason: "This boundary applies across the system.",
+            evidenceIds: ["evidence-1"]
+          }, {
+            tag: "architecture_invariant",
+            reason: "This is a duplicate reason for the same tag.",
+            evidenceIds: ["evidence-1"]
+          }]
         }]
       }),
       stderr: ""

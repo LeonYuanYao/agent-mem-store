@@ -4,11 +4,11 @@ Status: review candidate; repository-local and uninstalled.
 
 ## Scheduling and catch-up
 
-The Runtime stores an explicit IANA time zone and creates auditable obligations
-for every due occurrence:
+The Runtime stores the fixed `Asia/Shanghai` IANA time zone and creates
+auditable obligations for every due occurrence:
 
-- Weekly is Monday at 19:00 local time.
-- Monthly is the first Monday at 19:00 local time.
+- Weekly is Monday at 19:00 Beijing time.
+- Monthly is the first Monday at 19:00 Beijing time.
 - A Monthly run performs the complete Weekly duty and satisfies both sets of
   linked obligations without a second Luna invocation.
 - Missed occurrences remain individually visible but are coalesced into one
@@ -17,8 +17,8 @@ for every due occurrence:
 - At most one deep governance run exists. It yields while Capture work or a
   live retrieval-index build is pending.
 
-Temporal arithmetic uses `@js-temporal/polyfill` with the configured IANA zone,
-so the 19:00 local schedule remains stable across daylight-saving transitions.
+Temporal arithmetic uses `@js-temporal/polyfill` with the fixed IANA zone, so
+the schedule does not change when the host machine changes time zone.
 
 ## Fixed coverage and restartability
 

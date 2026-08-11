@@ -83,6 +83,7 @@
     "missedRunCatchUp": true
   },
   "governance": {
+    "timezone": "Asia/Shanghai",
     "weekly": "MONDAY 19:00",
     "monthly": "FIRST_MONDAY 19:00"
   },

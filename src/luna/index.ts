@@ -46,9 +46,11 @@ const distilledCandidateSchema = z.object({
   certainty: z.enum(["asserted", "inferred", "speculative"]),
   sensitivity: z.enum(["normal", "private"]),
   evidenceIds: z.array(z.string().min(1)).min(1).max(64),
-  importanceTags: z.array(importanceTagSchema).max(8),
   importanceReasons: z.array(importanceReasonSchema).max(8)
-});
+}).transform((candidate) => ({
+  ...candidate,
+  importanceTags: candidate.importanceReasons.map((item) => item.tag)
+}));
 
 const distillationOutputSchema = z.object({
   schemaVersion: z.literal(1),
@@ -79,7 +81,6 @@ const distillationOutputJsonSchema = {
           "certainty",
           "sensitivity",
           "evidenceIds",
-          "importanceTags",
           "importanceReasons"
         ],
         properties: {
@@ -112,11 +113,6 @@ const distillationOutputJsonSchema = {
             minItems: 1,
             maxItems: 64,
             items: { type: "string", minLength: 1 }
-          },
-          importanceTags: {
-            type: "array",
-            maxItems: 8,
-            items: { enum: importanceTagSchema.options }
           },
           importanceReasons: {
             type: "array",
@@ -443,6 +439,7 @@ export class CodexLunaAdapter {
           "Use only supplied evidence.",
           "Preserve scope, certainty, conditions, exclusions, and negations.",
           "Cite evidenceIds for every candidate.",
+          "Return at most one importance reason for each tag; MemStore derives importance tags from these reasons.",
           "Do not execute commands or request more context."
         ],
         request
@@ -475,6 +472,7 @@ export class CodexLunaAdapter {
           "Use only structured Batch results and their evidence identities.",
           "Do not infer from raw transcripts or execute commands.",
           "Preserve material conditions, exclusions, certainty, and negations.",
+          "Return at most one importance reason for each tag; MemStore derives importance tags from these reasons.",
           "Deduplicate without broadening claims."
         ],
         request

@@ -100,6 +100,7 @@ test("initialization creates separate portable and machine configuration", async
     policy: {
       archiveRetentionMonths: 6,
       candidateTombstoneDays: 180,
+      governanceTimezone: "Asia/Shanghai",
       weeklyGovernance: "MONDAY 19:00",
       monthlyGovernance: "FIRST_MONDAY 19:00"
     },
@@ -118,10 +119,10 @@ test("initialization creates separate portable and machine configuration", async
       "SELECT time_zone, startup_delay_seconds, page_size FROM governance_schedule WHERE singleton = 1"
     ).get();
     expect(schedule).toMatchObject({
+      time_zone: "Asia/Shanghai",
       startup_delay_seconds: 600,
       page_size: 50
     });
-    expect(typeof schedule?.time_zone).toBe("string");
   } finally {
     database.close();
   }

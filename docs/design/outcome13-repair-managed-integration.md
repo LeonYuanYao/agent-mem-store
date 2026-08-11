@@ -24,6 +24,8 @@ push, or resolve a case silently.
 Hook events, one MCP server, three Skill links, the notifier, and one Worker
 LaunchAgent. It adds no `PreToolUse` Hook, calls no Luna model inline, preserves
 native-memory settings, and keeps automatic foreground injection disabled.
+Managed Hooks use a dedicated lightweight process entrypoint; the stable legacy
+CLI Hook route dispatches to the same adapter before loading other CLI modules.
 The LaunchAgent explicitly supplies the named Codex home used by Luna, the
 approved local-only embedding directory, the Codex executable, and the owned
 notifier path. Missing or drifted embedding bytes prevent Worker startup rather

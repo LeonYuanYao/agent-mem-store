@@ -353,6 +353,16 @@ function updateHealthForSuccess(
              active_incident_id = NULL WHERE singleton = 1`
       )
       .run(completedAt);
+  } else if (currentState === "healthy") {
+    database
+      .prepare(
+        `UPDATE luna_health_state
+         SET reason_category = NULL, consecutive_failures = 0,
+             schema_invalid_failures = 0, first_failure_at = NULL,
+             last_success_at = ?, successful_probe_at = NULL,
+             next_retry_at = NULL WHERE singleton = 1`
+      )
+      .run(completedAt);
   } else {
     database
       .prepare("UPDATE luna_health_state SET last_success_at = ? WHERE singleton = 1")

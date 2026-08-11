@@ -234,8 +234,7 @@ function managedHookGroup(request: ManagedRequest, event: Candidate["hookEvents"
     `MEMSTORE_RUNTIME_ROOT=${shellQuote(resolve(request.runtimeRoot))}`,
     `MEMSTORE_VAULT_ROOT=${shellQuote(resolve(request.vaultRoot))}`,
     shellQuote(resolve(request.nodeExecutable)),
-    shellQuote(join(resolve(request.repositoryRoot), "dist", "cli", "main.js")),
-    "hook",
+    shellQuote(join(resolve(request.repositoryRoot), "dist", "cli", "hook.js")),
     "codex",
     event,
     `# memstore:gate5-shadow-v1:${event}:shadow`

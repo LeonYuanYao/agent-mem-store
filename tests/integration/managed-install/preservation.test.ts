@@ -103,6 +103,9 @@ test("preview is mutation-free and install, repair, and uninstall preserve unrel
       event === "SessionStart" ? 2 : 1
     );
   }
+  const installedHooksSource = await readFile(data.hooksPath, "utf8");
+  expect(installedHooksSource.match(/dist\/cli\/hook\.js/gu)).toHaveLength(5);
+  expect(installedHooksSource).not.toContain("dist/cli/main.js' hook codex");
   expect(installedHooks.hooks).not.toHaveProperty("PreToolUse.1");
   expect(await readlink(join(data.homeRoot, ".agents", "skills", "memstore-repair")))
     .toBe(join(data.repositoryRoot, "skills", "memstore-repair"));
