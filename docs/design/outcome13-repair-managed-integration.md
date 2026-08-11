@@ -70,6 +70,11 @@ managed Hook mode becomes active, then an identity-checked rollback restores
 the original bytes. Native-memory bodies are not read, imported, moved,
 rewritten, or deleted.
 
+The official Shadow baseline retains its starting retrieval index revision for
+audit, but ordinary Durable Memory growth may publish later content revisions.
+Continuous identity checks freeze the embedding model, artifact, adapter
+version, dimensions, and normalization rather than the mutable content revision.
+
 ## Boundary
 
 Gate 5 evidence uses the current real Codex topology only as read-only input to

@@ -104,14 +104,22 @@ async function validatedBaseline(request: {
       throw new Error("The official Shadow start time must follow its completed probe.");
     }
     const activeIndex = database.prepare(
-      `SELECT revision.index_revision_id, revision.artifact_sha256
+      `SELECT revision.index_revision_id, revision.adapter_version,
+              revision.model_identity, revision.artifact_sha256,
+              revision.dimensions, revision.normalization
        FROM active_retrieval_index AS active
        JOIN retrieval_index_revisions AS revision
          ON revision.index_revision_id = active.index_revision_id
        WHERE active.singleton = 1 AND revision.state = 'complete'`
     ).get();
-    if (activeIndex?.artifact_sha256 !== approvedShadowEmbeddingProfile.artifactSha256) {
-      throw new Error("The active retrieval index does not use the Gate 5 approved embedding artifact.");
+    if (
+      activeIndex?.adapter_version !== approvedShadowEmbeddingProfile.adapterVersion ||
+      activeIndex.model_identity !== approvedShadowEmbeddingProfile.modelIdentity ||
+      activeIndex.artifact_sha256 !== approvedShadowEmbeddingProfile.artifactSha256 ||
+      activeIndex.dimensions !== approvedShadowEmbeddingProfile.dimensions ||
+      activeIndex.normalization !== approvedShadowEmbeddingProfile.normalization
+    ) {
+      throw new Error("The active retrieval index does not use the Gate 5 approved embedding profile.");
     }
     const counts = database.prepare(
       `SELECT
@@ -272,7 +280,9 @@ export async function inspectOfficialShadowWindow(request: {
     const startedAt = z.string().parse(row.started_at);
     const minimumEndAt = z.string().parse(row.minimum_end_at);
     const activeIndex = database.prepare(
-      `SELECT revision.index_revision_id, revision.artifact_sha256
+      `SELECT revision.index_revision_id, revision.adapter_version,
+              revision.model_identity, revision.artifact_sha256,
+              revision.dimensions, revision.normalization
        FROM active_retrieval_index AS active
        JOIN retrieval_index_revisions AS revision
          ON revision.index_revision_id = active.index_revision_id
@@ -301,8 +311,11 @@ export async function inspectOfficialShadowWindow(request: {
       invalidationReasons.push("program_changed");
     }
     if (
-      activeIndex?.index_revision_id !== baseline.activeIndexRevisionId ||
-      activeIndex.artifact_sha256 !== approvedShadowEmbeddingProfile.artifactSha256
+      activeIndex?.adapter_version !== approvedShadowEmbeddingProfile.adapterVersion ||
+      activeIndex.model_identity !== approvedShadowEmbeddingProfile.modelIdentity ||
+      activeIndex.artifact_sha256 !== approvedShadowEmbeddingProfile.artifactSha256 ||
+      activeIndex.dimensions !== approvedShadowEmbeddingProfile.dimensions ||
+      activeIndex.normalization !== approvedShadowEmbeddingProfile.normalization
     ) {
       invalidationReasons.push("retrieval_index_changed");
     }

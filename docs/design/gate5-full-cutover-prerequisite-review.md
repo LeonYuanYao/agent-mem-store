@@ -32,5 +32,9 @@ is captured with local event identity and time, the Worker maintains the
 approved retrieval index and evaluates eligible events asynchronously, its
 LaunchAgent receives explicit Luna, embedding, and notifier locations, and the
 official window can start only from a completed trusted-Hook probe. Its baseline
-records exact candidate/program/config/Hook/install/index identities and the earliest Gate 6
-review time seven consecutive days later.
+records the exact candidate, program, configuration, Hook, installation, and
+starting index revision identities plus the earliest Gate 6 review time seven
+consecutive days later. A normal content rebuild may advance the active index
+revision without invalidating Shadow; the approved embedding model, artifact,
+adapter version, dimensions, and normalization remain frozen throughout the
+window.

@@ -9,7 +9,10 @@ import {
   inspectOfficialShadowWindow,
   startOfficialShadowWindow
 } from "../../../src/operations/shadow-window.js";
-import type { EmbeddingAdapter } from "../../../src/retrieval/index.js";
+import {
+  buildRetrievalIndex,
+  type EmbeddingAdapter
+} from "../../../src/retrieval/index.js";
 import { approvedShadowEmbeddingProfile } from "../../../src/retrieval/shadow-profile.js";
 import { runWorkerOnce } from "../../../src/worker/main.js";
 
@@ -123,6 +126,12 @@ test("an official Shadow window requires a completed real-Hook probe and records
     ...request,
     startedAt: "2026-08-09T03:00:03.000Z"
   })).rejects.toThrow("An official Shadow window is already active.");
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: approvedEmbedding,
+    builtAt: "2026-08-09T03:00:04.000Z"
+  });
   await expect(inspectOfficialShadowWindow({
     runtimeRoot,
     repositoryRoot,
@@ -136,6 +145,35 @@ test("an official Shadow window requires a completed real-Hook probe and records
     coverage: {
       completed_evaluations: { baseline: 1, current: 1, delta: 0 }
     }
+  });
+  const changedAdapter: EmbeddingAdapter = {
+    ...approvedEmbedding,
+    identity: {
+      ...approvedEmbedding.identity,
+      adapterVersion: "transformers-changed-for-test"
+    }
+  };
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: changedAdapter,
+    builtAt: "2026-08-16T03:00:02.100Z"
+  });
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:02.200Z"
+  })).resolves.toMatchObject({
+    state: "invalidated",
+    gate6ReviewEligible: false,
+    invalidationReasons: ["retrieval_index_changed"]
+  });
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: approvedEmbedding,
+    builtAt: "2026-08-16T03:00:02.300Z"
   });
   await writeFile(programPath, "export const fixture = false;\n");
   await expect(inspectOfficialShadowWindow({
