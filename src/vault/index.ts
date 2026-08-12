@@ -11,6 +11,12 @@ import {
 } from "../contracts/atomic-file.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
+import {
+  memoryCategorySchema,
+  mapLegacyCategory,
+  selectPrimaryCategory,
+  type MemoryCategory
+} from "../memories/categories.js";
 
 const uuidV4Suffix =
   "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
@@ -39,7 +45,8 @@ export interface CanonicalMemory {
     readonly purgedContentIdentity?: string;
     readonly purgedRevisionIds?: readonly string[];
   };
-  readonly category: string;
+  readonly primaryCategory: MemoryCategory | "tombstone";
+  readonly categoryTags: readonly MemoryCategory[];
   readonly importanceTags: readonly string[];
   readonly startup: "auto" | "always" | "never";
   readonly applicability: {
@@ -120,7 +127,10 @@ const frontmatterSchema = z.object({
       purged_content_identity: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
       purged_revision_ids: z.array(revisionIdSchema).optional()
     }),
-    category: z.string().min(1),
+    primary_category: memoryCategorySchema.or(z.literal("tombstone")).optional(),
+    category_tags: z.array(memoryCategorySchema).optional(),
+    category_aliases: z.array(z.string().min(1).max(256)).max(16).optional(),
+    category: z.string().min(1).optional(),
     importance_tags: z.array(z.string().min(1)),
     startup: z.enum(["auto", "always", "never"]),
     applicability: z.object({
@@ -263,7 +273,8 @@ function validateCanonicalIdentity(memory: CanonicalMemory): void {
   if (
     memory.lifecycle === "tombstone" &&
     (memory.body.trim().length > 0 ||
-      memory.category !== "tombstone" ||
+      memory.primaryCategory !== "tombstone" ||
+      memory.categoryTags.length > 0 ||
       memory.importanceTags.length > 0 ||
       memory.startup !== "never" ||
       memory.applicability.summary.length > 0 ||
@@ -279,6 +290,15 @@ function validateCanonicalIdentity(memory: CanonicalMemory): void {
       memory.relationships.length > 0)
   ) {
     throw new Error("Tombstone Canonical Memory must be knowledge-free.");
+  }
+  if (
+    memory.lifecycle !== "tombstone" &&
+    (memory.primaryCategory === "tombstone" ||
+      memory.categoryTags.length === 0 ||
+      new Set(memory.categoryTags).size !== memory.categoryTags.length ||
+      selectPrimaryCategory(memory.categoryTags) !== memory.primaryCategory)
+  ) {
+    throw new Error("Canonical Memory contains invalid controlled categories.");
   }
 }
 
@@ -498,7 +518,8 @@ function render(memory: CanonicalMemory, previousSource?: string): string {
         ? {}
         : { purged_revision_ids: [...memory.lifecycleDetails.purgedRevisionIds] })
     },
-    category: memory.category,
+    primary_category: memory.primaryCategory,
+    category_tags: [...memory.categoryTags],
     importance_tags: [...memory.importanceTags],
     startup: memory.startup,
     applicability: {
@@ -585,6 +606,8 @@ function render(memory: CanonicalMemory, previousSource?: string): string {
       ? metadata
       : mergeOwnedValues(previousMemstore, metadata)
   );
+  delete mergedMetadata.category;
+  delete mergedMetadata.category_aliases;
   mergedMetadata.content_identity = identityFromOwnedContent(
     mergedMetadata,
     memory.body
@@ -621,6 +644,21 @@ function parseCanonical(source: string): CanonicalMemory {
     frontmatter.scope.kind === "global"
       ? ({ kind: "global" } as const)
       : ({ kind: "project", projectId: frontmatter.scope.project_id } as const);
+  const legacyCategory = frontmatter.primary_category === undefined
+    ? z.string().parse(frontmatter.category)
+    : undefined;
+  const legacyMapping = legacyCategory === undefined || legacyCategory === "tombstone"
+    ? undefined
+    : mapLegacyCategory(legacyCategory, frontmatter.importance_tags);
+  const parsedPrimaryCategory: MemoryCategory | "tombstone" =
+    frontmatter.primary_category ??
+    (legacyCategory === "tombstone"
+      ? "tombstone"
+      : legacyMapping?.primaryCategory ?? "durable_reference");
+  const parsedCategoryTags = frontmatter.category_tags ??
+    (parsedPrimaryCategory === "tombstone"
+      ? []
+      : legacyMapping?.categoryTags ?? [parsedPrimaryCategory]);
   const memory: CanonicalMemory = {
     schemaVersion: 1,
     memoryId: frontmatter.memory_id,
@@ -656,7 +694,8 @@ function parseCanonical(source: string): CanonicalMemory {
         ? {}
         : { purgedRevisionIds: frontmatter.lifecycle_details.purged_revision_ids })
     },
-    category: frontmatter.category,
+    primaryCategory: parsedPrimaryCategory,
+    categoryTags: parsedCategoryTags,
     importanceTags: frontmatter.importance_tags,
     startup: frontmatter.startup,
     applicability: {
@@ -1647,6 +1686,29 @@ export async function inspectStandaloneCanonicalFile(
   };
 }
 
+export function renderCanonicalCategoryMigration(request: {
+  readonly source: string;
+  readonly primaryCategory: MemoryCategory;
+  readonly categoryTags: readonly MemoryCategory[];
+  readonly policyVersion: string;
+}): {
+  readonly source: string;
+  readonly contentIdentity: string;
+} {
+  const memory = parseCanonical(request.source);
+  if (memory.lifecycle === "tombstone") {
+    throw new Error("Tombstone revisions cannot carry migrated knowledge categories.");
+  }
+  const migrated: CanonicalMemory = {
+    ...memory,
+    primaryCategory: request.primaryCategory,
+    categoryTags: [...request.categoryTags],
+    policyVersion: request.policyVersion
+  };
+  const source = render(migrated, request.source);
+  return { source, contentIdentity: contentIdentity(source) };
+}
+
 export type CanonicalPurgeCheckpoint =
   | "tombstone_written"
   | "revision_bodies_removed"
@@ -1751,7 +1813,8 @@ export async function purgeArchivedCanonicalBody(request: {
         purgedContentIdentity: observedIdentity,
         purgedRevisionIds: [...revisionIds]
       },
-      category: "tombstone",
+      primaryCategory: "tombstone",
+      categoryTags: [],
       importanceTags: [],
       startup: "never",
       applicability: { summary: "", conditions: [] },

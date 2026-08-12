@@ -98,7 +98,7 @@ export async function rememberAssert(request: {
     vaultRoot: request.vaultRoot,
     scope,
     body,
-    category: "explicit_knowledge",
+    primaryCategory: "durable_reference",
     startup: request.startup,
     assertedAt: request.assertedAt,
     sourceIdentity: "remember.assert"

@@ -113,7 +113,8 @@ test("the uninstalled Shadow loop reaches review without injecting or touching g
         kind: "distillation" as const,
         candidates: [{
           statement: "Use SQLite WAL and short transactions for durable state.",
-          category: "architecture_contract",
+          primaryCategory: "architecture_contract",
+          categoryTags: ["architecture_contract"],
           applicabilitySummary: "Current project",
           conditions: [],
           exclusions: [],

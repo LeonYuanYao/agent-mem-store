@@ -33,7 +33,7 @@ test("a durable Luna conflict assessment informs review without resolving Human 
     vaultRoot,
     scope,
     body: "Use the stable endpoint in production.",
-    category: "api",
+    primaryCategory: "architecture_contract",
     assertedAt: "2026-08-07T14:00:00.000Z"
   });
   if (existing.state !== "created") throw new Error("Expected Human Memory.");
@@ -43,7 +43,7 @@ test("a durable Luna conflict assessment informs review without resolving Human 
     vaultRoot,
     scope,
     body: proposedBody,
-    category: "api",
+    primaryCategory: "architecture_contract",
     potentialConflictMemoryIds: [existing.memoryId],
     assertedAt: "2026-08-07T14:00:01.000Z"
   });

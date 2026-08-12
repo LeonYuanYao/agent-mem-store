@@ -9,6 +9,12 @@ import {
   type GovernancePageRequest,
   type GovernancePageReview
 } from "../governance/contracts.js";
+import {
+  memoryCategoryJsonSchema,
+  memoryCategoryPromptInstruction,
+  memoryCategorySchema,
+  selectPrimaryCategory
+} from "../memories/categories.js";
 
 const importanceTagSchema = z.enum([
   "user_decision",
@@ -38,7 +44,8 @@ const importanceReasonSchema = z.object({
 
 const distilledCandidateSchema = z.object({
   statement: z.string().min(1).max(16_384),
-  category: z.string().min(1).max(128),
+  primaryCategory: memoryCategorySchema,
+  categoryTags: z.array(memoryCategorySchema).min(1).max(7),
   applicabilitySummary: z.string().max(2048),
   conditions: z.array(z.string().max(2048)).max(32),
   exclusions: z.array(z.string().max(2048)).max(32),
@@ -47,8 +54,17 @@ const distilledCandidateSchema = z.object({
   sensitivity: z.enum(["normal", "private"]),
   evidenceIds: z.array(z.string().min(1)).min(1).max(64),
   importanceReasons: z.array(importanceReasonSchema).max(8)
+}).superRefine((candidate, context) => {
+  if (new Set(candidate.categoryTags).size !== candidate.categoryTags.length) {
+    context.addIssue({
+      code: "custom",
+      message: "Controlled category tags must not contain duplicates.",
+      path: ["categoryTags"]
+    });
+  }
 }).transform((candidate) => ({
   ...candidate,
+  primaryCategory: selectPrimaryCategory(candidate.categoryTags),
   importanceTags: candidate.importanceReasons.map((item) => item.tag)
 }));
 
@@ -73,7 +89,8 @@ const distillationOutputJsonSchema = {
         additionalProperties: false,
         required: [
           "statement",
-          "category",
+          "primaryCategory",
+          "categoryTags",
           "applicabilitySummary",
           "conditions",
           "exclusions",
@@ -85,7 +102,13 @@ const distillationOutputJsonSchema = {
         ],
         properties: {
           statement: { type: "string", minLength: 1, maxLength: 16_384 },
-          category: { type: "string", minLength: 1, maxLength: 128 },
+          primaryCategory: memoryCategoryJsonSchema,
+          categoryTags: {
+            type: "array",
+            minItems: 1,
+            maxItems: 7,
+            items: memoryCategoryJsonSchema
+          },
           applicabilitySummary: { type: "string", maxLength: 2048 },
           conditions: {
             type: "array",
@@ -375,6 +398,13 @@ function classifyProcessFailure(result: LunaProcessResult): LunaInvocationError 
   if (result.timedOut === true) {
     return new LunaInvocationError("timeout", true, "Luna invocation timed out.");
   }
+  if (/invalid_json_schema|invalid schema/u.test(diagnostic)) {
+    return new LunaInvocationError(
+      "invalid_configuration",
+      false,
+      "The Luna response schema is not supported by the configured provider."
+    );
+  }
   if (/auth|credential|unauthorized|forbidden/u.test(diagnostic)) {
     return new LunaInvocationError(
       "authentication",
@@ -389,7 +419,7 @@ function classifyProcessFailure(result: LunaProcessResult): LunaInvocationError 
       "The configured Luna model is invalid or unavailable."
     );
   }
-  if (/config|toml|invalid option|invalid_json_schema|invalid schema/u.test(diagnostic)) {
+  if (/config|toml|invalid option/u.test(diagnostic)) {
     return new LunaInvocationError(
       "invalid_configuration",
       false,
@@ -438,6 +468,7 @@ export class CodexLunaAdapter {
         rules: [
           "Use only supplied evidence.",
           "Preserve scope, certainty, conditions, exclusions, and negations.",
+          memoryCategoryPromptInstruction,
           "Cite evidenceIds for every candidate.",
           "Return at most one importance reason for each tag; MemStore derives importance tags from these reasons.",
           "Do not execute commands or request more context."
@@ -508,6 +539,7 @@ export class CodexLunaAdapter {
           "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Do not infer from raw transcripts or execute commands.",
           "Preserve material conditions, exclusions, certainty, and negations.",
+          memoryCategoryPromptInstruction,
           "Return at most one importance reason for each tag; MemStore derives importance tags from these reasons.",
           "Deduplicate without broadening claims."
         ],

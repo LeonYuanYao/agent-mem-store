@@ -14,6 +14,7 @@ import {
 } from "../contracts/envelope.js";
 import { initializeMemStore } from "../operations/initialize.js";
 import { prepareShadowEmbedding } from "../operations/embedding-install.js";
+import { migrateMemoryCategories } from "../operations/category-migration.js";
 import {
   inspectOfficialShadowWindow,
   startOfficialShadowWindow
@@ -531,6 +532,17 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       json: parsed.values.json
     };
   }
+  if (command === "category" && parsed.positionals[1] === "migrate") {
+    return {
+      command: "category.migrate",
+      result: await migrateMemoryCategories({
+        ...location,
+        preview: parsed.values.preview,
+        migratedAt: now
+      }),
+      json: parsed.values.json
+    };
+  }
   if (command === "vault" && parsed.positionals[1] === "validate") {
     return {
       command: "vault.validate",
@@ -1005,7 +1017,7 @@ async function run(arguments_: readonly string[]): Promise<void> {
     else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
-  if (["doctor", "vault", "worker", "review", "runtime", "portability", "purge", "shadow"].includes(command ?? "") ||
+  if (["doctor", "vault", "worker", "review", "runtime", "portability", "purge", "shadow", "category"].includes(command ?? "") ||
       (command === "operation" && arguments_[1] === "retry")) {
     const output = await runOperations(arguments_);
     writeResult(output.command, output.result, output.json);

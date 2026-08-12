@@ -162,7 +162,8 @@ test("an expired Agent archive is previewed without writes then purged to one bo
       purgedRevisionIds: [activeRevisionId, archivedRevisionId]
     },
     body: "",
-    category: "tombstone",
+    primaryCategory: "tombstone",
+    categoryTags: [],
     importanceTags: [],
     relationships: [],
     provenance: []

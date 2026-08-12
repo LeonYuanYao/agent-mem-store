@@ -47,7 +47,8 @@ function searchableText(memory: CanonicalMemory): string {
     memory.representations.compact.text,
     memory.representations.standard.text,
     memory.representations.identity?.label ?? "",
-    memory.category,
+    memory.primaryCategory,
+    ...memory.categoryTags,
     ...memory.importanceTags,
     memory.applicability.summary,
     ...memory.applicability.conditions,
@@ -60,13 +61,13 @@ function searchableText(memory: CanonicalMemory): string {
 
 function basePriorityTier(memory: CanonicalMemory): "critical" | "strong" | "normal" {
   if (
-    memory.category === "safety_data_integrity" ||
+    memory.primaryCategory === "safety_data_integrity" ||
     (memory.authority === "human_authored" &&
-      ["preference_constraint", "architecture_contract"].includes(memory.category)) ||
+      ["preference_constraint", "architecture_contract"].includes(memory.primaryCategory)) ||
     memory.importanceTags.some((tag) => ["safety", "architecture", "decision"].includes(tag))
   ) return "critical";
   if (
-    ["failure_recovery_hazard", "workflow_environment_toolchain"].includes(memory.category) ||
+    ["failure_recovery_hazard", "workflow_environment_toolchain"].includes(memory.primaryCategory) ||
     memory.importanceTags.includes("constraint")
   ) return "strong";
   return "normal";
@@ -235,7 +236,7 @@ async function buildRetrievalIndexImpl(request: {
             memory.scope.kind === "project" ? memory.scope.projectId : null,
             memory.authority,
             memory.sensitivity,
-            memory.category,
+            memory.primaryCategory,
             basePriorityTier(memory),
             sessionOrderKey(memory),
             JSON.stringify(memory.importanceTags),

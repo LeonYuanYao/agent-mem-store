@@ -71,7 +71,7 @@ function memoryInput(memory: CanonicalMemory): GovernanceMemoryInput {
     authority: memory.authority,
     scope: memory.scope,
     lifecycle: memory.lifecycle,
-    category: memory.category,
+    category: memory.primaryCategory,
     applicability: memory.applicability,
     validity: memory.validity,
     semanticContract: memory.semanticContract,

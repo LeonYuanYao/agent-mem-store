@@ -26,7 +26,7 @@ test("Review Inbox is rebuildable and never copies Human or evidence bodies", as
     vaultRoot,
     scope: { kind: "project", projectId: "msproj_123e4567-e89b-42d3-a456-426614174001" },
     body: humanBody,
-    category: "test",
+    primaryCategory: "durable_reference",
     assertedAt: "2026-08-08T01:00:00.000Z",
     potentialConflictMemoryIds: []
   });
@@ -37,7 +37,7 @@ test("Review Inbox is rebuildable and never copies Human or evidence bodies", as
     vaultRoot,
     scope: { kind: "project", projectId: "msproj_123e4567-e89b-42d3-a456-426614174001" },
     body: proposedBody,
-    category: "test",
+    primaryCategory: "durable_reference",
     assertedAt: "2026-08-08T01:01:00.000Z",
     potentialConflictMemoryIds: [conflict.memoryId]
   });

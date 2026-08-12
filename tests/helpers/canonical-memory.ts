@@ -1,4 +1,5 @@
 import type { CanonicalMemory } from "../../src/vault/index.js";
+import type { MemoryCategory } from "../../src/memories/categories.js";
 
 const defaultProjectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
 
@@ -12,7 +13,8 @@ export function makeCanonicalMemory(request: {
   readonly authority?: CanonicalMemory["authority"];
   readonly lifecycle?: CanonicalMemory["lifecycle"];
   readonly startup?: CanonicalMemory["startup"];
-  readonly category?: string;
+  readonly primaryCategory?: MemoryCategory;
+  readonly categoryTags?: CanonicalMemory["categoryTags"];
   readonly importanceTags?: readonly string[];
   readonly relationships?: CanonicalMemory["relationships"];
   readonly validatedCompact?: boolean;
@@ -39,7 +41,10 @@ export function makeCanonicalMemory(request: {
       lifecycle === "archived"
         ? { archivedAt: "2026-08-01T00:00:00.000Z", reason: "superseded" }
         : {},
-    category: request.category ?? "workflow_environment_toolchain",
+    primaryCategory: request.primaryCategory ?? "workflow_environment_toolchain",
+    categoryTags: [...(request.categoryTags ?? [
+      request.primaryCategory ?? "workflow_environment_toolchain"
+    ])],
     importanceTags: [...(request.importanceTags ?? ["constraint"])],
     startup: request.startup ?? "auto",
     applicability: { summary: "Current test project", conditions: [] },

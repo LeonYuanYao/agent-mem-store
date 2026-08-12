@@ -52,7 +52,8 @@ async function createRoot(): Promise<{ runtimeRoot: string; vaultRoot: string }>
 
 const candidate = {
   statement: "Run the repository typecheck before claiming completion.",
-  category: "workflow",
+  primaryCategory: "workflow_environment_toolchain" as const,
+  categoryTags: ["workflow_environment_toolchain" as const],
   applicabilitySummary: "This repository",
   conditions: [],
   exclusions: [],
@@ -755,7 +756,7 @@ test("Human Memory evidence must bind the current revision and content identity"
     ...roots,
     scope: { kind: "project", projectId },
     body: "Use a content-addressed Human reference.",
-    category: "governance",
+    primaryCategory: "workflow_environment_toolchain",
     assertedAt: "2026-08-07T17:00:00.000Z"
   });
   if (human.state !== "created") throw new Error("Expected Human Memory.");

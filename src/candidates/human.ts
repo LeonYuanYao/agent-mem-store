@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
+import { memoryCategorySchema, type MemoryCategory } from "../memories/categories.js";
 import {
   readCanonicalMemory,
   writeCanonicalMemory,
@@ -69,7 +70,7 @@ function createHumanMemory(request: {
   readonly revisionId: string;
   readonly scope: MemoryScope;
   readonly body: string;
-  readonly category: string;
+  readonly primaryCategory: MemoryCategory;
   readonly sensitivity: "normal" | "private";
   readonly assertedAt: string;
   readonly operationId: string;
@@ -91,7 +92,8 @@ function createHumanMemory(request: {
     sensitivity: request.sensitivity,
     lifecycle: "active",
     lifecycleDetails: {},
-    category: request.category,
+    primaryCategory: request.primaryCategory,
+    categoryTags: [request.primaryCategory],
     importanceTags: [],
     startup: request.startup,
     applicability: request.applicability ?? { summary: "", conditions: [] },
@@ -141,7 +143,7 @@ export async function assertHumanKnowledge(request: {
   readonly vaultRoot: string;
   readonly scope: MemoryScope;
   readonly body: string;
-  readonly category: string;
+  readonly primaryCategory: MemoryCategory;
   readonly sensitivity?: "normal" | "private";
   readonly assertedAt: string;
   readonly operationId?: string;
@@ -215,7 +217,7 @@ export async function assertHumanKnowledge(request: {
         request.scope.kind,
         request.scope.kind === "project" ? request.scope.projectId : null,
         request.body,
-        request.category,
+        request.primaryCategory,
         request.sensitivity ?? "normal",
         request.conflictDetectedBy ?? "explicit-human-conflict-input",
         assertedAt
@@ -255,7 +257,7 @@ export async function assertHumanKnowledge(request: {
     revisionId,
     scope: request.scope,
     body: request.body,
-    category: request.category,
+    primaryCategory: request.primaryCategory,
     sensitivity: successorSensitivity,
     assertedAt,
     operationId,
@@ -443,7 +445,7 @@ export async function resolveHumanConflict(request: {
     vaultRoot: request.vaultRoot,
     scope,
     body: z.string().parse(conflict.assertion_body),
-    category: z.string().parse(conflict.category),
+    primaryCategory: memoryCategorySchema.parse(conflict.category),
     sensitivity: z.enum(["normal", "private"]).parse(conflict.sensitivity),
     assertedAt: resolvedAt,
     operationId,

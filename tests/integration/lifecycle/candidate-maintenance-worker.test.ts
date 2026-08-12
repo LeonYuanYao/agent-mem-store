@@ -40,14 +40,18 @@ test("completed weekly governance durably runs candidate retention exactly once"
          candidate_json, category, certainty, state, high_value, sensitivity,
          source_session_id, created_at, last_evidence_at, updated_at,
          successful_evaluation_at
-       ) VALUES (?, ?, 'project', ?, ?, ?, 'lesson', 'asserted', 'waiting', 0,
+       ) VALUES (?, ?, 'project', ?, ?, ?, 'durable_reference', 'asserted', 'waiting', 0,
                  'normal', ?, ?, ?, ?, ?)`
     ).run(
       "mscandidate_due",
       "f".repeat(64),
       "msproj_candidate_maintenance",
       "Old provisional knowledge.",
-      JSON.stringify({ statement: "Old provisional knowledge." }),
+      JSON.stringify({
+        statement: "Old provisional knowledge.",
+        primaryCategory: "durable_reference",
+        categoryTags: ["durable_reference"]
+      }),
       "old-session",
       "2026-01-01T00:00:00.000Z",
       "2026-01-01T00:00:00.000Z",

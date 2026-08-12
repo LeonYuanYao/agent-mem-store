@@ -68,7 +68,8 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
           candidates: [
             {
               statement: "Use stable Project identities for Project Memory.",
-              category: "decision",
+              primaryCategory: "architecture_contract",
+              categoryTags: ["architecture_contract"],
               applicabilitySummary: "Project Memory resolution",
               conditions: ["A Project boundary is required."],
               exclusions: ["This does not create Global Memory."],
@@ -164,6 +165,99 @@ test("schema-invalid Luna output is rejected without a fallback model", async ()
   });
 });
 
+test("Luna rejects a primary category outside the controlled memory taxonomy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-category-invalid-"));
+  temporaryDirectories.push(root);
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: [{
+          statement: "Use a stable project identity.",
+          primaryCategory: "decision",
+          categoryTags: ["architecture_contract"],
+          applicabilitySummary: "Project identity",
+          conditions: [],
+          exclusions: [],
+          preservedNegations: [],
+          certainty: "asserted",
+          sensitivity: "normal",
+          evidenceIds: ["evidence-1"],
+          importanceReasons: []
+        }]
+      }),
+      stderr: ""
+    })
+  });
+
+  await expect(adapter.distillBatch({
+    operationId: "category-contract",
+    scope: { kind: "global" },
+    evidence: [{
+      evidenceId: "evidence-1",
+      evidenceClass: "explicit_user_statement",
+      content: "Use a stable project identity.",
+      sourceIdentity: "category-contract",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  })).rejects.toMatchObject({ category: "schema_invalid", retryable: true });
+});
+
+test("the adapter deterministically normalizes Luna primary category to category-tag precedence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-category-precedence-"));
+  temporaryDirectories.push(root);
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: [{
+          statement: "Do not overwrite user data while applying this architecture contract.",
+          primaryCategory: "architecture_contract",
+          categoryTags: ["architecture_contract", "safety_data_integrity"],
+          applicabilitySummary: "Repository writes",
+          conditions: [],
+          exclusions: [],
+          preservedNegations: ["Do not overwrite user data."],
+          certainty: "asserted",
+          sensitivity: "normal",
+          evidenceIds: ["evidence-1"],
+          importanceReasons: []
+        }]
+      }),
+      stderr: ""
+    })
+  });
+
+  await expect(adapter.distillBatch({
+    operationId: "category-precedence",
+    scope: { kind: "global" },
+    evidence: [{
+      evidenceId: "evidence-1",
+      evidenceClass: "explicit_user_statement",
+      content: "Do not overwrite user data while applying this architecture contract.",
+      sourceIdentity: "category-precedence",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  })).resolves.toMatchObject({
+    candidates: [{
+      primaryCategory: "safety_data_integrity",
+      categoryTags: ["architecture_contract", "safety_data_integrity"]
+    }]
+  });
+});
+
 test("the Responses API output schema gives every const field an explicit JSON type", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-schema-"));
   temporaryDirectories.push(root);
@@ -213,6 +307,58 @@ test("the Responses API output schema gives every const field an explicit JSON t
   });
 });
 
+test("the distillation output schema avoids unsupported uniqueItems while local validation rejects duplicate categories", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-category-schema-"));
+  temporaryDirectories.push(root);
+  let outputSchema: unknown;
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: async (request) => {
+      const schemaIndex = request.arguments.indexOf("--output-schema") + 1;
+      const schemaPath = request.arguments[schemaIndex];
+      if (schemaPath === undefined) throw new Error("Expected an output schema path.");
+      outputSchema = JSON.parse(await readFile(schemaPath, "utf8"));
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "distillation",
+          candidates: [{
+            statement: "Use a stable category.",
+            primaryCategory: "architecture_contract",
+            categoryTags: ["architecture_contract", "architecture_contract"],
+            applicabilitySummary: "test",
+            conditions: [],
+            exclusions: [],
+            preservedNegations: [],
+            certainty: "asserted",
+            sensitivity: "normal",
+            evidenceIds: ["evidence-1"],
+            importanceReasons: []
+          }]
+        }),
+        stderr: ""
+      };
+    }
+  });
+
+  await expect(adapter.distillBatch({
+    operationId: "category-schema-contract",
+    scope: { kind: "global" },
+    evidence: [{
+      evidenceId: "evidence-1",
+      evidenceClass: "explicit_user_statement",
+      content: "Use a stable category.",
+      sourceIdentity: "category-schema-contract",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  })).rejects.toMatchObject({ category: "schema_invalid", retryable: true });
+  expect(JSON.stringify(outputSchema)).not.toContain('"uniqueItems"');
+});
+
 test("importance reasons are the Luna wire source of truth and deterministically derive tags", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-importance-source-"));
   temporaryDirectories.push(root);
@@ -235,7 +381,8 @@ test("importance reasons are the Luna wire source of truth and deterministically
           kind: "distillation",
           candidates: [{
             statement: "Keep program code separate from canonical personal data.",
-            category: "architecture",
+            primaryCategory: "architecture_contract",
+            categoryTags: ["architecture_contract"],
             applicabilitySummary: "MemStore",
             conditions: [],
             exclusions: [],
@@ -283,7 +430,7 @@ test("an API invalid_json_schema response is classified as a visible non-retryab
     runProcess: () => Promise.resolve({
       exitCode: 1,
       stdout: "",
-      stderr: "invalid_request_error: invalid_json_schema"
+      stderr: "model: gpt-5.6-luna\ninvalid_request_error: invalid_json_schema"
     })
   });
 
@@ -403,7 +550,8 @@ test("consolidation uses short evidence aliases and restores exact source identi
           kind: "consolidation",
           candidates: [{
             statement: "Consolidated statement.",
-            category: "lesson",
+            primaryCategory: "preference_constraint",
+            categoryTags: ["preference_constraint"],
             applicabilitySummary: "test",
             conditions: [],
             exclusions: [],
@@ -427,7 +575,8 @@ test("consolidation uses short evidence aliases and restores exact source identi
       evidenceIds: [originalEvidenceId],
       candidates: [{
         statement: "Source statement.",
-        category: "lesson",
+        primaryCategory: "preference_constraint",
+        categoryTags: ["preference_constraint"],
         applicabilitySummary: "test",
         conditions: [],
         exclusions: [],
@@ -494,7 +643,8 @@ test("duplicate Luna importance reasons for the same tag are rejected", async ()
         kind: "distillation",
         candidates: [{
           statement: "A proposed invariant.",
-          category: "architecture",
+          primaryCategory: "architecture_contract",
+          categoryTags: ["architecture_contract"],
           applicabilitySummary: "test project",
           conditions: [],
           exclusions: [],

@@ -76,7 +76,8 @@ test("a long Session is distilled in batches and consolidated from structured re
         candidates: [
           {
             statement: `Batch statement ${request.operationId}`,
-            category: "lesson",
+            primaryCategory: "preference_constraint",
+            categoryTags: ["preference_constraint"],
             applicabilitySummary: "long session",
             conditions: [],
             exclusions: [],
@@ -112,7 +113,8 @@ test("a long Session is distilled in batches and consolidated from structured re
         candidates: [
           {
             statement: "Consolidated long-session knowledge.",
-            category: "lesson",
+            primaryCategory: "preference_constraint",
+            categoryTags: ["preference_constraint"],
             applicabilitySummary: "long session",
             conditions: [],
             exclusions: [],

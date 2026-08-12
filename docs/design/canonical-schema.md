@@ -27,7 +27,8 @@ The owned object records:
 - schema, Memory identity, revision identity, content identity, policy version,
   creation time, and revision time;
 - Project or Global scope, Human-authored or Agent-derived authority, origin,
-  normal/private sensitivity, category, importance tags, and startup policy;
+  normal/private sensitivity, one controlled primary category, validated
+  controlled category tags, importance tags, and startup policy;
 - lifecycle state and archive/tombstone time plus reason where required;
 - applicability summary and conditions, validity state and optional interval;
 - a versioned Semantic Contract containing claims, conditions, exclusions, and

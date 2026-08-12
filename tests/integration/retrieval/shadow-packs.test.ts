@@ -65,7 +65,7 @@ test("SessionStart prepares a bounded authority-labelled Core Memory Pack withou
     body: "Always run typecheck before completion.",
     compact: "Run typecheck before completion.",
     startup: "always",
-    category: "preference_constraint"
+    primaryCategory: "preference_constraint"
   });
   const dynamicGlobal = makeCanonicalMemory({
     memoryId: "msmem_123e4567-e89b-42d3-a456-426614174402",
@@ -73,7 +73,7 @@ test("SessionStart prepares a bounded authority-labelled Core Memory Pack withou
     scope: { kind: "global" },
     body: "Never persist credentials.",
     compact: "Never persist credentials.",
-    category: "safety_data_integrity"
+    primaryCategory: "safety_data_integrity"
   });
   const identityFallback = makeCanonicalMemory({
     memoryId: "msmem_123e4567-e89b-42d3-a456-426614174403",
@@ -83,7 +83,7 @@ test("SessionStart prepares a bounded authority-labelled Core Memory Pack withou
     compact: "stale compact",
     validatedCompact: false,
     identityLabel: "Database recovery procedure",
-    category: "failure_recovery_hazard"
+    primaryCategory: "failure_recovery_hazard"
   });
   const never = makeCanonicalMemory({
     memoryId: "msmem_123e4567-e89b-42d3-a456-426614174404",
@@ -367,7 +367,7 @@ test("SessionStart pages lightweight bucket rows beyond the first sixteen candid
     compact: "stale compact",
     validatedCompact: false,
     startup: "always",
-    category: "preference_constraint"
+    primaryCategory: "preference_constraint"
   }));
   const available = makeCanonicalMemory({
     memoryId: "msmem_ffffffff-ffff-4fff-8fff-ffffffffffff",
@@ -376,7 +376,7 @@ test("SessionStart pages lightweight bucket rows beyond the first sixteen candid
     body: "The seventeenth startup candidate remains discoverable.",
     compact: "Keep paging startup candidates.",
     startup: "always",
-    category: "preference_constraint"
+    primaryCategory: "preference_constraint"
   });
   await writeAll(roots, [...unavailable, available]);
 

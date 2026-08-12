@@ -34,7 +34,7 @@ test("a Direct Human Assertion preserves the exact body without a Luna rewrite",
     ...roots,
     scope: projectScope,
     body,
-    category: "user-rule",
+    primaryCategory: "preference_constraint",
     assertedAt: "2026-08-07T09:00:00.000Z"
   });
   expect(result).toMatchObject({ state: "created" });
@@ -52,7 +52,7 @@ test("a generic conflicting assertion is isolated until the Human resolves it", 
     ...roots,
     scope: projectScope,
     body: "Use pnpm for this project.",
-    category: "tooling",
+    primaryCategory: "workflow_environment_toolchain",
     assertedAt: "2026-08-07T09:10:00.000Z"
   });
   if (original.state !== "created") throw new Error("Expected original Memory.");
@@ -61,7 +61,7 @@ test("a generic conflicting assertion is isolated until the Human resolves it", 
     ...roots,
     scope: projectScope,
     body: "Use npm for this project.",
-    category: "tooling",
+    primaryCategory: "workflow_environment_toolchain",
     potentialConflictMemoryIds: [original.memoryId],
     conflictDetectedBy: "gpt-5.6-luna",
     assertedAt: "2026-08-07T09:10:01.000Z"
@@ -90,7 +90,7 @@ test("a Human conflict can adopt the new assertion or distinguish its applicabil
     ...roots,
     scope: projectScope,
     body: "Use the stable endpoint.",
-    category: "api",
+    primaryCategory: "architecture_contract",
     assertedAt: "2026-08-07T09:15:00.000Z"
   });
   if (original.state !== "created") throw new Error("Expected original Memory.");
@@ -98,7 +98,7 @@ test("a Human conflict can adopt the new assertion or distinguish its applicabil
     ...roots,
     scope: projectScope,
     body: "Keep the API timeout at 30 seconds.",
-    category: "api",
+    primaryCategory: "architecture_contract",
     assertedAt: "2026-08-07T09:15:00.500Z"
   });
   if (unrelated.state !== "created") throw new Error("Expected unrelated Memory.");
@@ -106,7 +106,7 @@ test("a Human conflict can adopt the new assertion or distinguish its applicabil
     ...roots,
     scope: projectScope,
     body: "Use the beta endpoint.",
-    category: "api",
+    primaryCategory: "architecture_contract",
     potentialConflictMemoryIds: [original.memoryId],
     assertedAt: "2026-08-07T09:15:01.000Z"
   });
@@ -129,7 +129,7 @@ test("a Human conflict can adopt the new assertion or distinguish its applicabil
     ...roots,
     scope: projectScope,
     body: "Use the stable endpoint for production.",
-    category: "api",
+    primaryCategory: "architecture_contract",
     potentialConflictMemoryIds: [adopted.state === "adopted_new" ? adopted.memoryId : original.memoryId],
     assertedAt: "2026-08-07T09:15:03.000Z"
   });
@@ -159,7 +159,7 @@ test("Private sensitivity survives conflict isolation and resolution", async () 
     ...roots,
     scope: projectScope,
     body: "Use the shared staging account.",
-    category: "environment",
+    primaryCategory: "workflow_environment_toolchain",
     sensitivity: "private",
     assertedAt: "2026-08-07T09:18:00.000Z"
   });
@@ -168,7 +168,7 @@ test("Private sensitivity survives conflict isolation and resolution", async () 
     ...roots,
     scope: projectScope,
     body: "Use the isolated staging account.",
-    category: "environment",
+    primaryCategory: "workflow_environment_toolchain",
     sensitivity: "private",
     potentialConflictMemoryIds: [original.memoryId],
     assertedAt: "2026-08-07T09:18:01.000Z"
@@ -195,7 +195,7 @@ test("an explicit replacement archives the predecessor and creates a successor",
     ...roots,
     scope: projectScope,
     body: "Use pnpm 9.",
-    category: "tooling",
+    primaryCategory: "workflow_environment_toolchain",
     assertedAt: "2026-08-07T09:20:00.000Z"
   });
   if (original.state !== "created") throw new Error("Expected original Memory.");
@@ -204,7 +204,7 @@ test("an explicit replacement archives the predecessor and creates a successor",
     ...roots,
     scope: projectScope,
     body: "Use pnpm 10.",
-    category: "tooling",
+    primaryCategory: "workflow_environment_toolchain",
     replacesMemoryId: original.memoryId,
     assertedAt: "2026-08-07T09:20:01.000Z"
   });

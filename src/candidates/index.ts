@@ -7,6 +7,11 @@ import { z } from "zod";
 import { readCapturedEvent } from "../capture/index.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import type { ImportanceReason, ImportanceTag } from "../luna/index.js";
+import {
+  memoryCategorySchema,
+  selectPrimaryCategory,
+  type MemoryCategory
+} from "../memories/categories.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import {
   readCanonicalMemory,
@@ -27,7 +32,8 @@ export type CandidateState = z.infer<typeof candidateStateSchema>;
 
 export interface CandidateContent {
   readonly statement: string;
-  readonly category: string;
+  readonly primaryCategory: MemoryCategory;
+  readonly categoryTags: readonly MemoryCategory[];
   readonly applicabilitySummary: string;
   readonly conditions: readonly string[];
   readonly exclusions: readonly string[];
@@ -388,6 +394,16 @@ export async function createAgentCandidate(request: {
   if (request.candidate.statement.trim().length === 0) {
     throw new Error("A Candidate statement cannot be empty.");
   }
+  const primaryCategory = memoryCategorySchema.parse(request.candidate.primaryCategory);
+  const categoryTags = request.candidate.categoryTags.map((category) =>
+    memoryCategorySchema.parse(category)
+  );
+  if (
+    new Set(categoryTags).size !== categoryTags.length ||
+    selectPrimaryCategory(categoryTags) !== primaryCategory
+  ) {
+    throw new Error("A Candidate contains invalid controlled categories.");
+  }
   if (request.evidence.length === 0) {
     throw new Error("An Agent-derived Candidate requires provenance-bound evidence.");
   }
@@ -543,7 +559,7 @@ export async function createAgentCandidate(request: {
             request.scope.kind === "project" ? request.scope.projectId : null,
             normalizedCandidate.statement,
             JSON.stringify(normalizedCandidate),
-            normalizedCandidate.category,
+            normalizedCandidate.primaryCategory,
             normalizedCandidate.certainty,
             highValue ? 1 : 0,
             normalizedCandidate.sensitivity ?? "normal",
@@ -747,7 +763,8 @@ function canonicalFromCandidate(request: {
     sensitivity: request.candidate.sensitivity ?? "normal",
     lifecycle: "active",
     lifecycleDetails: {},
-    category: request.candidate.category,
+    primaryCategory: request.candidate.primaryCategory,
+    categoryTags: [...request.candidate.categoryTags],
     importanceTags: [...request.candidate.importanceTags],
     startup: request.startup,
     applicability: {

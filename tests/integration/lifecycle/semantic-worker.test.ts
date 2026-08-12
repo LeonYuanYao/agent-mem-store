@@ -64,7 +64,8 @@ test("a durable semantic-assessment operation feeds the deterministic Promotion 
     scope: { kind: "global" },
     candidate: {
       statement: "Use pnpm for JavaScript repositories.",
-      category: "tooling",
+      primaryCategory: "workflow_environment_toolchain",
+      categoryTags: ["workflow_environment_toolchain"],
       applicabilitySummary: "JavaScript repositories",
       conditions: [],
       exclusions: [],

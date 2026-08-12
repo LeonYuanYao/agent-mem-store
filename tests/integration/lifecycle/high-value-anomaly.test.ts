@@ -47,7 +47,8 @@ test("a one-off high-value Session burst stays provisional across catch-up windo
       scope: { kind: "project", projectId },
       candidate: {
         statement: `Distinct reusable constraint ${String(index)}.`,
-        category: "constraint",
+        primaryCategory: "preference_constraint",
+        categoryTags: ["preference_constraint"],
         applicabilitySummary: "test project",
         conditions: [],
         exclusions: [],

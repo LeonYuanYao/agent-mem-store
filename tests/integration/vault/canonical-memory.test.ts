@@ -53,7 +53,8 @@ const memory: CanonicalMemory = {
   sensitivity: "normal",
   lifecycle: "active",
   lifecycleDetails: {},
-  category: "decision",
+  primaryCategory: "architecture_contract",
+  categoryTags: ["architecture_contract"],
   importanceTags: ["architecture"],
   startup: "auto",
   applicability: {
@@ -136,6 +137,46 @@ test("Canonical Memory is written to its identity-stable Vault path and read bac
   expect(
     await readFile(join(vaultRoot, "_MemStore", "Projects", `${projectId}.md`), "utf8")
   ).toContain(`project_id: ${projectId}`);
+});
+
+test("legacy free-form category frontmatter is read through the controlled taxonomy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-vault-legacy-category-"));
+  temporaryDirectories.push(root);
+  const vaultRoot = join(root, "vault");
+  const runtimeRoot = join(root, "runtime");
+  const legacy = {
+    ...memory,
+    authority: "agent_derived" as const,
+    originKind: "model_extraction" as const
+  };
+  const written = await writeCanonicalMemoryCore({
+    vaultRoot,
+    runtimeRoot,
+    actor: "agent",
+    memory: legacy
+  });
+  const source = await readFile(written.path, "utf8");
+  const legacySource = source
+    .replace(/ {2}primary_category: architecture_contract\n/u, "  category: api_limitation\n")
+    .replace(/ {2}category_tags:\n {4}- architecture_contract\n/u, "");
+  await writeFile(written.path, legacySource);
+  await rebuildCanonicalCatalog({ vaultRoot, runtimeRoot });
+
+  await expect(readCanonicalMemory({
+    vaultRoot,
+    runtimeRoot,
+    memoryId: memory.memoryId
+  })).resolves.toMatchObject({
+    memory: {
+      primaryCategory: "applicability_limitation",
+      categoryTags: ["applicability_limitation", "architecture_contract"]
+    }
+  });
+  expect((await readCanonicalMemory({
+    vaultRoot,
+    runtimeRoot,
+    memoryId: memory.memoryId
+  }))?.memory).not.toHaveProperty("categoryAliases");
 });
 
 test("ordinary writes keep the relationship catalog synchronized", async () => {
@@ -480,7 +521,8 @@ test("a Tombstone removes unknown owned excerpts but preserves unowned frontmatt
         tombstonedAt: "2026-08-07T03:03:10.000Z",
         reason: "test purge"
       },
-      category: "tombstone",
+      primaryCategory: "tombstone",
+      categoryTags: [],
       importanceTags: [],
       startup: "never",
       applicability: { summary: "", conditions: [] },
@@ -729,7 +771,8 @@ test("a tombstone is representable only without memory-bearing text", async () =
       tombstonedAt: "2026-08-07T03:05:00.000Z",
       reason: "test purge"
     },
-    category: "tombstone",
+    primaryCategory: "tombstone",
+    categoryTags: [],
     importanceTags: [],
     startup: "never",
     applicability: { summary: "", conditions: [] },

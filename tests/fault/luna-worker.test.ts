@@ -72,7 +72,8 @@ test("a transient Luna failure leaves evidence retryable and later produces one 
         kind: "distillation",
         candidates: [{
           statement: "Remember the bounded rule.",
-          category: "rule",
+          primaryCategory: "preference_constraint",
+          categoryTags: ["preference_constraint"],
           applicabilitySummary: "retry project",
           conditions: [],
           exclusions: [],

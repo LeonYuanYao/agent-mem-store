@@ -334,7 +334,8 @@ async function ingestDistilledCandidates(request: {
       scope,
       candidate: {
         statement: distilled.statement,
-        category: distilled.category,
+        primaryCategory: distilled.primaryCategory,
+        categoryTags: distilled.categoryTags,
         applicabilitySummary: distilled.applicabilitySummary,
         conditions: distilled.conditions,
         exclusions: distilled.exclusions,

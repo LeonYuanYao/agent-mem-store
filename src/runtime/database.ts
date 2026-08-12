@@ -99,6 +99,21 @@ const migrations: readonly Migration[] = [
     version: 18,
     name: "candidate_maintenance",
     path: new URL("../../migrations/0018-candidate-maintenance.sql", import.meta.url)
+  },
+  {
+    version: 19,
+    name: "controlled_memory_categories",
+    path: new URL("../../migrations/0019-controlled-memory-categories.sql", import.meta.url)
+  },
+  {
+    version: 20,
+    name: "remove_category_aliases",
+    path: new URL("../../migrations/0020-remove-category-aliases.sql", import.meta.url)
+  },
+  {
+    version: 21,
+    name: "enforce_category_tag_invariants",
+    path: new URL("../../migrations/0021-enforce-category-tag-invariants.sql", import.meta.url)
   }
 ];
 

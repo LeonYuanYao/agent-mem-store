@@ -54,7 +54,8 @@ test("explicit Global extraction durably authorizes Luna Candidates and preserve
           kind: "distillation" as const,
           candidates: [{
             statement: "Use a single durable outbox for capture retries.",
-            category: "architecture_contract",
+            primaryCategory: "architecture_contract",
+            categoryTags: ["architecture_contract"],
             applicabilitySummary: "Current project",
             conditions: [],
             exclusions: [],
