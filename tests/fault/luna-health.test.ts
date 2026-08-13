@@ -8,6 +8,7 @@ import {
   completeLunaOperation,
   enqueueLunaOperation,
   failLunaOperation,
+  failLunaOperationLocally,
   inspectLunaHealth,
   recordLunaHealthProbe,
   retryBlockedLunaOperations
@@ -124,6 +125,84 @@ test("three retryable failures spanning two minutes degrade Luna with bounded ba
     pendingOperationCount: 1
   });
   expect(health.nextRetryAt).toMatch(/^2026-08-07T06:/u);
+});
+
+test("a retryable Luna operation blocks after six automatic retries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-retry-limit-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const operation = await enqueueLunaOperation({
+    runtimeRoot,
+    kind: "distill_batch",
+    idempotencyKey: "retry-limit:batch-1",
+    payload: { batchId: "batch-1" },
+    createdAt: "2026-08-07T06:00:00.000Z"
+  });
+
+  for (let attempt = 1; attempt <= 7; attempt += 1) {
+    const now = new Date(Date.parse("2026-08-07T06:00:00.000Z") + attempt * 1_000)
+      .toISOString();
+    const claimed = await claimLunaOperation({
+      runtimeRoot,
+      workerId: "worker-1",
+      now,
+      leaseSeconds: 60
+    });
+    if (claimed.state !== "claimed") throw new Error("Expected retry claim.");
+    expect(claimed.operation.attemptCount).toBe(attempt);
+    const failed = await failLunaOperation({
+      runtimeRoot,
+      operationId: operation.operationId,
+      leaseToken: claimed.leaseToken,
+      failedAt: now,
+      error: new LunaInvocationError("schema_invalid", true, "invalid structured output"),
+      retryAfter: new Date(Date.parse(now) + 1_000).toISOString()
+    });
+    expect(failed.state).toBe(attempt < 7 ? "retrying" : "blocked");
+    expect(failed.nextRetryAt).toBe(attempt < 7
+      ? new Date(Date.parse(now) + 1_000).toISOString()
+      : null);
+  }
+
+  await expect(claimLunaOperation({
+    runtimeRoot,
+    workerId: "worker-1",
+    now: "2026-08-07T07:00:00.000Z",
+    leaseSeconds: 60
+  })).resolves.toEqual({ state: "empty" });
+});
+
+test("a retryable local Luna processing failure uses the same retry limit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-local-retry-limit-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const operation = await enqueueLunaOperation({
+    runtimeRoot,
+    kind: "distill_batch",
+    idempotencyKey: "local-retry-limit:batch-1",
+    payload: { batchId: "batch-1" },
+    createdAt: "2026-08-07T06:00:00.000Z"
+  });
+
+  for (let attempt = 1; attempt <= 7; attempt += 1) {
+    const now = new Date(Date.parse("2026-08-07T06:00:00.000Z") + attempt * 20 * 60_000)
+      .toISOString();
+    const claimed = await claimLunaOperation({
+      runtimeRoot,
+      workerId: "worker-1",
+      now,
+      leaseSeconds: 60
+    });
+    if (claimed.state !== "claimed") throw new Error("Expected local retry claim.");
+    const failed = await failLunaOperationLocally({
+      runtimeRoot,
+      operationId: operation.operationId,
+      leaseToken: claimed.leaseToken,
+      failedAt: now,
+      retryable: true
+    });
+    expect(failed.state).toBe(attempt < 7 ? "retrying" : "blocked");
+  }
 });
 
 test("a successful queued operation clears a transient healthy-state failure streak", async () => {

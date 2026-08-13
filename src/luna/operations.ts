@@ -210,6 +210,11 @@ export async function claimLunaOperation(
 }
 
 const retrySeconds = [30, 60, 120, 240, 480, 900] as const;
+const maximumAutomaticRetryCount = retrySeconds.length;
+
+function canAutomaticallyRetry(retryable: boolean, attemptCount: number): boolean {
+  return retryable && attemptCount <= maximumAutomaticRetryCount;
+}
 
 function calculateRetryAt(
   operationId: string,
@@ -454,7 +459,7 @@ export async function failLunaOperation(
         .get(request.operationId, request.leaseToken);
       if (row === undefined) throw new Error("Luna operation lease is not owned.");
       const attemptCount = z.number().int().positive().parse(row.attempt_count);
-      const blocked = !request.error.retryable;
+      const blocked = !canAutomaticallyRetry(request.error.retryable, attemptCount);
       const nextRetryAt = blocked
         ? null
         : request.retryAfter === undefined
@@ -512,7 +517,8 @@ export async function failLunaOperationLocally(request: {
     ).get(request.operationId, request.leaseToken);
     if (row === undefined) throw new Error("Luna operation lease is not owned.");
     const attemptCount = z.number().int().positive().parse(row.attempt_count);
-    const nextRetryAt = request.retryable
+    const automaticRetry = canAutomaticallyRetry(request.retryable, attemptCount);
+    const nextRetryAt = automaticRetry
       ? calculateRetryAt(request.operationId, attemptCount, failedAt)
       : null;
     database.prepare(
@@ -521,14 +527,14 @@ export async function failLunaOperationLocally(request: {
            next_retry_at = ?, last_error_category = 'local_processing',
            updated_at = ? WHERE operation_id = ?`
     ).run(
-      request.retryable ? "retrying" : "blocked",
+      automaticRetry ? "retrying" : "blocked",
       nextRetryAt,
       failedAt,
       request.operationId
     );
     database.exec("COMMIT");
     return {
-      state: request.retryable ? "retrying" : "blocked",
+      state: automaticRetry ? "retrying" : "blocked",
       operationId: request.operationId,
       nextRetryAt
     };

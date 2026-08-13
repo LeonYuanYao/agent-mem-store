@@ -48,6 +48,12 @@ creation, and optional native dispatch. Luna is enabled only when an explicit
 `MEMSTORE_LUNA_CODEX_HOME` is supplied; the Worker never silently falls back to
 another model. A paused Worker performs no work.
 
+A retryable Luna operation receives at most six automatic retries after its
+initial attempt, using the six bounded backoff slots. If the seventh total
+attempt still fails, the durable operation becomes `blocked`; an exact manual
+retry may attempt the preserved operation again but does not reset its automatic
+retry history.
+
 `status` exposes Luna health/backlog, the active retrieval index, Worker pause
 state, Review Inbox/reminder backlog, and the active governance run. `doctor`
 is read-only and never repairs: it checks configuration, SQLite integrity, and,
