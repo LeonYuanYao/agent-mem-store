@@ -545,7 +545,8 @@ export class CodexLunaAdapter {
         ],
         request: aliasedRequest
       },
-      consolidationOutputSchema
+      consolidationOutputSchema,
+      300_000
     );
     const restore = (evidenceAlias: string): string => {
       const evidenceId = evidenceIdByAlias.get(evidenceAlias);
@@ -666,7 +667,8 @@ export class CodexLunaAdapter {
     schemaFilename: string,
     outputJsonSchema: unknown,
     prompt: unknown,
-    outputSchema: z.ZodType<Output>
+    outputSchema: z.ZodType<Output>,
+    timeoutMilliseconds = 120_000
   ): Promise<Output> {
     await mkdir(this.#options.temporaryRoot, { recursive: true, mode: 0o700 });
     const isolatedDirectory = await mkdtemp(
@@ -737,8 +739,9 @@ export class CodexLunaAdapter {
           CODEX_HOME: this.#options.codexHome
         },
         standardInput: JSON.stringify(prompt),
-        timeoutMilliseconds: this.#options.timeoutMilliseconds ?? 120_000
+        timeoutMilliseconds: this.#options.timeoutMilliseconds ?? timeoutMilliseconds
       });
+      if (result.timedOut === true) throw classifyProcessFailure(result);
       if (result.exitCode !== 0) throw classifyProcessFailure(result);
       try {
         return outputSchema.parse(JSON.parse(result.stdout));

@@ -32,9 +32,13 @@ is captured with local event identity and time, the Worker maintains the
 approved retrieval index and evaluates eligible events asynchronously, its
 LaunchAgent receives explicit Luna, embedding, and notifier locations, and the
 official window can start only from a completed trusted-Hook probe. Its baseline
-records the exact candidate, program, configuration, Hook, installation, and
-starting index revision identities plus the earliest Gate 6 review time seven
-consecutive days later. A normal content rebuild may advance the active index
-revision without invalidating Shadow; the approved embedding model, artifact,
-adapter version, dimensions, and normalization remain frozen throughout the
-window.
+records the exact candidate, program, installation, and starting index revision
+identities plus the effective MemStore configuration identity: native-memory
+flags, MemStore MCP configuration, the five managed Hook routes, and their
+explicit trust or enablement state. Unrelated Codex model, UI, Project trust,
+Marketplace, plugin, or non-MemStore Hook changes do not invalidate the window.
+A normal content rebuild may advance the active index revision without
+invalidating Shadow; the approved embedding model, artifact, adapter version,
+dimensions, and normalization remain frozen throughout the window. The
+baseline also records the earliest Gate 6 review time seven consecutive days
+later.

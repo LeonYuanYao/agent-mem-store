@@ -143,6 +143,24 @@ test("a Hook validation failure records a body-free health incident when Runtime
       bodyRetained: false
     }
   ]);
+
+  const recovered = await handleCodexHook({
+    runtimeRoot,
+    receivedAt: "2026-08-07T04:01:01.000Z",
+    input: {
+      hook_event_name: "Stop",
+      session_id: "session-hook-recovery",
+      turn_id: "turn-hook-recovery",
+      cwd: root,
+      last_assistant_message: "capture recovered"
+    }
+  });
+  expect(recovered).toMatchObject({
+    continue: true,
+    captured: true,
+    state: "captured"
+  });
+  await expect(listOpenCaptureHealthIncidents(runtimeRoot)).resolves.toEqual([]);
 });
 
 test("a busy Runtime database makes the Hook fail open within 500 milliseconds", async () => {

@@ -189,6 +189,7 @@ export async function handleCodexHook(
     });
     const captured = await captureEvent({
       runtimeRoot: request.runtimeRoot,
+      recoverHealthCategory: "hook_capture",
       event: {
         schemaVersion: 1,
         eventId: identity.eventId,

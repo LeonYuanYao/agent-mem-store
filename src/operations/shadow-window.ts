@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { parse } from "smol-toml";
 import { z } from "zod";
 
 import { openRuntimeDatabase } from "../runtime/database.js";
@@ -34,16 +35,99 @@ async function programSha256(repositoryRoot: string): Promise<string> {
   return hash.digest("hex");
 }
 
-function memoryFlag(source: string, key: "generate_memories" | "use_memories"): boolean {
-  const lines = source.split(/\r?\n/u);
-  const start = lines.findIndex((line) => line.trim() === "[memories]");
-  if (start < 0) throw new Error("Codex config has no [memories] section.");
-  const endOffset = lines.slice(start + 1).findIndex((line) => /^\[[^\]]+\]\s*$/u.test(line));
-  const end = endOffset < 0 ? lines.length : start + 1 + endOffset;
-  const section = lines.slice(start + 1, end).join("\n");
-  const match = new RegExp(`^${key}\\s*=\\s*(true|false)\\s*$`, "mu").exec(section);
-  if (match?.[1] === undefined) throw new Error(`Codex config has no ${key} value.`);
-  return match[1] === "true";
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === "object") {
+    const record = z.record(z.string(), z.unknown()).parse(value);
+    return Object.fromEntries(
+      Object.keys(record)
+        .sort((left, right) => left.localeCompare(right, "en-US"))
+        .map((key) => [key, canonicalize(record[key])])
+    );
+  }
+  return value;
+}
+
+function identitySha256(value: unknown): string {
+  return sha256(JSON.stringify(canonicalize(value)));
+}
+
+function codexConfigurationIdentity(
+  source: string,
+  managedHookStateKeys: readonly string[]
+): {
+  readonly nativeMemory: {
+    readonly generateMemories: boolean;
+    readonly useMemories: boolean;
+  };
+  readonly memstoreMcp: unknown;
+  readonly managedHookStates: unknown;
+} {
+  const document = z.record(z.string(), z.unknown()).parse(parse(source));
+  const memories = z.object({
+    generate_memories: z.boolean(),
+    use_memories: z.boolean()
+  }).parse(document.memories);
+  const mcpServers = z.record(z.string(), z.unknown()).parse(document.mcp_servers);
+  const memstoreMcp = z.record(z.string(), z.unknown()).parse(mcpServers.memstore);
+  const hooks = document.hooks === undefined
+    ? {}
+    : z.record(z.string(), z.unknown()).parse(document.hooks);
+  const hookStates = hooks.state === undefined
+    ? {}
+    : z.record(z.string(), z.unknown()).parse(hooks.state);
+  return {
+    nativeMemory: {
+      generateMemories: memories.generate_memories,
+      useMemories: memories.use_memories
+    },
+    memstoreMcp: canonicalize(memstoreMcp),
+    managedHookStates: canonicalize(Object.fromEntries(
+      managedHookStateKeys.flatMap((key) =>
+        Object.hasOwn(hookStates, key) ? [[key, hookStates[key]]] : []
+      )
+    ))
+  };
+}
+
+const shadowHookEvents = [
+  "SessionStart",
+  "UserPromptSubmit",
+  "PostToolUse",
+  "Stop",
+  "SessionEnd"
+] as const;
+
+function codexHookIdentity(source: string, hookPath: string): {
+  readonly routes: Record<string, unknown>;
+  readonly stateKeys: readonly string[];
+} {
+  const document = z.object({
+    hooks: z.record(z.string(), z.array(z.unknown()))
+  }).parse(JSON.parse(source));
+  const stateKeys: string[] = [];
+  const routes = Object.fromEntries(shadowHookEvents.map((event) => {
+    const marker = `memstore:gate5-shadow-v1:${event}:shadow`;
+    const relevant = (document.hooks[event] ?? []).flatMap((routeValue, routeIndex) => {
+      const route = z.record(z.string(), z.unknown()).parse(routeValue);
+      const hooks = z.array(z.unknown()).parse(route.hooks);
+      const routeIdentity = Object.fromEntries(
+        Object.entries(route).filter(([key]) => key !== "hooks")
+      );
+      return hooks.flatMap((hookValue, hookIndex) => {
+        const hook = z.record(z.string(), z.unknown()).parse(hookValue);
+        if (typeof hook.command !== "string" || !hook.command.includes(marker)) return [];
+        const eventKey = event.replace(/([a-z0-9])([A-Z])/gu, "$1_$2").toLowerCase();
+        stateKeys.push(`${hookPath}:${eventKey}:${String(routeIndex)}:${String(hookIndex)}`);
+        return [{ route: canonicalize(routeIdentity), hook: canonicalize(hook) }];
+      });
+    });
+    if (relevant.length !== 1) {
+      throw new Error(`Installed ${event} Shadow Hook must have exactly one managed route.`);
+    }
+    return [event, relevant];
+  }));
+  return { routes, stateKeys };
 }
 
 async function validatedBaseline(request: {
@@ -77,15 +161,14 @@ async function validatedBaseline(request: {
     candidateId: z.literal("gate5-shadow-v1"),
     state: z.literal("installed")
   }).parse(JSON.parse(manifestSource));
-  const generateMemories = memoryFlag(configSource, "generate_memories");
-  const useMemories = memoryFlag(configSource, "use_memories");
+  const hooksIdentity = codexHookIdentity(
+    hooksSource,
+    join(resolve(request.homeRoot), ".codex", "hooks.json")
+  );
+  const configIdentity = codexConfigurationIdentity(configSource, hooksIdentity.stateKeys);
+  const { generateMemories, useMemories } = configIdentity.nativeMemory;
   if (!generateMemories || !useMemories) {
     throw new Error("Official Shadow requires Codex native generation and recall to remain enabled as its baseline.");
-  }
-  for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]) {
-    if (!hooksSource.includes(`memstore:gate5-shadow-v1:${event}:shadow`)) {
-      throw new Error(`Installed ${event} Shadow Hook is missing.`);
-    }
   }
 
   const database = await openRuntimeDatabase(request.runtimeRoot);
@@ -131,8 +214,9 @@ async function validatedBaseline(request: {
     ).get();
     const baseline = {
       schemaVersion: 1,
-      configSha256: sha256(configSource),
-      hooksSha256: sha256(hooksSource),
+      identityScope: "memstore-v1",
+      configSha256: identitySha256(configIdentity),
+      hooksSha256: identitySha256(hooksIdentity.routes),
       programSha256: programSha,
       nativeMemory: { generateMemories, useMemories },
       probe: {
@@ -246,7 +330,9 @@ export async function inspectOfficialShadowWindow(request: {
   try {
     const row = database.prepare(
       `SELECT * FROM official_shadow_windows
-       ORDER BY started_at DESC LIMIT 1`
+       ORDER BY CASE WHEN state = 'active' THEN 0 ELSE 1 END,
+                started_at DESC
+       LIMIT 1`
     ).get();
     if (row === undefined) return undefined;
     const [candidateSource, manifestSource, configSource, hooksSource, programSha] = await Promise.all([
@@ -261,7 +347,13 @@ export async function inspectOfficialShadowWindow(request: {
       candidateId: z.string().min(1),
       state: z.string().min(1)
     }).parse(JSON.parse(manifestSource));
+    const hooksIdentity = codexHookIdentity(
+      hooksSource,
+      join(resolve(request.homeRoot), ".codex", "hooks.json")
+    );
+    const configIdentity = codexConfigurationIdentity(configSource, hooksIdentity.stateKeys);
     const baseline = z.looseObject({
+      identityScope: z.string().optional(),
       configSha256: z.string().regex(/^[0-9a-f]{64}$/u),
       hooksSha256: z.string().regex(/^[0-9a-f]{64}$/u),
       programSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
@@ -299,11 +391,15 @@ export async function inspectOfficialShadowWindow(request: {
     ) {
       invalidationReasons.push("installation_changed");
     }
-    if (sha256(configSource) !== baseline.configSha256) {
-      invalidationReasons.push("codex_config_changed");
-    }
-    if (sha256(hooksSource) !== baseline.hooksSha256) {
-      invalidationReasons.push("hooks_changed");
+    if (baseline.identityScope !== "memstore-v1") {
+      invalidationReasons.push("identity_scope_changed");
+    } else {
+      if (identitySha256(configIdentity) !== baseline.configSha256) {
+        invalidationReasons.push("codex_config_changed");
+      }
+      if (identitySha256(hooksIdentity.routes) !== baseline.hooksSha256) {
+        invalidationReasons.push("hooks_changed");
+      }
     }
     if (baseline.programSha256 === undefined) {
       invalidationReasons.push("program_identity_missing");

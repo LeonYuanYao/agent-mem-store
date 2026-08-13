@@ -56,12 +56,22 @@ test("a transient Luna failure leaves evidence retryable and later produces one 
     runtimeRoot,
     workerId: "worker-retry",
     now: "2026-08-07T12:00:02.000Z",
+    currentTime: () => "2026-08-07T12:02:10.000Z",
     adapter: unavailable
   })).resolves.toMatchObject({ state: "retrying" });
   await expect(inspectCaptureEventState(runtimeRoot, eventId)).resolves.toMatchObject({
     state: "pending"
   });
   await expect(listSessionCandidates(runtimeRoot, "retry-session")).resolves.toEqual([]);
+  const failedDatabase = await openRuntimeDatabase(runtimeRoot);
+  try {
+    const retry = failedDatabase.prepare(
+      "SELECT next_retry_at FROM luna_operations WHERE operation_kind = 'distill_batch'"
+    ).get();
+    expect(retry?.next_retry_at).toMatch(/^2026-08-07T12:02:/u);
+  } finally {
+    failedDatabase.close();
+  }
 
   let successfulDistillations = 0;
   const recovered: LunaWorkerAdapter = {

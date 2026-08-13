@@ -139,6 +139,28 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
   expect(request.standardInput).not.toContain("fallback");
 });
 
+test("a timed-out Luna process is classified as timeout even when it exits with code zero", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-timeout-classification-"));
+  temporaryDirectories.push(root);
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: "{\"schemaVersion\":1",
+      stderr: "",
+      timedOut: true
+    })
+  });
+
+  await expect(adapter.distillBatch({
+    operationId: "msop-timeout-classification",
+    scope: { kind: "global" },
+    evidence: []
+  })).rejects.toMatchObject({ category: "timeout", retryable: true });
+});
+
 test("schema-invalid Luna output is rejected without a fallback model", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-invalid-"));
   temporaryDirectories.push(root);
@@ -449,13 +471,13 @@ test("an API invalid_json_schema response is classified as a visible non-retryab
 test("consolidation and semantic assessment use distinct versioned structured tasks", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-structured-"));
   temporaryDirectories.push(root);
-  const prompts: string[] = [];
+  const requests: LunaProcessRequest[] = [];
   const adapter = new CodexLunaAdapter({
     codexExecutable: "codex",
     codexHome: join(root, "codex-home"),
     temporaryRoot: root,
     runProcess: (request) => {
-      prompts.push(request.standardInput);
+      requests.push(request);
       const prompt = JSON.parse(request.standardInput) as { task: string };
       if (prompt.task === "consolidate_session_candidates") {
         return Promise.resolve({
@@ -520,11 +542,14 @@ test("consolidation and semantic assessment use distinct versioned structured ta
     }]
   });
 
-  expect(prompts).toHaveLength(3);
-  expect(prompts[0]).toContain('"promptVersion":1');
-  expect(prompts[0]).toContain('"task":"consolidate_session_candidates"');
-  expect(prompts[1]).toContain('"task":"assess_candidate_semantics"');
-  expect(prompts[2]).toContain('"task":"assess_human_memory_conflict"');
+  expect(requests).toHaveLength(3);
+  expect(requests[0]?.standardInput).toContain('"promptVersion":1');
+  expect(requests[0]?.standardInput).toContain('"task":"consolidate_session_candidates"');
+  expect(requests[0]?.timeoutMilliseconds).toBe(300_000);
+  expect(requests[1]?.standardInput).toContain('"task":"assess_candidate_semantics"');
+  expect(requests[1]?.timeoutMilliseconds).toBe(120_000);
+  expect(requests[2]?.standardInput).toContain('"task":"assess_human_memory_conflict"');
+  expect(requests[2]?.timeoutMilliseconds).toBe(120_000);
 });
 
 test("consolidation uses short evidence aliases and restores exact source identities", async () => {

@@ -505,8 +505,10 @@ export async function runNextLunaWork(request: {
   readonly runtimeRoot: string;
   readonly workerId: string;
   readonly now: string;
+  readonly currentTime?: () => string;
   readonly adapter: LunaWorkerAdapter;
 }): Promise<RunNextLunaWorkResult> {
+  const currentTime = request.currentTime ?? (() => new Date().toISOString());
   const claimed = await claimLunaOperation({
     runtimeRoot: request.runtimeRoot,
     workerId: request.workerId,
@@ -552,18 +554,19 @@ export async function runNextLunaWork(request: {
     processingDatabase.close();
   }
   if (alreadyPersisted) {
+    const completedAt = z.iso.datetime().parse(currentTime());
     if (operation.kind === "distill_batch" && "batchId" in payload) {
       await finalizeCompletedBatch({
         runtimeRoot: request.runtimeRoot,
         batchId: payload.batchId,
-        completedAt: request.now
+        completedAt
       });
     }
     await completeLunaOperation({
       runtimeRoot: request.runtimeRoot,
       operationId: operation.operationId,
       leaseToken: claimed.leaseToken,
-      completedAt: request.now
+      completedAt
     });
     return {
       state: "completed",
@@ -583,6 +586,7 @@ export async function runNextLunaWork(request: {
             : { kind: "project", projectId: batch.projectId },
         evidence: batch.evidence
       });
+      const completedAt = z.iso.datetime().parse(currentTime());
       const database = await openRuntimeDatabase(request.runtimeRoot);
       try {
         database.exec("BEGIN IMMEDIATE");
@@ -593,7 +597,7 @@ export async function runNextLunaWork(request: {
                SET state = 'completed', result_json = ?, completed_at = ?
                WHERE batch_id = ?`
             )
-            .run(JSON.stringify(output), request.now, payload.batchId);
+            .run(JSON.stringify(output), completedAt, payload.batchId);
           database
             .prepare(
               `UPDATE capture_events SET state = 'completed', updated_at = ?
@@ -601,7 +605,7 @@ export async function runNextLunaWork(request: {
                  SELECT event_id FROM distillation_batch_events WHERE batch_id = ?
                )`
             )
-            .run(request.now, payload.batchId);
+            .run(completedAt, payload.batchId);
           database.exec("COMMIT");
         } catch (error) {
           database.exec("ROLLBACK");
@@ -613,13 +617,13 @@ export async function runNextLunaWork(request: {
       await finalizeCompletedBatch({
         runtimeRoot: request.runtimeRoot,
         batchId: payload.batchId,
-        completedAt: request.now
+        completedAt
       });
       await completeLunaOperation({
         runtimeRoot: request.runtimeRoot,
         operationId: operation.operationId,
         leaseToken: claimed.leaseToken,
-        completedAt: request.now
+        completedAt
       });
     } else {
       if (!("sessionId" in payload)) {
@@ -654,6 +658,7 @@ export async function runNextLunaWork(request: {
         sessionId: payload.sessionId,
         batchResults
       });
+      const completedAt = z.iso.datetime().parse(currentTime());
       const sessionEvidence = (
         await Promise.all(
           batchRows.map((row) =>
@@ -670,7 +675,7 @@ export async function runNextLunaWork(request: {
         projectId: projectIds.size === 1 ? [...projectIds][0] ?? null : null,
         output,
         evidence: sessionEvidence.flatMap((item) => item.evidence),
-        createdAt: request.now
+        createdAt: completedAt
       });
       const updateDatabase = await openRuntimeDatabase(request.runtimeRoot);
       try {
@@ -680,7 +685,7 @@ export async function runNextLunaWork(request: {
              SET state = 'completed', result_json = ?, completed_at = ?
              WHERE session_id = ?`
           )
-          .run(JSON.stringify(output), request.now, payload.sessionId);
+          .run(JSON.stringify(output), completedAt, payload.sessionId);
       } finally {
         updateDatabase.close();
       }
@@ -688,7 +693,7 @@ export async function runNextLunaWork(request: {
         runtimeRoot: request.runtimeRoot,
         operationId: operation.operationId,
         leaseToken: claimed.leaseToken,
-        completedAt: request.now
+        completedAt
       });
     }
     return {
@@ -697,20 +702,21 @@ export async function runNextLunaWork(request: {
       operationKind: operation.kind
     };
   } catch (error) {
+    const failedAt = z.iso.datetime().parse(currentTime());
     const failed =
       error instanceof LunaInvocationError
         ? await failLunaOperation({
             runtimeRoot: request.runtimeRoot,
             operationId: operation.operationId,
             leaseToken: claimed.leaseToken,
-            failedAt: request.now,
+            failedAt,
             error
           })
         : await failLunaOperationLocally({
             runtimeRoot: request.runtimeRoot,
             operationId: operation.operationId,
             leaseToken: claimed.leaseToken,
-            failedAt: request.now,
+            failedAt,
             retryable: true
           });
     const failedDatabase = await openRuntimeDatabase(request.runtimeRoot);

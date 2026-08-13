@@ -33,6 +33,7 @@ export type CaptureEvent = z.infer<typeof eventSchema>;
 export interface CaptureRequest {
   readonly runtimeRoot: string;
   readonly event: CaptureEvent;
+  readonly recoverHealthCategory?: "hook_capture";
 }
 
 export type CaptureResult =
@@ -236,6 +237,7 @@ export async function captureEvent(request: CaptureRequest): Promise<CaptureResu
   const sourceTruncated = retained.truncated;
   const segments = segment(retainedPayload);
   const database = await openRuntimeDatabase(request.runtimeRoot);
+  const captureSucceededAt = new Date().toISOString();
 
   try {
     database.exec("BEGIN IMMEDIATE");
@@ -250,11 +252,17 @@ export async function captureEvent(request: CaptureRequest): Promise<CaptureResu
         if (typeof duplicateEventId !== "string") {
           throw new Error("Outbox contains an invalid event identity.");
         }
+        if (request.recoverHealthCategory !== undefined) {
+          database.prepare(
+            `UPDATE capture_health_incidents
+             SET ended_at = ?
+             WHERE category = ? AND ended_at IS NULL`
+          ).run(captureSucceededAt, request.recoverHealthCategory);
+        }
         database.exec("COMMIT");
         return { state: "duplicate", eventId: duplicateEventId };
       }
 
-      const now = new Date().toISOString();
       database
         .prepare(
           `INSERT INTO capture_events(
@@ -279,8 +287,8 @@ export async function captureEvent(request: CaptureRequest): Promise<CaptureResu
           sourceBytes,
           retainedPayload.byteLength,
           sourceTruncated ? 1 : 0,
-          now,
-          now
+          captureSucceededAt,
+          captureSucceededAt
         );
       const insertSegment = database.prepare(
         `INSERT INTO capture_segments(event_id, segment_index, payload, payload_sha256)
@@ -288,6 +296,13 @@ export async function captureEvent(request: CaptureRequest): Promise<CaptureResu
       );
       for (const [index, payload] of segments.entries()) {
         insertSegment.run(event.eventId, index, payload, sha256(payload));
+      }
+      if (request.recoverHealthCategory !== undefined) {
+        database.prepare(
+          `UPDATE capture_health_incidents
+           SET ended_at = ?
+           WHERE category = ? AND ended_at IS NULL`
+        ).run(captureSucceededAt, request.recoverHealthCategory);
       }
       database.exec("COMMIT");
 

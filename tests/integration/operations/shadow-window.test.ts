@@ -14,6 +14,7 @@ import {
   type EmbeddingAdapter
 } from "../../../src/retrieval/index.js";
 import { approvedShadowEmbeddingProfile } from "../../../src/retrieval/shadow-profile.js";
+import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { runWorkerOnce } from "../../../src/worker/main.js";
 
 const roots: string[] = [];
@@ -64,9 +65,20 @@ test("an official Shadow window requires a completed real-Hook probe and records
     project_id: "msproj_123e4567-e89b-42d3-a456-426614174970"
   }));
   await writeFile(join(homeRoot, ".codex", "config.toml"), [
+    "model = \"fixture\"",
+    "",
     "[memories]",
     "generate_memories = true",
     "use_memories = true",
+    "",
+    "[mcp_servers.memstore]",
+    "command = \"node\"",
+    "args = [\"dist/mcp/main.js\"]",
+    "startup_timeout_sec = 30",
+    "",
+    "[mcp_servers.memstore.env]",
+    "MEMSTORE_RUNTIME_ROOT = \"/fixture/runtime\"",
+    "MEMSTORE_VAULT_ROOT = \"/fixture/vault\"",
     ""
   ].join("\n"));
   await writeFile(join(homeRoot, ".codex", "hooks.json"), JSON.stringify({
@@ -188,10 +200,20 @@ test("an official Shadow window requires a completed real-Hook probe and records
   });
   await writeFile(programPath, "export const fixture = true;\n");
   await writeFile(join(homeRoot, ".codex", "config.toml"), [
+    "model = \"unrelated-change\"",
+    "",
     "[memories]",
     "generate_memories = true",
     "use_memories = true",
-    "# user changed another Codex setting during Shadow",
+    "",
+    "[mcp_servers.memstore]",
+    "command = \"node\"",
+    "args = [\"dist/mcp/main.js\"]",
+    "startup_timeout_sec = 30",
+    "",
+    "[mcp_servers.memstore.env]",
+    "MEMSTORE_RUNTIME_ROOT = \"/fixture/runtime\"",
+    "MEMSTORE_VAULT_ROOT = \"/fixture/vault\"",
     ""
   ].join("\n"));
   await expect(inspectOfficialShadowWindow({
@@ -199,6 +221,53 @@ test("an official Shadow window requires a completed real-Hook probe and records
     repositoryRoot,
     homeRoot,
     now: "2026-08-16T03:00:03.000Z"
+  })).resolves.toMatchObject({
+    state: "active",
+    gate6ReviewEligible: true,
+    invalidationReasons: []
+  });
+
+  const hooksPath = join(homeRoot, ".codex", "hooks.json");
+  const hooksWithUnrelatedChange = JSON.parse(await readFile(hooksPath, "utf8")) as {
+    hooks: Record<string, unknown[]>;
+  };
+  hooksWithUnrelatedChange.hooks.PostToolUse?.unshift({
+    matcher: "unrelated",
+    hooks: [{ command: "unrelated-hook", timeout: 99 }]
+  });
+  await writeFile(hooksPath, JSON.stringify(hooksWithUnrelatedChange));
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:03.100Z"
+  })).resolves.toMatchObject({
+    state: "active",
+    invalidationReasons: []
+  });
+
+  await writeFile(join(homeRoot, ".codex", "config.toml"), [
+    "model = \"unrelated-change\"",
+    "",
+    "[memories]",
+    "generate_memories = true",
+    "use_memories = true",
+    "",
+    "[mcp_servers.memstore]",
+    "command = \"node\"",
+    "args = [\"dist/mcp/main.js\"]",
+    "startup_timeout_sec = 31",
+    "",
+    "[mcp_servers.memstore.env]",
+    "MEMSTORE_RUNTIME_ROOT = \"/fixture/runtime\"",
+    "MEMSTORE_VAULT_ROOT = \"/fixture/vault\"",
+    ""
+  ].join("\n"));
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:03.200Z"
   })).resolves.toMatchObject({
     state: "invalidated",
     gate6ReviewEligible: false,
@@ -212,6 +281,16 @@ test("an official Shadow window requires a completed real-Hook probe and records
     dryRun: false,
     minimumEndAt: "2026-08-23T03:00:04.000Z"
   });
+  const continuityDatabase = await openRuntimeDatabase(runtimeRoot);
+  try {
+    continuityDatabase.prepare(
+      `UPDATE official_shadow_windows
+       SET started_at = '2026-08-08T03:00:02.000Z'
+       WHERE state = 'active'`
+    ).run();
+  } finally {
+    continuityDatabase.close();
+  }
   await expect(inspectOfficialShadowWindow({
     runtimeRoot,
     repositoryRoot,
@@ -221,5 +300,48 @@ test("an official Shadow window requires a completed real-Hook probe and records
     state: "active",
     invalidationReasons: [],
     gate6ReviewEligible: false
+  });
+
+  const currentConfig = await readFile(join(homeRoot, ".codex", "config.toml"), "utf8");
+  await writeFile(join(homeRoot, ".codex", "config.toml"), [
+    currentConfig.trimEnd(),
+    "",
+    `[hooks.state."${hooksPath}:post_tool_use:1:0"]`,
+    "enabled = false",
+    ""
+  ].join("\n"));
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:06.000Z"
+  })).resolves.toMatchObject({
+    state: "invalidated",
+    gate6ReviewEligible: false,
+    invalidationReasons: ["codex_config_changed"]
+  });
+
+  await writeFile(join(homeRoot, ".codex", "config.toml"), currentConfig);
+  const hooksWithManagedChange = JSON.parse(await readFile(hooksPath, "utf8")) as {
+    hooks: Record<string, Array<{ hooks?: Array<Record<string, unknown>> }>>;
+  };
+  const managedPostToolUse = hooksWithManagedChange.hooks.PostToolUse
+    ?.flatMap((route) => route.hooks ?? [])
+    .find((hook) =>
+      typeof hook.command === "string" &&
+      hook.command.includes("memstore:gate5-shadow-v1:PostToolUse:shadow")
+    );
+  if (managedPostToolUse === undefined) throw new Error("Expected managed PostToolUse Hook.");
+  managedPostToolUse.timeout = 2;
+  await writeFile(hooksPath, JSON.stringify(hooksWithManagedChange));
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:07.000Z"
+  })).resolves.toMatchObject({
+    state: "invalidated",
+    gate6ReviewEligible: false,
+    invalidationReasons: ["hooks_changed"]
   });
 });
