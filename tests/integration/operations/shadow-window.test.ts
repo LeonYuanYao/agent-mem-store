@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import { handleCodexHook } from "../../../src/adapters/codex/hook.js";
 import { initializeMemStore } from "../../../src/operations/initialize.js";
 import {
   inspectOfficialShadowWindow,
+  migrateOfficialShadowIdentity,
   startOfficialShadowWindow
 } from "../../../src/operations/shadow-window.js";
 import {
@@ -18,6 +20,21 @@ import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { runWorkerOnce } from "../../../src/worker/main.js";
 
 const roots: string[] = [];
+
+function identitySha256(value: unknown): string {
+  function canonicalize(input: unknown): unknown {
+    if (Array.isArray(input)) return input.map(canonicalize);
+    if (input !== null && typeof input === "object") {
+      return Object.fromEntries(
+        Object.entries(input)
+          .sort(([left], [right]) => left.localeCompare(right, "en-US"))
+          .map(([key, child]) => [key, canonicalize(child)])
+      );
+    }
+    return input;
+  }
+  return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -154,6 +171,114 @@ test("an official Shadow window requires a completed real-Hook probe and records
     elapsedCalendarDays: 7,
     minimumDurationMet: true,
     gate6ReviewEligible: true,
+    coverage: {
+      completed_evaluations: { baseline: 1, current: 1, delta: 0 }
+    }
+  });
+
+  const legacyDatabase = await openRuntimeDatabase(runtimeRoot);
+  let legacyWindowId: string;
+  let legacyBaselineSha256: string;
+  try {
+    const row = legacyDatabase.prepare(
+      "SELECT window_id, baseline_json FROM official_shadow_windows WHERE state = 'active'"
+    ).get();
+    legacyWindowId = String(row?.window_id);
+    const baseline = JSON.parse(String(row?.baseline_json)) as Record<string, unknown>;
+    const legacyBaseline = {
+      ...baseline,
+      identityScope: "memstore-v1",
+      configSha256: identitySha256({
+        nativeMemory: { generateMemories: true, useMemories: true },
+        memstoreMcp: {
+          command: "node",
+          args: ["dist/mcp/main.js"],
+          startup_timeout_sec: 30,
+          env: {
+            MEMSTORE_RUNTIME_ROOT: "/fixture/runtime",
+            MEMSTORE_VAULT_ROOT: "/fixture/vault"
+          }
+        },
+        managedHookStates: {}
+      }),
+      nativeMemory: { generateMemories: true, useMemories: true }
+    };
+    const legacySource = JSON.stringify(legacyBaseline);
+    legacyBaselineSha256 = createHash("sha256").update(legacySource).digest("hex");
+    legacyDatabase.prepare(
+      "UPDATE official_shadow_windows SET baseline_json = ?, baseline_sha256 = ? WHERE window_id = ?"
+    ).run(legacySource, legacyBaselineSha256, legacyWindowId);
+  } finally {
+    legacyDatabase.close();
+  }
+  await writeFile(join(homeRoot, ".codex", "config.toml"), [
+    "model = \"fixture\"",
+    "",
+    "[memories]",
+    "generate_memories = false",
+    "use_memories = false",
+    "",
+    "[mcp_servers.memstore]",
+    "command = \"node\"",
+    "args = [\"dist/mcp/main.js\"]",
+    "startup_timeout_sec = 30",
+    "",
+    "[mcp_servers.memstore.env]",
+    "MEMSTORE_RUNTIME_ROOT = \"/fixture/runtime\"",
+    "MEMSTORE_VAULT_ROOT = \"/fixture/vault\"",
+    ""
+  ].join("\n"));
+  await expect(migrateOfficialShadowIdentity({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    windowId: legacyWindowId,
+    migratedAt: "2026-08-16T03:00:02.050Z",
+    preview: true
+  })).resolves.toMatchObject({
+    state: "preview",
+    dryRun: true,
+    windowId: legacyWindowId,
+    previousBaselineSha256: legacyBaselineSha256,
+    identityScope: "memstore-v2-native-memory-independent"
+  });
+  const afterPreview = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(afterPreview.prepare(
+      "SELECT baseline_sha256 FROM official_shadow_windows WHERE window_id = ?"
+    ).get(legacyWindowId)?.baseline_sha256).toBe(legacyBaselineSha256);
+  } finally {
+    afterPreview.close();
+  }
+  await expect(migrateOfficialShadowIdentity({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    windowId: legacyWindowId,
+    migratedAt: "2026-08-16T03:00:02.060Z"
+  })).resolves.toMatchObject({
+    state: "migrated",
+    dryRun: false,
+    windowId: legacyWindowId,
+    identityScope: "memstore-v2-native-memory-independent"
+  });
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:02.070Z"
+  })).resolves.toMatchObject({
+    windowId: legacyWindowId,
+    state: "active",
+    invalidationReasons: [],
+    startedAt: "2026-08-09T03:00:02.000Z",
+    minimumEndAt: "2026-08-16T03:00:02.000Z",
+    nativeMemory: { generateMemories: false, useMemories: false },
+    continuityAdjustments: [{
+      kind: "exclude_native_memory_from_shadow_identity",
+      migratedAt: "2026-08-16T03:00:02.060Z",
+      previousBaselineSha256: legacyBaselineSha256
+    }],
     coverage: {
       completed_evaluations: { baseline: 1, current: 1, delta: 0 }
     }

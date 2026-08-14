@@ -297,8 +297,16 @@ _Avoid_: Source Session 副本、每轮 Luna 会话摘要
 _Avoid_: Memory Provenance、使用即正确、自动删除依据
 
 **Shadow Mode（影子模式）**:
-Codex 原生 Memories 继续正常工作，MemStore 在后台捕获、建索引和评估检索，但不向前台 Turn 注入，用于无干扰地建立切换证据。
+MemStore 在后台捕获、建索引和评估检索，但不向前台 Turn 注入，用于无干扰地建立切换证据。Codex 原生 Memories 的开关状态会被观察和展示，但不属于 MemStore Shadow 身份，也不影响窗口连续性；MCP、受管 Hook、MemStore 程序和已批准检索模型仍属于窗口门禁。
 _Avoid_: 双重注入、最终共存状态
+
+**Luna Retry Epoch（Luna 重试周期）**:
+一次自动尝试序列最多包含首次调用和六次自动重试。人工 retry 会开启新的重试周期并重置该周期计数，但保留 lifetime attempt count 和既有安全诊断；成功后才清除当前错误诊断。
+_Avoid_: 人工 retry 后立即再次 blocked、清零累计历史、无限自动重试
+
+**Structural Batch Recovery（结构化 Batch 恢复）**:
+Distillation 使用短 evidence aliases 与 Luna 交互，并在本地恢复为原始 Evidence identity。包含多个事件、保留内容至少 64 KiB 的 Batch 若返回 schema-invalid，后台按保留字节量二分为两个子 Batch；原 Batch 作为可审计的结构失败终止，子 Batch 完成后仍由同一个 Session Consolidation 统一合并。
+_Avoid_: 把模型原始输出落库、对同一大 Batch 盲目重复、拆分后绕过 Session Consolidation
 
 **Controlled Cutover（受控切换）**:
 关闭 Codex 原生记忆注入并启用 MemStore 注入的人工 Review 阶段。原生生成可以暂时保留用于比较和回退，但其结果不进入 MemStore 正常回忆。

@@ -4,7 +4,8 @@ import { z } from "zod";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import type {
   LunaInvocationError,
-  LunaFailureCategory
+  LunaFailureCategory,
+  LunaSafeDiagnostic
 } from "./index.js";
 
 const operationKindSchema = z.enum([
@@ -22,6 +23,26 @@ const operationStateSchema = z.enum([
   "dead_letter"
 ]);
 const healthStateSchema = z.enum(["healthy", "degraded", "unavailable"]);
+const safeDiagnosticSchema = z.object({
+  stage: z.enum([
+    "invocation",
+    "output_decode",
+    "output_schema",
+    "evidence_binding",
+    "importance_validation",
+    "local_processing"
+  ]),
+  code: z.string().regex(/^[a-z0-9_]{1,128}$/u),
+  path: z.string().regex(/^[A-Za-z0-9_.-]{1,256}$/u).optional()
+});
+
+function diagnosticSource(diagnostic: LunaSafeDiagnostic | undefined): string | null {
+  if (diagnostic === undefined) return null;
+  const parsed = safeDiagnosticSchema.safeParse(diagnostic);
+  return JSON.stringify(parsed.success
+    ? parsed.data
+    : { stage: "invocation", code: "invalid_diagnostic" });
+}
 
 export type LunaOperationKind = z.infer<typeof operationKindSchema>;
 
@@ -49,6 +70,8 @@ export interface LunaOperationView {
   readonly sessionId: string | null;
   readonly payload: unknown;
   readonly attemptCount: number;
+  readonly retryEpoch: number;
+  readonly epochAttemptCount: number;
   readonly createdAt: string;
 }
 
@@ -77,6 +100,8 @@ function parseOperationRow(row: Record<string, unknown>): LunaOperationView {
     sessionId,
     payload: JSON.parse(payloadSource) as unknown,
     attemptCount: z.number().int().nonnegative().parse(row.attempt_count),
+    retryEpoch: z.number().int().nonnegative().parse(row.retry_epoch),
+    epochAttemptCount: z.number().int().nonnegative().parse(row.epoch_attempt_count),
     createdAt: z.iso.datetime().parse(row.created_at)
   };
 }
@@ -180,6 +205,7 @@ export async function claimLunaOperation(
         .prepare(
           `UPDATE luna_operations
            SET state = 'processing', attempt_count = attempt_count + 1,
+               epoch_attempt_count = epoch_attempt_count + 1,
                lease_token = ?, leased_by = ?, lease_until = ?, updated_at = ?
            WHERE operation_id = ?`
         )
@@ -196,7 +222,9 @@ export async function claimLunaOperation(
         operation: {
           ...operation,
           state: "processing",
-          attemptCount: operation.attemptCount + 1
+          attemptCount: operation.attemptCount + 1,
+          retryEpoch: operation.retryEpoch,
+          epochAttemptCount: operation.epochAttemptCount + 1
         },
         leaseToken
       };
@@ -453,29 +481,31 @@ export async function failLunaOperation(
     try {
       const row = database
         .prepare(
-          `SELECT attempt_count FROM luna_operations
+          `SELECT epoch_attempt_count FROM luna_operations
            WHERE operation_id = ? AND state = 'processing' AND lease_token = ?`
         )
         .get(request.operationId, request.leaseToken);
       if (row === undefined) throw new Error("Luna operation lease is not owned.");
-      const attemptCount = z.number().int().positive().parse(row.attempt_count);
-      const blocked = !canAutomaticallyRetry(request.error.retryable, attemptCount);
+      const epochAttemptCount = z.number().int().positive().parse(row.epoch_attempt_count);
+      const blocked = !canAutomaticallyRetry(request.error.retryable, epochAttemptCount);
       const nextRetryAt = blocked
         ? null
         : request.retryAfter === undefined
-          ? calculateRetryAt(request.operationId, attemptCount, failedAt)
+          ? calculateRetryAt(request.operationId, epochAttemptCount, failedAt)
           : z.iso.datetime().parse(request.retryAfter);
       database
         .prepare(
           `UPDATE luna_operations
            SET state = ?, lease_token = NULL, leased_by = NULL, lease_until = NULL,
-               next_retry_at = ?, last_error_category = ?, updated_at = ?
+               next_retry_at = ?, last_error_category = ?,
+               last_error_diagnostic_json = ?, updated_at = ?
            WHERE operation_id = ?`
         )
         .run(
           blocked ? "blocked" : "retrying",
           nextRetryAt,
           request.error.category,
+          diagnosticSource(request.error.diagnostic),
           failedAt,
           request.operationId
         );
@@ -512,23 +542,24 @@ export async function failLunaOperationLocally(request: {
   try {
     database.exec("BEGIN IMMEDIATE");
     const row = database.prepare(
-      `SELECT attempt_count FROM luna_operations
+      `SELECT attempt_count, epoch_attempt_count FROM luna_operations
        WHERE operation_id = ? AND state = 'processing' AND lease_token = ?`
     ).get(request.operationId, request.leaseToken);
     if (row === undefined) throw new Error("Luna operation lease is not owned.");
-    const attemptCount = z.number().int().positive().parse(row.attempt_count);
-    const automaticRetry = canAutomaticallyRetry(request.retryable, attemptCount);
+    const epochAttemptCount = z.number().int().positive().parse(row.epoch_attempt_count);
+    const automaticRetry = canAutomaticallyRetry(request.retryable, epochAttemptCount);
     const nextRetryAt = automaticRetry
-      ? calculateRetryAt(request.operationId, attemptCount, failedAt)
+      ? calculateRetryAt(request.operationId, epochAttemptCount, failedAt)
       : null;
     database.prepare(
       `UPDATE luna_operations
        SET state = ?, lease_token = NULL, leased_by = NULL, lease_until = NULL,
            next_retry_at = ?, last_error_category = 'local_processing',
-           updated_at = ? WHERE operation_id = ?`
+           last_error_diagnostic_json = ?, updated_at = ? WHERE operation_id = ?`
     ).run(
       automaticRetry ? "retrying" : "blocked",
       nextRetryAt,
+      JSON.stringify({ stage: "local_processing", code: "unexpected_error" }),
       failedAt,
       request.operationId
     );
@@ -556,7 +587,9 @@ export async function retryBlockedLunaOperations(request: {
     const result = database
       .prepare(
         `UPDATE luna_operations
-         SET state = 'pending', next_retry_at = NULL, updated_at = ?
+         SET state = 'pending', next_retry_at = NULL,
+             retry_epoch = retry_epoch + 1, epoch_attempt_count = 0,
+             updated_at = ?
          WHERE state = 'blocked'`
       )
       .run(requestedAt);
@@ -606,7 +639,8 @@ export async function completeLunaOperation(request: {
           `UPDATE luna_operations
            SET state = 'completed', lease_token = NULL, leased_by = NULL,
                lease_until = NULL, next_retry_at = NULL, completed_at = ?,
-               last_error_category = NULL, updated_at = ? WHERE operation_id = ?`
+               last_error_category = NULL, last_error_diagnostic_json = NULL,
+               updated_at = ? WHERE operation_id = ?`
         )
         .run(completedAt, completedAt, request.operationId);
       updateHealthForSuccess(database, completedAt);

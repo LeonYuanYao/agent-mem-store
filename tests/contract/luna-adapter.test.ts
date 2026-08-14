@@ -135,7 +135,8 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
   expect(request.environment.HOME).toBeUndefined();
   expect(request.environment.AWS_SECRET_ACCESS_KEY).toBeUndefined();
   expect(request.standardInput).toContain('"schemaVersion":1');
-  expect(request.standardInput).toContain("msevent_123");
+  expect(request.standardInput).toContain('"evidenceId":"e1"');
+  expect(request.standardInput).not.toContain("msevent_123");
   expect(request.standardInput).not.toContain("fallback");
 });
 
@@ -623,6 +624,94 @@ test("consolidation uses short evidence aliases and restores exact source identi
   expect(output.candidates[0]).toMatchObject({
     evidenceIds: [originalEvidenceId],
     importanceReasons: [{ evidenceIds: [originalEvidenceId] }]
+  });
+});
+
+test("distillation uses short evidence aliases and reports safe schema diagnostics", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-distillation-alias-"));
+  temporaryDirectories.push(root);
+  const originalEvidenceId = "msevent_019ffcf1_very_long_source_identity_123456789";
+  let promptSource = "";
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      promptSource = request.standardInput;
+      const prompt = JSON.parse(promptSource) as {
+        request: { evidence: Array<{ evidenceId: string }> };
+      };
+      const alias = prompt.request.evidence[0]?.evidenceId;
+      if (alias === undefined) throw new Error("Expected a distillation evidence alias.");
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "distillation",
+          candidates: [{
+            statement: "Use the approved project boundary.",
+            primaryCategory: "architecture_contract",
+            categoryTags: ["architecture_contract"],
+            applicabilitySummary: "test",
+            conditions: [],
+            exclusions: [],
+            preservedNegations: [],
+            certainty: "asserted",
+            sensitivity: "normal",
+            evidenceIds: [alias],
+            importanceReasons: [{
+              tag: "architecture_invariant",
+              reason: "This is a stable project boundary.",
+              evidenceIds: [alias]
+            }]
+          }]
+        }),
+        stderr: ""
+      });
+    }
+  });
+
+  await expect(adapter.distillBatch({
+    operationId: "msop-distillation-alias",
+    scope: { kind: "project", projectId: "msproj-test" },
+    evidence: [{
+      evidenceId: originalEvidenceId,
+      evidenceClass: "explicit_user_statement",
+      content: "Use the approved project boundary.",
+      sourceIdentity: "source-without-event-id",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  })).resolves.toMatchObject({
+    candidates: [{
+      evidenceIds: [originalEvidenceId],
+      importanceReasons: [{ evidenceIds: [originalEvidenceId] }]
+    }]
+  });
+  expect(promptSource).not.toContain(originalEvidenceId);
+  expect(promptSource).toContain('"evidenceId":"e1"');
+
+  const invalidAdapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: '{"schemaVersion":1,"kind":"distillation","candidates":[{"statement":42}]}',
+      stderr: "private provider output must not be retained"
+    })
+  });
+  await expect(invalidAdapter.distillBatch({
+    operationId: "msop-safe-diagnostic",
+    scope: { kind: "global" },
+    evidence: []
+  })).rejects.toMatchObject({
+    category: "schema_invalid",
+    diagnostic: {
+      stage: "output_schema",
+      code: "invalid_type",
+      path: "candidates.0.statement"
+    }
   });
 });
 

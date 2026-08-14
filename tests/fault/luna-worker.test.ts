@@ -140,3 +140,109 @@ test("a transient Luna failure leaves evidence retryable and later produces one 
   expect(successfulDistillations).toBe(1);
   await expect(listSessionCandidates(runtimeRoot, "retry-session")).resolves.toHaveLength(1);
 });
+
+test("a large schema-invalid Batch is split once and its children are consolidated", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-worker-split-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  for (let index = 0; index < 8; index += 1) {
+    await captureEvent({
+      runtimeRoot,
+      event: {
+        schemaVersion: 1,
+        eventId: `msevent-split-${String(index)}`,
+        deduplicationKey: `split-session:turn-${String(index)}`,
+        agent: "codex",
+        eventKind: index === 7 ? "SessionEnd" : "PostToolUse",
+        occurredAt: `2026-08-07T13:00:0${String(index)}.000Z`,
+        projectId: "msproj_123e4567-e89b-42d3-a456-426614174001",
+        sessionId: "split-session",
+        payload: { text: "x".repeat(10_000), ordinal: index }
+      }
+    });
+  }
+  const prepared = await prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 8,
+    preparedAt: "2026-08-07T13:00:10.000Z"
+  });
+  if (prepared.state !== "queued") throw new Error("Expected large Batch.");
+  const invalid: LunaWorkerAdapter = {
+    distillBatch() {
+      return Promise.reject(new LunaInvocationError(
+        "schema_invalid",
+        true,
+        "private raw output",
+        { stage: "output_schema", code: "invalid_type", path: "candidates.0.evidenceIds" }
+      ));
+    },
+    consolidateSession() {
+      throw new Error("No consolidation expected before child Batches complete.");
+    }
+  };
+  await expect(runNextLunaWork({
+    runtimeRoot,
+    workerId: "worker-split",
+    now: "2026-08-07T13:00:11.000Z",
+    currentTime: () => "2026-08-07T13:00:12.000Z",
+    adapter: invalid
+  })).resolves.toMatchObject({ state: "split", operationId: prepared.operationId });
+
+  const splitDatabase = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(splitDatabase.prepare(
+      "SELECT state, last_error_diagnostic_json FROM luna_operations WHERE operation_id = ?"
+    ).get(prepared.operationId)).toMatchObject({
+      state: "dead_letter",
+      last_error_diagnostic_json: JSON.stringify({
+        stage: "output_schema",
+        code: "invalid_type",
+        path: "candidates.0.evidenceIds"
+      })
+    });
+    expect(splitDatabase.prepare(
+      "SELECT state, split_reason FROM distillation_batches WHERE batch_id = ?"
+    ).get(prepared.batchId)).toMatchObject({ state: "blocked", split_reason: "schema_invalid_large_batch" });
+    expect(splitDatabase.prepare(
+      "SELECT COUNT(*) AS count FROM distillation_batches WHERE session_id = ? AND split_parent_batch_id = ?"
+    ).get("split-session", prepared.batchId)?.count).toBe(2);
+    expect(splitDatabase.prepare(
+      `SELECT COUNT(*) AS count FROM distillation_batch_events AS assigned
+       JOIN distillation_batches AS batch ON batch.batch_id = assigned.batch_id
+       WHERE batch.split_parent_batch_id = ?`
+    ).get(prepared.batchId)?.count).toBe(8);
+    expect(JSON.stringify(splitDatabase.prepare(
+      "SELECT last_error_diagnostic_json FROM luna_operations WHERE operation_id = ?"
+    ).get(prepared.operationId))).not.toContain("private raw output");
+  } finally {
+    splitDatabase.close();
+  }
+
+  let consolidationCalls = 0;
+  const recovered: LunaWorkerAdapter = {
+    distillBatch() {
+      return Promise.resolve({ schemaVersion: 1, kind: "distillation", candidates: [] });
+    },
+    consolidateSession() {
+      consolidationCalls += 1;
+      return Promise.resolve({ schemaVersion: 1, kind: "consolidation", candidates: [] });
+    }
+  };
+  for (let index = 0; index < 3; index += 1) {
+    await runNextLunaWork({
+      runtimeRoot,
+      workerId: "worker-split-recovery",
+      now: `2026-08-07T13:01:0${String(index)}.000Z`,
+      adapter: recovered
+    });
+  }
+  expect(consolidationCalls).toBe(1);
+  const completedDatabase = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(completedDatabase.prepare(
+      "SELECT state FROM session_consolidations WHERE session_id = 'split-session'"
+    ).get()?.state).toBe("completed");
+  } finally {
+    completedDatabase.close();
+  }
+});

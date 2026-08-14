@@ -114,6 +114,21 @@ const migrations: readonly Migration[] = [
     version: 21,
     name: "enforce_category_tag_invariants",
     path: new URL("../../migrations/0021-enforce-category-tag-invariants.sql", import.meta.url)
+  },
+  {
+    version: 22,
+    name: "luna_retry_epochs",
+    path: new URL("../../migrations/0022-luna-retry-epochs.sql", import.meta.url)
+  },
+  {
+    version: 23,
+    name: "luna_safe_diagnostics_and_batch_splits",
+    path: new URL("../../migrations/0023-luna-safe-diagnostics-and-batch-splits.sql", import.meta.url)
+  },
+  {
+    version: 24,
+    name: "backfill_luna_retry_epoch_attempts",
+    path: new URL("../../migrations/0024-backfill-luna-retry-epoch-attempts.sql", import.meta.url)
   }
 ];
 

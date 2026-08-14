@@ -43,19 +43,22 @@ export async function inspectOperation(runtimeRoot: string, operationId: string)
     const rawState = z.string().parse(luna.state);
     const state = rawState === "pending" || rawState === "processing"
       ? "queued"
-      : rawState === "blocked"
-        ? "failed"
-        : rawState;
+      : rawState;
     return {
       operation_id: operationId,
       kind: z.string().parse(luna.operation_kind),
       state,
       phase: rawState,
       attempt_count: z.number().int().nonnegative().parse(luna.attempt_count),
+      retry_epoch: z.number().int().nonnegative().parse(luna.retry_epoch),
+      epoch_attempt_count: z.number().int().nonnegative().parse(luna.epoch_attempt_count),
       project_id: typeof luna.project_id === "string" ? luna.project_id : null,
       session_id: typeof luna.session_id === "string" ? luna.session_id : null,
       next_retry_at: typeof luna.next_retry_at === "string" ? luna.next_retry_at : null,
       last_error_category: typeof luna.last_error_category === "string" ? luna.last_error_category : null,
+      last_error_diagnostic: typeof luna.last_error_diagnostic_json === "string"
+        ? JSON.parse(luna.last_error_diagnostic_json) as unknown
+        : null,
       created_at: z.string().parse(luna.created_at),
       completed_at: typeof luna.completed_at === "string" ? luna.completed_at : null
     };
@@ -72,7 +75,9 @@ export async function inspectStatus(request: {
   try {
     const health = database.prepare("SELECT * FROM luna_health_state WHERE singleton = 1").get();
     const backlog = database.prepare(
-      `SELECT COUNT(*) AS count FROM luna_operations
+      `SELECT COUNT(*) AS count,
+              SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) AS blocked_count
+       FROM luna_operations
        WHERE state IN ('pending', 'processing', 'retrying', 'blocked')`
     ).get();
     const activeIndex = database.prepare(
@@ -115,7 +120,8 @@ export async function inspectStatus(request: {
       luna: health === undefined ? null : {
         state: health.state,
         reason_category: health.reason_category,
-        pending_operation_count: z.number().int().nonnegative().parse(backlog?.count)
+        pending_operation_count: z.number().int().nonnegative().parse(backlog?.count),
+        blocked_operation_count: z.number().int().nonnegative().parse(backlog?.blocked_count ?? 0)
       },
       active_index: activeIndex === undefined ? null : {
         index_revision_id: activeIndex.index_revision_id,
@@ -175,7 +181,8 @@ export async function waitForOperation(request: {
     "completed",
     "dead_letter",
     "conflict",
-    "failed"
+    "failed",
+    "blocked"
   ]);
   for (;;) {
     const operation = await inspectOperation(request.runtimeRoot, request.operationId);

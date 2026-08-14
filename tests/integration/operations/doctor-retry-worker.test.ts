@@ -8,6 +8,7 @@ import { inspectDoctor, retryOperation } from "../../../src/operations/maintenan
 import { enqueueLunaOperation, claimLunaOperation, failLunaOperation } from "../../../src/luna/operations.js";
 import { LunaInvocationError } from "../../../src/luna/index.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
+import { inspectStatus } from "../../../src/operations/status.js";
 import { runWorkerOnce } from "../../../src/worker/main.js";
 
 const roots: string[] = [];
@@ -29,6 +30,7 @@ test("doctor diagnoses an initialized isolated installation without repairing it
     ["configuration", "ok"],
     ["sqlite_integrity", "ok"],
     ["candidate_pipeline", "ok"],
+    ["luna_operations", "ok"],
     ["vault_catalog", "ok"]
   ]);
 });
@@ -112,6 +114,18 @@ test("retry requeues one blocked Luna operation and worker pause remains observa
     failedAt: "2026-08-08T05:00:02.000Z",
     error: new LunaInvocationError("authentication", false, "blocked")
   });
+  const blockedDoctor = await inspectDoctor({ runtimeRoot, vaultRoot, deep: false });
+  expect(blockedDoctor.state).toBe("degraded");
+  expect(blockedDoctor.checks.find((check) => check.name === "luna_operations"))
+    .toMatchObject({ name: "luna_operations", state: "warning" });
+  expect(blockedDoctor.checks.find((check) => check.name === "luna_operations")?.detail)
+    .toContain("1 blocked");
+  await expect(inspectStatus({ runtimeRoot, vaultRoot })).resolves.toMatchObject({
+    luna: {
+      pending_operation_count: 1,
+      blocked_operation_count: 1
+    }
+  });
   await expect(retryOperation({
     runtimeRoot,
     operationId: operation.operationId,
@@ -123,7 +137,12 @@ test("retry requeues one blocked Luna operation and worker pause remains observa
     operationId: operation.operationId,
     requestedAt: "2026-08-08T05:01:01.000Z",
     preview: false
-  })).resolves.toEqual({ state: "queued", operationId: operation.operationId });
+  })).resolves.toEqual({
+    state: "queued",
+    operationId: operation.operationId,
+    retryEpoch: 1,
+    lifetimeAttemptCount: 1
+  });
   await expect(runWorkerOnce({
     runtimeRoot,
     vaultRoot,

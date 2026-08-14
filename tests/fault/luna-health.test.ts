@@ -14,6 +14,9 @@ import {
   retryBlockedLunaOperations
 } from "../../src/luna/operations.js";
 import { LunaInvocationError } from "../../src/luna/index.js";
+import { retryOperation } from "../../src/operations/maintenance.js";
+import { inspectOperation } from "../../src/operations/status.js";
+import { openRuntimeDatabase } from "../../src/runtime/database.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -170,6 +173,80 @@ test("a retryable Luna operation blocks after six automatic retries", async () =
     now: "2026-08-07T07:00:00.000Z",
     leaseSeconds: 60
   })).resolves.toEqual({ state: "empty" });
+
+  await expect(retryOperation({
+    runtimeRoot,
+    operationId: operation.operationId,
+    requestedAt: "2026-08-07T07:00:01.000Z",
+    preview: false
+  })).resolves.toEqual({
+    state: "queued",
+    operationId: operation.operationId,
+    retryEpoch: 1,
+    lifetimeAttemptCount: 7
+  });
+  const manualClaim = await claimLunaOperation({
+    runtimeRoot,
+    workerId: "worker-1",
+    now: "2026-08-07T07:00:02.000Z",
+    leaseSeconds: 60
+  });
+  if (manualClaim.state !== "claimed") throw new Error("Expected manual retry claim.");
+  expect(manualClaim.operation).toMatchObject({
+    attemptCount: 8,
+    retryEpoch: 1,
+    epochAttemptCount: 1
+  });
+  await expect(failLunaOperation({
+    runtimeRoot,
+    operationId: operation.operationId,
+    leaseToken: manualClaim.leaseToken,
+    failedAt: "2026-08-07T07:00:03.000Z",
+    error: new LunaInvocationError("schema_invalid", true, "invalid structured output"),
+    retryAfter: "2026-08-07T07:00:04.000Z"
+  })).resolves.toMatchObject({ state: "retrying" });
+  await expect(inspectOperation(runtimeRoot, operation.operationId)).resolves.toMatchObject({
+    phase: "retrying",
+    attempt_count: 8,
+    retry_epoch: 1,
+    epoch_attempt_count: 1
+  });
+});
+
+test("the retry epoch migration preserves attempts from an existing Runtime", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-retry-migration-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const operation = await enqueueLunaOperation({
+    runtimeRoot,
+    kind: "distill_batch",
+    idempotencyKey: "retry-migration:batch-1",
+    payload: { batchId: "batch-1" },
+    createdAt: "2026-08-07T06:00:00.000Z"
+  });
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare(
+      `UPDATE luna_operations
+       SET state = 'blocked', attempt_count = 7, epoch_attempt_count = 0
+       WHERE operation_id = ?`
+    ).run(operation.operationId);
+    database.prepare("DELETE FROM schema_migrations WHERE version = 24").run();
+  } finally {
+    database.close();
+  }
+  const migrated = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(migrated.prepare(
+      "SELECT attempt_count, retry_epoch, epoch_attempt_count FROM luna_operations WHERE operation_id = ?"
+    ).get(operation.operationId)).toEqual({
+      attempt_count: 7,
+      retry_epoch: 0,
+      epoch_attempt_count: 7
+    });
+  } finally {
+    migrated.close();
+  }
 });
 
 test("a retryable local Luna processing failure uses the same retry limit", async () => {

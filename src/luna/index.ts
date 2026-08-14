@@ -338,19 +338,34 @@ export type LunaFailureCategory =
   | "unavailable"
   | "schema_invalid";
 
+export interface LunaSafeDiagnostic {
+  readonly stage:
+    | "invocation"
+    | "output_decode"
+    | "output_schema"
+    | "evidence_binding"
+    | "importance_validation"
+    | "local_processing";
+  readonly code: string;
+  readonly path?: string;
+}
+
 export class LunaInvocationError extends Error {
   public readonly category: LunaFailureCategory;
   public readonly retryable: boolean;
+  public readonly diagnostic: LunaSafeDiagnostic | undefined;
 
   public constructor(
     category: LunaFailureCategory,
     retryable: boolean,
-    message: string
+    message: string,
+    diagnostic?: LunaSafeDiagnostic
   ) {
     super(message);
     this.name = "LunaInvocationError";
     this.category = category;
     this.retryable = retryable;
+    this.diagnostic = diagnostic;
   }
 }
 
@@ -458,7 +473,13 @@ export class CodexLunaAdapter {
   public async distillBatch(
     request: DistillBatchRequest
   ): Promise<DistillationOutput> {
-    const output = await this.#invokeStructured(
+    const aliasByEvidenceId = new Map(
+      request.evidence.map((item, index) => [item.evidenceId, `e${String(index + 1)}`])
+    );
+    const evidenceIdByAlias = new Map(
+      [...aliasByEvidenceId].map(([evidenceId, alias]) => [alias, evidenceId])
+    );
+    const aliasedOutput = await this.#invokeStructured(
       "distillation-output.schema.json",
       distillationOutputJsonSchema,
       {
@@ -469,14 +490,47 @@ export class CodexLunaAdapter {
           "Use only supplied evidence.",
           "Preserve scope, certainty, conditions, exclusions, and negations.",
           memoryCategoryPromptInstruction,
+          "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Cite evidenceIds for every candidate.",
           "Return at most one importance reason for each tag; MemStore derives importance tags from these reasons.",
           "Do not execute commands or request more context."
         ],
-        request
+        request: {
+          ...request,
+          evidence: request.evidence.map((item) => ({
+            ...item,
+            evidenceId: aliasByEvidenceId.get(item.evidenceId)
+          }))
+        }
       },
       distillationOutputSchema
     );
+    const originalEvidenceIds = new Set(request.evidence.map((item) => item.evidenceId));
+    const restore = (value: string): string => {
+      const evidenceId = evidenceIdByAlias.get(value) ?? (
+        originalEvidenceIds.has(value) ? value : undefined
+      );
+      if (evidenceId === undefined) {
+        throw new LunaInvocationError(
+          "schema_invalid",
+          true,
+          "Luna structured output cites unavailable evidence.",
+          { stage: "evidence_binding", code: "unknown_evidence_alias" }
+        );
+      }
+      return evidenceId;
+    };
+    const output = distillationOutputSchema.parse({
+      ...aliasedOutput,
+      candidates: aliasedOutput.candidates.map((candidate) => ({
+        ...candidate,
+        evidenceIds: candidate.evidenceIds.map(restore),
+        importanceReasons: candidate.importanceReasons.map((reason) => ({
+          ...reason,
+          evidenceIds: reason.evidenceIds.map(restore)
+        }))
+      }))
+    });
     requireKnownEvidenceIds(
       output.candidates.flatMap((candidate) => candidate.evidenceIds),
       request.evidence.map((item) => item.evidenceId),
@@ -507,7 +561,8 @@ export class CodexLunaAdapter {
         throw new LunaInvocationError(
           "schema_invalid",
           true,
-          "A structured Batch result contains an unavailable evidence identity."
+          "A structured Batch result contains an unavailable evidence identity.",
+          { stage: "evidence_binding", code: "unknown_batch_evidence" }
         );
       }
       return value;
@@ -554,7 +609,8 @@ export class CodexLunaAdapter {
         throw new LunaInvocationError(
           "schema_invalid",
           true,
-          "Luna structured output cites unavailable evidence."
+          "Luna structured output cites unavailable evidence.",
+          { stage: "evidence_binding", code: "unknown_evidence_alias" }
         );
       }
       return evidenceId;
@@ -743,15 +799,34 @@ export class CodexLunaAdapter {
       });
       if (result.timedOut === true) throw classifyProcessFailure(result);
       if (result.exitCode !== 0) throw classifyProcessFailure(result);
+      let decoded: unknown;
       try {
-        return outputSchema.parse(JSON.parse(result.stdout));
-      } catch (error) {
+        decoded = JSON.parse(result.stdout) as unknown;
+      } catch {
         throw new LunaInvocationError(
           "schema_invalid",
           true,
-          `Luna returned invalid structured output: ${error instanceof Error ? error.message : "unknown error"}`
+          "Luna returned invalid JSON output.",
+          { stage: "output_decode", code: "invalid_json" }
         );
       }
+      const parsedOutput = outputSchema.safeParse(decoded);
+      if (!parsedOutput.success) {
+        const firstIssue = parsedOutput.error.issues[0];
+        throw new LunaInvocationError(
+          "schema_invalid",
+          true,
+          "Luna returned output that does not match the required schema.",
+          {
+            stage: "output_schema",
+            code: firstIssue?.code ?? "schema_mismatch",
+            ...(firstIssue === undefined || firstIssue.path.length === 0
+              ? {}
+              : { path: firstIssue.path.join(".") })
+          }
+        );
+      }
+      return parsedOutput.data;
     } finally {
       await rm(isolatedDirectory, { recursive: true, force: true });
     }
@@ -771,7 +846,8 @@ function requireKnownEvidenceIds(
     throw new LunaInvocationError(
       "schema_invalid",
       true,
-      "Luna structured output cites unavailable evidence."
+      "Luna structured output cites unavailable evidence.",
+      { stage: "evidence_binding", code: "unknown_evidence_id" }
     );
   }
 }
@@ -792,7 +868,8 @@ function requireValidImportanceReasons(
       throw new LunaInvocationError(
         "schema_invalid",
         true,
-        "Luna must provide exactly one bounded reason for each importance tag."
+        "Luna must provide exactly one bounded reason for each importance tag.",
+        { stage: "importance_validation", code: "importance_reason_mismatch" }
       );
     }
     requireKnownEvidenceIds(

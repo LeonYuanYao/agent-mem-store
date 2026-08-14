@@ -101,6 +101,12 @@ export async function inspectDoctor(request: {
        WHERE operation_kind = 'semantic_assessment'
          AND state IN ('pending', 'processing', 'retrying', 'blocked')`
     ).get();
+    const lunaOperations = database.prepare(
+      `SELECT COUNT(*) AS active_count,
+              SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) AS blocked_count
+       FROM luna_operations
+       WHERE state IN ('pending', 'processing', 'retrying', 'blocked')`
+    ).get();
     const waitingCount = z.number().int().nonnegative().parse(candidates?.waiting_count);
     const unevaluatedCount = z.number().int().nonnegative().parse(candidates?.unevaluated_count ?? 0);
     const semanticCount = z.number().int().nonnegative().parse(semantic?.count);
@@ -115,6 +121,19 @@ export async function inspectDoctor(request: {
       detail: waitingCount === 0
         ? "No Candidate is waiting."
         : `${String(waitingCount)} Candidates are waiting; ${String(unevaluatedCount)} are unevaluated and ${String(semanticCount)} semantic assessments are active. Oldest unevaluated: ${oldestUnevaluatedAt ?? "none"}.`
+    });
+    const activeLunaOperationCount = z.number().int().nonnegative().parse(
+      lunaOperations?.active_count
+    );
+    const blockedLunaOperationCount = z.number().int().nonnegative().parse(
+      lunaOperations?.blocked_count ?? 0
+    );
+    checks.push({
+      name: "luna_operations",
+      state: blockedLunaOperationCount > 0 ? "warning" : "ok",
+      detail: blockedLunaOperationCount > 0
+        ? `${String(blockedLunaOperationCount)} blocked of ${String(activeLunaOperationCount)} active Luna operations.`
+        : `${String(activeLunaOperationCount)} active Luna operations; none blocked.`
     });
     if (request.deep) checks.push(await inspectCatalogFiles(database, vaultRoot));
   } catch (error) {
@@ -136,7 +155,12 @@ export async function retryOperation(request: {
   readonly preview: boolean;
 }): Promise<
   | { readonly state: "preview"; readonly dryRun: true; readonly wouldRetry: true; readonly operationId: string }
-  | { readonly state: "queued"; readonly operationId: string }
+  | {
+      readonly state: "queued";
+      readonly operationId: string;
+      readonly retryEpoch: number;
+      readonly lifetimeAttemptCount: number;
+    }
 > {
   const requestedAt = z.iso.datetime().parse(request.requestedAt);
   const operationId = z.string().min(1).parse(request.operationId);
@@ -145,7 +169,7 @@ export async function retryOperation(request: {
   const database = new DatabaseSync(path, { readOnly: request.preview });
   try {
     const row = database.prepare(
-      "SELECT state FROM luna_operations WHERE operation_id = ?"
+      "SELECT state, retry_epoch, attempt_count FROM luna_operations WHERE operation_id = ?"
     ).get(operationId);
     if (row === undefined) {
       throw new MemStoreCommandError("operation_not_found", "Operation does not exist.");
@@ -163,10 +187,17 @@ export async function retryOperation(request: {
     database.prepare(
       `UPDATE luna_operations
        SET state = 'pending', next_retry_at = NULL, lease_token = NULL,
-           leased_by = NULL, lease_until = NULL, updated_at = ?
+           leased_by = NULL, lease_until = NULL,
+           retry_epoch = retry_epoch + 1, epoch_attempt_count = 0,
+           updated_at = ?
        WHERE operation_id = ? AND state IN ('blocked', 'retrying')`
     ).run(requestedAt, operationId);
-    return { state: "queued", operationId };
+    return {
+      state: "queued",
+      operationId,
+      retryEpoch: z.number().int().nonnegative().parse(row.retry_epoch) + 1,
+      lifetimeAttemptCount: z.number().int().nonnegative().parse(row.attempt_count)
+    };
   } finally {
     database.close();
   }

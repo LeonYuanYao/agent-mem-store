@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { parse } from "smol-toml";
 import { z } from "zod";
 
@@ -57,17 +58,16 @@ function codexConfigurationIdentity(
   managedHookStateKeys: readonly string[]
 ): {
   readonly nativeMemory: {
-    readonly generateMemories: boolean;
-    readonly useMemories: boolean;
+    readonly generateMemories: boolean | undefined;
+    readonly useMemories: boolean | undefined;
   };
   readonly memstoreMcp: unknown;
   readonly managedHookStates: unknown;
 } {
   const document = z.record(z.string(), z.unknown()).parse(parse(source));
-  const memories = z.object({
-    generate_memories: z.boolean(),
-    use_memories: z.boolean()
-  }).parse(document.memories);
+  const memories = document.memories === undefined
+    ? {}
+    : z.record(z.string(), z.unknown()).parse(document.memories);
   const mcpServers = z.record(z.string(), z.unknown()).parse(document.mcp_servers);
   const memstoreMcp = z.record(z.string(), z.unknown()).parse(mcpServers.memstore);
   const hooks = document.hooks === undefined
@@ -78,8 +78,12 @@ function codexConfigurationIdentity(
     : z.record(z.string(), z.unknown()).parse(hooks.state);
   return {
     nativeMemory: {
-      generateMemories: memories.generate_memories,
-      useMemories: memories.use_memories
+      generateMemories: typeof memories.generate_memories === "boolean"
+        ? memories.generate_memories
+        : undefined,
+      useMemories: typeof memories.use_memories === "boolean"
+        ? memories.use_memories
+        : undefined
     },
     memstoreMcp: canonicalize(memstoreMcp),
     managedHookStates: canonicalize(Object.fromEntries(
@@ -87,6 +91,18 @@ function codexConfigurationIdentity(
         Object.hasOwn(hookStates, key) ? [[key, hookStates[key]]] : []
       )
     ))
+  };
+}
+
+const shadowIdentityScope = "memstore-v2-native-memory-independent" as const;
+
+function memstoreConfigurationIdentity(identity: ReturnType<typeof codexConfigurationIdentity>): {
+  readonly memstoreMcp: unknown;
+  readonly managedHookStates: unknown;
+} {
+  return {
+    memstoreMcp: identity.memstoreMcp,
+    managedHookStates: identity.managedHookStates
   };
 }
 
@@ -167,9 +183,6 @@ async function validatedBaseline(request: {
   );
   const configIdentity = codexConfigurationIdentity(configSource, hooksIdentity.stateKeys);
   const { generateMemories, useMemories } = configIdentity.nativeMemory;
-  if (!generateMemories || !useMemories) {
-    throw new Error("Official Shadow requires Codex native generation and recall to remain enabled as its baseline.");
-  }
 
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
@@ -213,9 +226,9 @@ async function validatedBaseline(request: {
          (SELECT COUNT(*) FROM memory_catalog) AS canonical_memories`
     ).get();
     const baseline = {
-      schemaVersion: 1,
-      identityScope: "memstore-v1",
-      configSha256: identitySha256(configIdentity),
+      schemaVersion: 2,
+      identityScope: shadowIdentityScope,
+      configSha256: identitySha256(memstoreConfigurationIdentity(configIdentity)),
       hooksSha256: identitySha256(hooksIdentity.routes),
       programSha256: programSha,
       nativeMemory: { generateMemories, useMemories },
@@ -233,6 +246,146 @@ async function validatedBaseline(request: {
       installationId: manifest.installationId,
       minimumEndAt: new Date(Date.parse(startedAt) + 7 * 24 * 60 * 60 * 1000).toISOString(),
       baseline
+    };
+  } finally {
+    database.close();
+  }
+}
+
+export async function migrateOfficialShadowIdentity(request: {
+  readonly runtimeRoot: string;
+  readonly repositoryRoot: string;
+  readonly homeRoot: string;
+  readonly windowId: string;
+  readonly migratedAt: string;
+  readonly preview?: boolean;
+}): Promise<{
+  readonly state: "preview" | "migrated";
+  readonly dryRun: boolean;
+  readonly windowId: string;
+  readonly identityScope: typeof shadowIdentityScope;
+  readonly previousBaselineSha256: string;
+  readonly baselineSha256: string;
+}> {
+  const migratedAt = z.iso.datetime().parse(request.migratedAt);
+  const [candidateSource, manifestSource, configSource, hooksSource, programSha] = await Promise.all([
+    readFile(join(resolve(request.repositoryRoot), "config", "gate5-shadow-v1.json"), "utf8"),
+    readFile(join(resolve(request.runtimeRoot), "install", "ownership-manifest.json"), "utf8"),
+    readFile(join(resolve(request.homeRoot), ".codex", "config.toml"), "utf8"),
+    readFile(join(resolve(request.homeRoot), ".codex", "hooks.json"), "utf8"),
+    programSha256(request.repositoryRoot)
+  ]);
+  const manifest = z.looseObject({
+    installationId: z.string().min(1),
+    candidateId: z.literal("gate5-shadow-v1"),
+    state: z.literal("installed")
+  }).parse(JSON.parse(manifestSource));
+  const hooksIdentity = codexHookIdentity(
+    hooksSource,
+    join(resolve(request.homeRoot), ".codex", "hooks.json")
+  );
+  const configIdentity = codexConfigurationIdentity(configSource, hooksIdentity.stateKeys);
+  const database = request.preview === true
+    ? new DatabaseSync(join(resolve(request.runtimeRoot), "state", "memstore.sqlite"), {
+        readOnly: true
+      })
+    : await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    const row = database.prepare(
+      "SELECT * FROM official_shadow_windows WHERE window_id = ? AND state = 'active'"
+    ).get(request.windowId);
+    if (row === undefined) throw new Error("The requested active official Shadow window does not exist.");
+    const baselineSource = z.string().parse(row.baseline_json);
+    const previousBaselineSha256 = z.string().regex(/^[0-9a-f]{64}$/u).parse(row.baseline_sha256);
+    if (sha256(baselineSource) !== previousBaselineSha256) {
+      throw new Error("The official Shadow baseline digest is invalid.");
+    }
+    const baseline = z.looseObject({
+      identityScope: z.literal("memstore-v1"),
+      configSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+      hooksSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+      programSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+      nativeMemory: z.object({
+        generateMemories: z.boolean(),
+        useMemories: z.boolean()
+      }),
+      activeIndexRevisionId: z.string().min(1),
+      counts: z.record(z.string(), z.number()),
+      continuityAdjustments: z.array(z.record(z.string(), z.unknown())).optional()
+    }).parse(JSON.parse(baselineSource));
+    if (
+      sha256(candidateSource) !== row.candidate_sha256 ||
+      manifest.installationId !== row.installation_id ||
+      manifest.candidateId !== row.candidate_id
+    ) {
+      throw new Error("The installed Shadow candidate changed; identity continuity cannot be proven.");
+    }
+    if (identitySha256(hooksIdentity.routes) !== baseline.hooksSha256) {
+      throw new Error("Managed Shadow Hooks changed; identity continuity cannot be proven.");
+    }
+    const legacyIdentity = {
+      ...configIdentity,
+      nativeMemory: baseline.nativeMemory
+    };
+    if (identitySha256(legacyIdentity) !== baseline.configSha256) {
+      throw new Error("MemStore MCP or managed Hook state changed; identity continuity cannot be proven.");
+    }
+    const activeIndex = database.prepare(
+      `SELECT revision.index_revision_id, revision.adapter_version,
+              revision.model_identity, revision.artifact_sha256,
+              revision.dimensions, revision.normalization
+       FROM active_retrieval_index AS active
+       JOIN retrieval_index_revisions AS revision
+         ON revision.index_revision_id = active.index_revision_id
+       WHERE active.singleton = 1 AND revision.state = 'complete'`
+    ).get();
+    if (
+      activeIndex?.adapter_version !== approvedShadowEmbeddingProfile.adapterVersion ||
+      activeIndex.model_identity !== approvedShadowEmbeddingProfile.modelIdentity ||
+      activeIndex.artifact_sha256 !== approvedShadowEmbeddingProfile.artifactSha256 ||
+      activeIndex.dimensions !== approvedShadowEmbeddingProfile.dimensions ||
+      activeIndex.normalization !== approvedShadowEmbeddingProfile.normalization
+    ) {
+      throw new Error("The active retrieval index changed; identity continuity cannot be proven.");
+    }
+    const continuityAdjustment = {
+      kind: "exclude_native_memory_from_shadow_identity",
+      migratedAt,
+      previousIdentityScope: "memstore-v1",
+      previousBaselineSha256,
+      previousProgramSha256: baseline.programSha256,
+      programSha256: programSha,
+      nativeMemoryAtBaseline: baseline.nativeMemory,
+      nativeMemoryAtMigration: configIdentity.nativeMemory
+    };
+    const migratedBaseline = {
+      ...baseline,
+      schemaVersion: 2,
+      identityScope: shadowIdentityScope,
+      configSha256: identitySha256(memstoreConfigurationIdentity(configIdentity)),
+      programSha256: programSha,
+      continuityAdjustments: [
+        ...(baseline.continuityAdjustments ?? []),
+        continuityAdjustment
+      ]
+    };
+    const migratedSource = JSON.stringify(migratedBaseline);
+    const baselineSha256 = sha256(migratedSource);
+    if (request.preview !== true) {
+      const result = database.prepare(
+        `UPDATE official_shadow_windows
+         SET baseline_json = ?, baseline_sha256 = ?
+         WHERE window_id = ? AND state = 'active' AND baseline_sha256 = ?`
+      ).run(migratedSource, baselineSha256, request.windowId, previousBaselineSha256);
+      if (result.changes !== 1) throw new Error("The official Shadow baseline changed during migration.");
+    }
+    return {
+      state: request.preview === true ? "preview" : "migrated",
+      dryRun: request.preview === true,
+      windowId: request.windowId,
+      identityScope: shadowIdentityScope,
+      previousBaselineSha256,
+      baselineSha256
     };
   } finally {
     database.close();
@@ -358,7 +511,8 @@ export async function inspectOfficialShadowWindow(request: {
       hooksSha256: z.string().regex(/^[0-9a-f]{64}$/u),
       programSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
       activeIndexRevisionId: z.string().min(1),
-      counts: z.record(z.string(), z.number())
+      counts: z.record(z.string(), z.number()),
+      continuityAdjustments: z.array(z.record(z.string(), z.unknown())).optional()
     })
       .parse(JSON.parse(z.string().parse(row.baseline_json)));
     const current = z.record(z.string(), z.number()).parse(database.prepare(
@@ -391,10 +545,13 @@ export async function inspectOfficialShadowWindow(request: {
     ) {
       invalidationReasons.push("installation_changed");
     }
-    if (baseline.identityScope !== "memstore-v1") {
+    if (baseline.identityScope !== "memstore-v1" && baseline.identityScope !== shadowIdentityScope) {
       invalidationReasons.push("identity_scope_changed");
     } else {
-      if (identitySha256(configIdentity) !== baseline.configSha256) {
+      const currentConfigIdentity = baseline.identityScope === "memstore-v1"
+        ? configIdentity
+        : memstoreConfigurationIdentity(configIdentity);
+      if (identitySha256(currentConfigIdentity) !== baseline.configSha256) {
         invalidationReasons.push("codex_config_changed");
       }
       if (identitySha256(hooksIdentity.routes) !== baseline.hooksSha256) {
@@ -426,6 +583,8 @@ export async function inspectOfficialShadowWindow(request: {
       elapsedCalendarDays: Math.max(0, Math.floor((Date.parse(now) - Date.parse(startedAt)) / (24 * 60 * 60 * 1000))),
       minimumDurationMet: now >= minimumEndAt,
       gate6ReviewEligible: effectiveState === "active" && now >= minimumEndAt,
+      nativeMemory: configIdentity.nativeMemory,
+      continuityAdjustments: baseline.continuityAdjustments ?? [],
       coverage: Object.fromEntries(Object.entries(current).map(([key, value]) => [
         key,
         { baseline: baseline.counts[key] ?? 0, current: value, delta: value - (baseline.counts[key] ?? 0) }

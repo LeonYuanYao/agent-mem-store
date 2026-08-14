@@ -370,17 +370,19 @@ async function queueConsolidationIfReady(
           `SELECT COUNT(DISTINCT batch.batch_id) AS batch_count,
                   COUNT(DISTINCT CASE WHEN batch.state = 'completed' THEN batch.batch_id END)
                     AS completed_count,
-                  MAX(CASE WHEN event_kind = 'SessionEnd' THEN 1 ELSE 0 END) AS has_session_end
+                  MAX(CASE WHEN event_kind = 'SessionEnd' THEN 1 ELSE 0 END) AS has_session_end,
+                  MAX(CASE WHEN batch.source_selector IS NOT NULL THEN 1 ELSE 0 END) AS has_explicit
            FROM distillation_batches AS batch
            LEFT JOIN distillation_batch_events AS assigned ON assigned.batch_id = batch.batch_id
            LEFT JOIN capture_events AS capture ON capture.event_id = assigned.event_id
-           WHERE batch.session_id = ?`
+           WHERE batch.session_id = ? AND batch.split_at IS NULL`
         )
         .get(sessionId);
       const batchCount = z.number().int().nonnegative().parse(summary?.batch_count);
       const completedCount = z.number().int().nonnegative().parse(summary?.completed_count);
       const hasSessionEnd = summary?.has_session_end === 1;
-      if (batchCount > 1 && batchCount === completedCount && hasSessionEnd) {
+      const hasExplicit = summary?.has_explicit === 1;
+      if (batchCount > 1 && batchCount === completedCount && (hasSessionEnd || hasExplicit)) {
         const existing = database
           .prepare(
             "SELECT operation_id FROM session_consolidations WHERE session_id = ?"
@@ -424,6 +426,134 @@ async function queueConsolidationIfReady(
   }
 }
 
+async function splitLargeSchemaInvalidBatch(request: {
+  readonly runtimeRoot: string;
+  readonly batchId: string;
+  readonly operationId: string;
+  readonly splitAt: string;
+}): Promise<{ readonly state: "not_split" } | { readonly state: "split"; readonly childBatchCount: 2 }> {
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const batch = database.prepare(
+        `SELECT session_id, project_id, requested_scope_kind,
+                requested_startup, source_selector, split_at
+         FROM distillation_batches
+         WHERE batch_id = ? AND operation_id = ?`
+      ).get(request.batchId, request.operationId);
+      if (batch === undefined || batch.split_at !== null) {
+        database.exec("COMMIT");
+        return { state: "not_split" };
+      }
+      const sessionId = z.string().parse(batch.session_id);
+      const projectId = z.string().nullable().parse(batch.project_id);
+      const requestedScopeKind = z.enum(["project", "global"]).parse(
+        batch.requested_scope_kind
+      );
+      const requestedStartup = z.enum(["auto", "always", "never"]).parse(
+        batch.requested_startup
+      );
+      const sourceSelector = z.string().nullable().parse(batch.source_selector);
+      const rows = database.prepare(
+        `SELECT assigned.event_id, assigned.event_ordinal, capture.retained_bytes
+         FROM distillation_batch_events AS assigned
+         JOIN capture_events AS capture ON capture.event_id = assigned.event_id
+         WHERE assigned.batch_id = ? ORDER BY assigned.event_ordinal`
+      ).all(request.batchId);
+      const totalBytes = rows.reduce(
+        (sum, row) => sum + z.number().int().nonnegative().parse(row.retained_bytes),
+        0
+      );
+      if (rows.length < 2 || totalBytes < 64 * 1024) {
+        database.exec("COMMIT");
+        return { state: "not_split" };
+      }
+      let splitIndex = 1;
+      let bytesBeforeSplit = 0;
+      let smallestDifference = Number.POSITIVE_INFINITY;
+      for (let index = 1; index < rows.length; index += 1) {
+        bytesBeforeSplit += z.number().int().nonnegative().parse(rows[index - 1]?.retained_bytes);
+        const difference = Math.abs(totalBytes - 2 * bytesBeforeSplit);
+        if (difference < smallestDifference) {
+          smallestDifference = difference;
+          splitIndex = index;
+        }
+      }
+      const childRows = [rows.slice(0, splitIndex), rows.slice(splitIndex)] as const;
+      const ordinal = z.number().int().nonnegative().parse(database.prepare(
+        `SELECT COALESCE(MAX(batch_ordinal), -1) + 1 AS next_ordinal
+         FROM distillation_batches WHERE session_id = ?`
+      ).get(sessionId)?.next_ordinal);
+      database.prepare(
+        `UPDATE luna_operations
+         SET state = 'dead_letter', next_retry_at = NULL, updated_at = ?
+         WHERE operation_id = ? AND state IN ('retrying', 'blocked')`
+      ).run(request.splitAt, request.operationId);
+      database.prepare(
+        `UPDATE distillation_batches
+         SET state = 'blocked', split_at = ?, split_reason = 'schema_invalid_large_batch'
+         WHERE batch_id = ?`
+      ).run(request.splitAt, request.batchId);
+      database.prepare(
+        "DELETE FROM distillation_batch_events WHERE batch_id = ?"
+      ).run(request.batchId);
+      for (const [childIndex, events] of childRows.entries()) {
+        const batchId = `msbatch_${randomUUID()}`;
+        const operationId = `msop_${randomUUID()}`;
+        const payload = operationPayloadSource({ batchId });
+        database.prepare(
+          `INSERT INTO luna_operations(
+             operation_id, operation_kind, idempotency_key, project_id,
+             session_id, payload_json, payload_sha256, state, created_at, updated_at
+           ) VALUES (?, 'distill_batch', ?, ?, ?, ?, ?, 'pending', ?, ?)`
+        ).run(
+          operationId,
+          `distill:${batchId}`,
+          projectId,
+          sessionId,
+          payload.source,
+          payload.sha256,
+          request.splitAt,
+          request.splitAt
+        );
+        database.prepare(
+          `INSERT INTO distillation_batches(
+             batch_id, session_id, project_id, batch_ordinal, state,
+             operation_id, created_at, requested_scope_kind,
+             requested_startup, source_selector, split_parent_batch_id
+           ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`
+        ).run(
+          batchId,
+          sessionId,
+          projectId,
+          ordinal + childIndex,
+          operationId,
+          request.splitAt,
+          requestedScopeKind,
+          requestedStartup,
+          sourceSelector,
+          request.batchId
+        );
+        const insertEvent = database.prepare(
+          `INSERT INTO distillation_batch_events(batch_id, event_id, event_ordinal)
+           VALUES (?, ?, ?)`
+        );
+        events.forEach((row, eventIndex) => {
+          insertEvent.run(batchId, z.string().parse(row.event_id), eventIndex);
+        });
+      }
+      database.exec("COMMIT");
+      return { state: "split", childBatchCount: 2 };
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    database.close();
+  }
+}
+
 async function finalizeCompletedBatch(request: {
   readonly runtimeRoot: string;
   readonly batchId: string;
@@ -449,7 +579,7 @@ async function finalizeCompletedBatch(request: {
        LEFT JOIN distillation_batch_events AS assigned
          ON assigned.batch_id = candidate_batch.batch_id
        LEFT JOIN capture_events AS capture ON capture.event_id = assigned.event_id
-       WHERE candidate_batch.session_id = ?`
+       WHERE candidate_batch.session_id = ? AND candidate_batch.split_at IS NULL`
     ).get(sessionId);
     batchCount = z.number().int().positive().parse(summary?.batch_count);
     hasSessionEnd = summary?.has_session_end === 1;
@@ -499,6 +629,12 @@ export type RunNextLunaWorkResult =
       readonly state: "completed" | "retrying" | "blocked";
       readonly operationId: string;
       readonly operationKind: "distill_batch" | "consolidate_session";
+    }
+  | {
+      readonly state: "split";
+      readonly operationId: string;
+      readonly operationKind: "distill_batch";
+      readonly childBatchCount: 2;
     };
 
 export async function runNextLunaWork(request: {
@@ -734,6 +870,27 @@ export async function runNextLunaWork(request: {
     } finally {
       failedDatabase.close();
     }
+    if (
+      error instanceof LunaInvocationError &&
+      error.category === "schema_invalid" &&
+      operation.kind === "distill_batch" &&
+      "batchId" in payload
+    ) {
+      const split = await splitLargeSchemaInvalidBatch({
+        runtimeRoot: request.runtimeRoot,
+        batchId: payload.batchId,
+        operationId: operation.operationId,
+        splitAt: failedAt
+      });
+      if (split.state === "split") {
+        return {
+          state: "split",
+          operationId: operation.operationId,
+          operationKind: "distill_batch",
+          childBatchCount: split.childBatchCount
+        };
+      }
+    }
     return {
       state: failed.state,
       operationId: operation.operationId,
@@ -757,7 +914,7 @@ export async function inspectSessionDistillation(request: {
       .prepare(
         `SELECT COUNT(*) AS batch_count,
                 SUM(CASE WHEN state = 'completed' THEN 1 ELSE 0 END) AS completed_count
-         FROM distillation_batches WHERE session_id = ?`
+         FROM distillation_batches WHERE session_id = ? AND split_at IS NULL`
       )
       .get(request.sessionId);
     const consolidation = database

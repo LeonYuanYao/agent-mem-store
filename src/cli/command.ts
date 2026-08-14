@@ -17,6 +17,7 @@ import { prepareShadowEmbedding } from "../operations/embedding-install.js";
 import { migrateMemoryCategories } from "../operations/category-migration.js";
 import {
   inspectOfficialShadowWindow,
+  migrateOfficialShadowIdentity,
   startOfficialShadowWindow
 } from "../operations/shadow-window.js";
 import { inspectDoctor, retryOperation } from "../operations/maintenance.js";
@@ -144,6 +145,7 @@ function parseCommon(arguments_: readonly string[]) {
       "codex-executable": { type: "string" },
       "embedding-model-dir": { type: "string" },
       "probe-event": { type: "string" },
+      window: { type: "string" },
       "native-store": { type: "string", multiple: true },
       preview: { type: "boolean", default: false },
       json: { type: "boolean", default: false }
@@ -479,7 +481,30 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
         json: parsed.values.json
       };
     }
-    throw new MemStoreCommandError("unknown_command", "Use shadow start or shadow status.");
+    if (action === "migrate-identity") {
+      if (parsed.values.window === undefined) {
+        throw new MemStoreCommandError(
+          "shadow_window_required",
+          "shadow migrate-identity requires --window with the active official Shadow window id."
+        );
+      }
+      return {
+        command: "shadow.migrate-identity",
+        result: await migrateOfficialShadowIdentity({
+          runtimeRoot: location.runtimeRoot,
+          repositoryRoot: resolve(parsed.values.repo ?? process.cwd()),
+          homeRoot: resolve(parsed.values.home ?? homedir()),
+          windowId: parsed.values.window,
+          migratedAt: now,
+          preview: parsed.values.preview
+        }),
+        json: parsed.values.json
+      };
+    }
+    throw new MemStoreCommandError(
+      "unknown_command",
+      "Use shadow start, shadow status, or shadow migrate-identity."
+    );
   }
   if (command === "purge") {
     const action = parsed.positionals[1];
