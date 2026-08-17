@@ -45,6 +45,27 @@ function reviewDigestKey(now: string, timeZone: string): string {
   return `review:week:${monday.toString()}`;
 }
 
+async function retrievalIndexBuildIsCoolingDown(runtimeRoot: string, now: string): Promise<boolean> {
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    const activity = database.prepare(
+      `SELECT state, started_at, completed_at
+       FROM retrieval_index_build_activity
+       WHERE singleton = 1`
+    ).get();
+    if (activity === undefined) return false;
+    if (activity.state === "building") {
+      const startedAt = Date.parse(z.string().parse(activity.started_at));
+      return startedAt + 5 * 60 * 1_000 > Date.parse(now);
+    }
+    if (activity.state !== "failed" || activity.completed_at === null) return false;
+    const failedAt = Date.parse(z.string().parse(activity.completed_at));
+    return failedAt + 5 * 60 * 1_000 > Date.parse(now);
+  } finally {
+    database.close();
+  }
+}
+
 export async function runWorkerOnce(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
@@ -86,17 +107,22 @@ export async function runWorkerOnce(request: {
     activities.push("session-end:catch-up");
   }
   if (request.adapters?.embedding !== undefined) {
-    if (await retrievalIndexNeedsRebuild({
+    if (!(await retrievalIndexBuildIsCoolingDown(request.runtimeRoot, now)) &&
+      await retrievalIndexNeedsRebuild({
       runtimeRoot: request.runtimeRoot,
       adapter: request.adapters.embedding
     })) {
-      const index = await buildRetrievalIndex({
-        runtimeRoot: request.runtimeRoot,
-        vaultRoot: request.vaultRoot,
-        adapter: request.adapters.embedding,
-        builtAt: now
-      });
-      activities.push(`retrieval-index:${index.state}`);
+      try {
+        const index = await buildRetrievalIndex({
+          runtimeRoot: request.runtimeRoot,
+          vaultRoot: request.vaultRoot,
+          adapter: request.adapters.embedding,
+          builtAt: now
+        });
+        activities.push(`retrieval-index:${index.state}`);
+      } catch {
+        activities.push("retrieval-index:failed");
+      }
     }
     const shadow = await runNextShadowEvaluation({
       runtimeRoot: request.runtimeRoot,

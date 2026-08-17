@@ -360,6 +360,7 @@ async function configuredWorkerAdapters(runtimeRoot: string): Promise<{
         dtype: approvedShadowEmbeddingProfile.dtype,
         queryPrefix: approvedShadowEmbeddingProfile.queryPrefix,
         documentPrefix: approvedShadowEmbeddingProfile.documentPrefix,
+        batchSize: approvedShadowEmbeddingProfile.batchSize,
         localFilesOnly: true
       });
   if (embedding !== undefined &&

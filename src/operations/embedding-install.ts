@@ -26,6 +26,7 @@ async function verifyDirectory(directory: string, localFilesOnly: boolean): Prom
     dtype: approvedShadowEmbeddingProfile.dtype,
     queryPrefix: approvedShadowEmbeddingProfile.queryPrefix,
     documentPrefix: approvedShadowEmbeddingProfile.documentPrefix,
+    batchSize: approvedShadowEmbeddingProfile.batchSize,
     localFilesOnly
   });
   try {

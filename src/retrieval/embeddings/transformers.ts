@@ -49,6 +49,7 @@ export async function loadTransformersEmbeddingAdapter(request: {
   readonly dtype: "q8" | "fp32";
   readonly queryPrefix?: string;
   readonly documentPrefix?: string;
+  readonly batchSize?: number;
   readonly localFilesOnly?: boolean;
 }): Promise<{
   readonly adapter: EmbeddingAdapter;
@@ -85,19 +86,25 @@ export async function loadTransformersEmbeddingAdapter(request: {
   const pipelineLoadedAt = performance.now();
   const artifact = await fingerprintArtifactDirectory(request.cacheDirectory);
   const artifactFingerprintedAt = performance.now();
+  const batchSize = z.number().int().positive().max(256).default(16).parse(request.batchSize);
   const embedWithPrefix = async (
     texts: readonly string[],
     prefix: string
   ): Promise<readonly (readonly number[])[]> => {
     if (texts.length === 0) return [];
-    const output = await extractor(texts.map((text) => `${prefix}${text}`), {
-      pooling: "mean",
-      normalize: true
-    });
-    const raw: unknown = output.tolist();
-    const rows = tensorRows(raw);
-    if (rows.length !== texts.length || rows.some((row) => row.length !== dimensions)) {
-      throw new Error("Embedding model returned an unexpected tensor shape.");
+    const rows: (readonly number[])[] = [];
+    for (let offset = 0; offset < texts.length; offset += batchSize) {
+      const batch = texts.slice(offset, offset + batchSize);
+      const output = await extractor(batch.map((text) => `${prefix}${text}`), {
+        pooling: "mean",
+        normalize: true
+      });
+      const raw: unknown = output.tolist();
+      const batchRows = tensorRows(raw);
+      if (batchRows.length !== batch.length || batchRows.some((row) => row.length !== dimensions)) {
+        throw new Error("Embedding model returned an unexpected tensor shape.");
+      }
+      rows.push(...batchRows);
     }
     return rows;
   };
@@ -105,7 +112,7 @@ export async function loadTransformersEmbeddingAdapter(request: {
   const documentPrefix = request.documentPrefix ?? "";
   const adapter: EmbeddingAdapter = {
     identity: {
-      adapterVersion: `transformers-4.2.0:${request.dtype}:mean-l2:v1`,
+      adapterVersion: `transformers-4.2.0:${request.dtype}:mean-l2:batch${String(batchSize)}:v2`,
       modelIdentity: request.modelIdentity,
       artifactSha256: artifact.sha256,
       dimensions,

@@ -469,6 +469,38 @@ test("an API invalid_json_schema response is classified as a visible non-retryab
   });
 });
 
+test("an input limit error is not reclassified by words in the echoed consolidation body", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-input-limit-"));
+  temporaryDirectories.push(root);
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 1,
+      stdout: "",
+      stderr: [
+        "user",
+        "The echoed knowledge body mentions invalid_json_schema, config, and authentication.",
+        "Error: turn/start failed: Input exceeds the maximum length of 1048576 characters. " +
+          "data: {\"input_error_code\":\"input_too_large\",\"max_chars\":1048576}"
+      ].join("\n")
+    })
+  });
+
+  await expect(adapter.assessCandidateSemantics({
+    operationId: "input-limit-failure",
+    statement: "A claim.",
+    conditions: [],
+    exclusions: [],
+    evidence: []
+  })).rejects.toMatchObject({
+    category: "input_too_large",
+    retryable: false,
+    diagnostic: { stage: "invocation", code: "input_too_large" }
+  });
+});
+
 test("consolidation and semantic assessment use distinct versioned structured tasks", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-structured-"));
   temporaryDirectories.push(root);
@@ -625,6 +657,85 @@ test("consolidation uses short evidence aliases and restores exact source identi
     evidenceIds: [originalEvidenceId],
     importanceReasons: [{ evidenceIds: [originalEvidenceId] }]
   });
+});
+
+test("large consolidation stays below the Codex input limit and preserves exact evidence identities", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-consolidation-limit-"));
+  temporaryDirectories.push(root);
+  const processInputLengths: number[] = [];
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      processInputLengths.push(request.standardInput.length);
+      const prompt = JSON.parse(request.standardInput) as {
+        request: {
+          batchResults: Array<{
+            candidates: Array<{ evidenceIds: string[] }>;
+            evidenceIds: string[];
+          }>;
+        };
+      };
+      const evidenceAlias = prompt.request.batchResults
+        .flatMap((batch) => [
+          ...batch.evidenceIds,
+          ...batch.candidates.flatMap((candidate) => candidate.evidenceIds)
+        ])[0];
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "consolidation",
+          candidates: evidenceAlias === undefined ? [] : [{
+            statement: "Consolidated bounded statement.",
+            primaryCategory: "architecture_contract",
+            categoryTags: ["architecture_contract"],
+            applicabilitySummary: "Large session consolidation",
+            conditions: [],
+            exclusions: [],
+            preservedNegations: [],
+            certainty: "asserted",
+            sensitivity: "normal",
+            evidenceIds: [evidenceAlias],
+            importanceReasons: []
+          }]
+        }),
+        stderr: ""
+      });
+    }
+  });
+  const originalEvidenceIds = Array.from(
+    { length: 12 },
+    (_, index) => `msevidence_large_${String(index)}`
+  );
+
+  const output = await adapter.consolidateSession({
+    operationId: "msop-large-consolidation",
+    sessionId: "session-large",
+    batchResults: originalEvidenceIds.map((evidenceId, index) => ({
+      batchId: `batch-${String(index)}`,
+      evidenceIds: [evidenceId],
+      candidates: [{
+        statement: "x".repeat(120_000),
+        primaryCategory: "architecture_contract",
+        categoryTags: ["architecture_contract"],
+        applicabilitySummary: "Large session consolidation",
+        conditions: [],
+        exclusions: [],
+        preservedNegations: [],
+        certainty: "asserted",
+        sensitivity: "normal",
+        evidenceIds: [evidenceId],
+        importanceTags: [],
+        importanceReasons: []
+      }]
+    }))
+  });
+
+  expect(processInputLengths.length).toBeGreaterThan(1);
+  expect(Math.max(...processInputLengths)).toBeLessThanOrEqual(1_048_576);
+  expect(originalEvidenceIds).toContain(output.candidates[0]?.evidenceIds[0]);
 });
 
 test("distillation uses short evidence aliases and reports safe schema diagnostics", async () => {

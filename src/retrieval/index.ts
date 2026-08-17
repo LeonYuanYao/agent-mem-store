@@ -93,6 +93,91 @@ function encodeVectors(vectors: readonly (readonly number[])[]): Uint8Array {
   return new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
 }
 
+function reusableVectorKey(memoryId: string, revisionId: string, contentIdentity: string): string {
+  return `${memoryId}\u0000${revisionId}\u0000${contentIdentity}`;
+}
+
+async function loadReusableVectors(request: {
+  readonly runtimeRoot: string;
+  readonly adapterIdentity: EmbeddingAdapter["identity"];
+}): Promise<ReadonlyMap<string, readonly number[]>> {
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  let active: Record<string, unknown> | undefined;
+  let documents: readonly Record<string, unknown>[] = [];
+  try {
+    active = database.prepare(
+      `SELECT revision.index_revision_id, revision.directory_path,
+              revision.manifest_sha256, revision.adapter_version,
+              revision.model_identity, revision.artifact_sha256,
+              revision.dimensions, revision.normalization,
+              revision.document_count
+       FROM active_retrieval_index AS selected
+       JOIN retrieval_index_revisions AS revision
+         ON revision.index_revision_id = selected.index_revision_id
+       WHERE selected.singleton = 1 AND revision.state = 'complete'`
+    ).get();
+    if (active !== undefined) {
+      documents = database.prepare(
+        `SELECT vector_ordinal, memory_id, revision_id, content_identity
+         FROM retrieval_documents
+         WHERE index_revision_id = ?
+         ORDER BY vector_ordinal`
+      ).all(z.string().parse(active.index_revision_id));
+    }
+  } finally {
+    database.close();
+  }
+  if (active === undefined) return new Map();
+  const compatible =
+    active.adapter_version === request.adapterIdentity.adapterVersion &&
+    active.model_identity === request.adapterIdentity.modelIdentity &&
+    active.artifact_sha256 === request.adapterIdentity.artifactSha256 &&
+    active.dimensions === request.adapterIdentity.dimensions &&
+    active.normalization === request.adapterIdentity.normalization;
+  if (!compatible) return new Map();
+
+  try {
+    const directoryPath = z.string().parse(active.directory_path);
+    const [manifestBytes, vectorBytes] = await Promise.all([
+      readFile(join(directoryPath, "manifest.json")),
+      readFile(join(directoryPath, "vectors.f32"))
+    ]);
+    if (createHash("sha256").update(manifestBytes).digest("hex") !== active.manifest_sha256) {
+      return new Map();
+    }
+    const manifest = z.object({
+      vectorSha256: z.string().regex(/^[0-9a-f]{64}$/u)
+    }).loose().parse(JSON.parse(manifestBytes.toString("utf8")));
+    if (createHash("sha256").update(vectorBytes).digest("hex") !== manifest.vectorSha256) {
+      return new Map();
+    }
+    const documentCount = z.number().int().nonnegative().parse(active.document_count);
+    const dimensions = request.adapterIdentity.dimensions;
+    if (documents.length !== documentCount || vectorBytes.byteLength !== documentCount * dimensions * 4) {
+      return new Map();
+    }
+    const vectors = new Map<string, readonly number[]>();
+    for (const [expectedOrdinal, document] of documents.entries()) {
+      const ordinal = z.number().int().nonnegative().parse(document.vector_ordinal);
+      if (ordinal !== expectedOrdinal) return new Map();
+      const vector = Array.from({ length: dimensions }, (_, offset) =>
+        vectorBytes.readFloatLE((ordinal * dimensions + offset) * 4)
+      );
+      if (vector.some((value) => !Number.isFinite(value)) || vector.every((value) => value === 0)) {
+        return new Map();
+      }
+      vectors.set(reusableVectorKey(
+        z.string().parse(document.memory_id),
+        z.string().parse(document.revision_id),
+        z.string().parse(document.content_identity)
+      ), vector);
+    }
+    return vectors;
+  } catch {
+    return new Map();
+  }
+}
+
 async function buildRetrievalIndexImpl(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
@@ -137,22 +222,47 @@ async function buildRetrievalIndexImpl(request: {
     return current.memory;
   }))).filter((memory) => memory.validity.state !== "invalid");
   const texts = memories.map((memory) => searchableText(memory));
-  const rawVectors = texts.length === 0
+  const reusableVectors = await loadReusableVectors({
+    runtimeRoot: request.runtimeRoot,
+    adapterIdentity
+  });
+  const missingOrdinals: number[] = [];
+  const missingTexts: string[] = [];
+  const vectors: (readonly number[] | undefined)[] = memories.map((memory, ordinal) => {
+    const reusable = reusableVectors.get(reusableVectorKey(
+      memory.memoryId,
+      memory.revisionId,
+      memory.contentIdentity
+    ));
+    if (reusable !== undefined) return reusable;
+    missingOrdinals.push(ordinal);
+    const text = texts[ordinal];
+    if (text === undefined) throw new Error("Retrieval text is missing.");
+    missingTexts.push(text);
+    return undefined;
+  });
+  const rawVectors = missingTexts.length === 0
     ? []
-    : await (request.adapter.embedDocuments ?? request.adapter.embed)(texts);
-  if (rawVectors.length !== memories.length) {
+    : await (request.adapter.embedDocuments ?? request.adapter.embed)(missingTexts);
+  if (rawVectors.length !== missingTexts.length) {
     throw new Error("Embedding adapter returned the wrong vector count.");
   }
-  const vectors = rawVectors.map((vector) =>
-    normalizeVector(vector, adapterIdentity.dimensions)
-  );
+  for (const [missingIndex, rawVector] of rawVectors.entries()) {
+    const ordinal = missingOrdinals[missingIndex];
+    if (ordinal === undefined) throw new Error("Embedding ordinal is missing.");
+    vectors[ordinal] = normalizeVector(rawVector, adapterIdentity.dimensions);
+  }
+  const completeVectors = vectors.map((vector) => {
+    if (vector === undefined) throw new Error("Retrieval vector is missing.");
+    return vector;
+  });
   const indexRevisionId = `msindex_${randomUUID()}`;
   const indexesRoot = join(request.runtimeRoot, "indexes");
   const stagingDirectory = join(indexesRoot, `.staging-${indexRevisionId}`);
   const finalDirectory = join(indexesRoot, indexRevisionId);
   await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
   try {
-    const vectorBytes = encodeVectors(vectors);
+    const vectorBytes = encodeVectors(completeVectors);
     const vectorSha256 = createHash("sha256").update(vectorBytes).digest("hex");
     const manifest = {
       schemaVersion: 1,

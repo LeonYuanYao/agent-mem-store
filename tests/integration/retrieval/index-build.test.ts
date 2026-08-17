@@ -68,3 +68,83 @@ test("a complete retrieval index revision publishes active Canonical Memory atom
     adapterIdentity: adapter.identity
   });
 });
+
+test("a new index revision embeds only Canonical Memory missing from the compatible active index", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-index-incremental-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const embeddedBatches: string[][] = [];
+  const incrementalAdapter: EmbeddingAdapter = {
+    ...adapter,
+    embed: (texts) => {
+      embeddedBatches.push([...texts]);
+      return Promise.resolve(texts.map((text) => text.includes("SQLite") ? [1, 0, 0] : [0, 1, 0]));
+    }
+  };
+  const firstMemories = [
+    makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174201",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174211",
+      body: "Use SQLite WAL for durable local state."
+    }),
+    makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174202",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174212",
+      body: "Keep program and data lifecycles separate."
+    })
+  ];
+  for (const memory of firstMemories) {
+    await writeCanonicalMemory({ vaultRoot, runtimeRoot, actor: "human", memory });
+  }
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: incrementalAdapter,
+    builtAt: "2026-08-07T10:00:00.000Z"
+  });
+
+  await writeCanonicalMemory({
+    vaultRoot,
+    runtimeRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174203",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174213",
+      body: "Capture hooks must stay non-blocking."
+    })
+  });
+  const rebuilt = await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: incrementalAdapter,
+    builtAt: "2026-08-07T10:01:00.000Z"
+  });
+
+  expect(embeddedBatches.map((batch) => batch.length)).toEqual([2, 1]);
+  expect(rebuilt.documentCount).toBe(3);
+  await expect(inspectActiveRetrievalIndex(runtimeRoot)).resolves.toMatchObject({
+    indexRevisionId: rebuilt.indexRevisionId,
+    documentCount: 3
+  });
+
+  let incompatibleEmbeddingCount = 0;
+  const incompatibleAdapter: EmbeddingAdapter = {
+    ...incrementalAdapter,
+    identity: {
+      ...incrementalAdapter.identity,
+      adapterVersion: "fixture-batch16-v2"
+    },
+    embed: (texts) => {
+      incompatibleEmbeddingCount += texts.length;
+      return Promise.resolve(texts.map(() => [1, 0, 0]));
+    }
+  };
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: incompatibleAdapter,
+    builtAt: "2026-08-07T10:02:00.000Z"
+  });
+  expect(incompatibleEmbeddingCount).toBe(3);
+});

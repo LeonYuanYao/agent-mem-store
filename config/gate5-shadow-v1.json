@@ -9,7 +9,8 @@
     "artifactSha256": "b17da479f058a2cd4dd677c0f50c7cb9ba87d274fe2a94a31c136ef465830cc2",
     "dimensions": 768,
     "normalization": "l2",
-    "adapterVersion": "transformers-4.2.0:q8:mean-l2:v1",
+    "batchSize": 16,
+    "adapterVersion": "transformers-4.2.0:q8:mean-l2:batch16:v2",
     "queryPrefix": "query: ",
     "documentPrefix": "passage: ",
     "installation": {

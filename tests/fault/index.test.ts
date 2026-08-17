@@ -54,6 +54,16 @@ test("a failed semantic rebuild leaves the last complete retrieval index active"
     identity,
     embed: () => Promise.reject(new Error("model artifact unavailable"))
   };
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174502",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174512",
+      body: "This new memory requires a semantic vector."
+    })
+  });
 
   await expect(buildRetrievalIndex({
     runtimeRoot,

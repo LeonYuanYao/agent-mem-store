@@ -29,7 +29,8 @@ const candidateSchema = z.object({
     artifactSha256: z.string().regex(/^[0-9a-f]{64}$/u),
     dimensions: z.literal(768),
     normalization: z.literal("l2"),
-    adapterVersion: z.literal("transformers-4.2.0:q8:mean-l2:v1"),
+    batchSize: z.literal(16),
+    adapterVersion: z.literal("transformers-4.2.0:q8:mean-l2:batch16:v2"),
     queryPrefix: z.literal("query: "),
     documentPrefix: z.literal("passage: "),
     installation: z.object({

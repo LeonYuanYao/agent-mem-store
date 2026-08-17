@@ -333,6 +333,7 @@ export type LunaFailureCategory =
   | "authentication"
   | "invalid_model"
   | "invalid_configuration"
+  | "input_too_large"
   | "rate_limited"
   | "timeout"
   | "unavailable"
@@ -409,9 +410,23 @@ async function runLunaProcess(
 }
 
 function classifyProcessFailure(result: LunaProcessResult): LunaInvocationError {
-  const diagnostic = result.stderr.toLowerCase();
+  const stderr = result.stderr.trim();
+  const explicitErrorIndex = stderr.lastIndexOf("\nError:");
+  const diagnostic = (
+    explicitErrorIndex >= 0
+      ? stderr.slice(explicitErrorIndex + 1)
+      : stderr.split(/\r?\n/u).slice(-4).join("\n")
+  ).toLowerCase();
   if (result.timedOut === true) {
     return new LunaInvocationError("timeout", true, "Luna invocation timed out.");
+  }
+  if (/input_too_large|input exceeds the maximum length|max_chars/u.test(diagnostic)) {
+    return new LunaInvocationError(
+      "input_too_large",
+      false,
+      "The Luna request exceeds the configured process input limit.",
+      { stage: "invocation", code: "input_too_large" }
+    );
   }
   if (/invalid_json_schema|invalid schema/u.test(diagnostic)) {
     return new LunaInvocationError(
@@ -512,7 +527,7 @@ export class CodexLunaAdapter {
       );
       if (evidenceId === undefined) {
         throw new LunaInvocationError(
-          "schema_invalid",
+          "input_too_large",
           true,
           "Luna structured output cites unavailable evidence.",
           { stage: "evidence_binding", code: "unknown_evidence_alias" }
@@ -546,6 +561,64 @@ export class CodexLunaAdapter {
   public async consolidateSession(
     request: ConsolidateSessionRequest
   ): Promise<ConsolidationOutput> {
+    return this.#consolidateSession(request, 0);
+  }
+
+  async #consolidateSession(
+    request: ConsolidateSessionRequest,
+    level: number
+  ): Promise<ConsolidationOutput> {
+    const maximumRequestCharacters = 900_000;
+    if (JSON.stringify(request).length > maximumRequestCharacters) {
+      if (level >= 8) {
+        throw new LunaInvocationError(
+          "input_too_large",
+          false,
+          "Luna consolidation could not be reduced below the process input limit.",
+          { stage: "invocation", code: "input_too_large" }
+        );
+      }
+      const groups: Array<typeof request.batchResults> = [];
+      let current: typeof request.batchResults = [];
+      for (const batch of request.batchResults) {
+        const next = [...current, batch];
+        const nextRequest = { ...request, batchResults: next };
+        if (current.length > 0 && JSON.stringify(nextRequest).length > maximumRequestCharacters) {
+          groups.push(current);
+          current = [batch];
+        } else {
+          current = next;
+        }
+      }
+      if (current.length > 0) groups.push(current);
+      if (groups.length <= 1) {
+        throw new LunaInvocationError(
+          "input_too_large",
+          false,
+          "One Luna consolidation Batch exceeds the process input limit.",
+          { stage: "invocation", code: "input_too_large" }
+        );
+      }
+      const partialResults: Array<ConsolidateSessionRequest["batchResults"][number]> = [];
+      for (const [index, group] of groups.entries()) {
+        const output = await this.#consolidateSession(
+          { ...request, batchResults: group },
+          level + 1
+        );
+        partialResults.push({
+          batchId: `${request.operationId}:level-${String(level)}:part-${String(index)}`,
+          candidates: output.candidates,
+          evidenceIds: [...new Set(output.candidates.flatMap((candidate) => [
+            ...candidate.evidenceIds,
+            ...candidate.importanceReasons.flatMap((reason) => reason.evidenceIds)
+          ]))]
+        });
+      }
+      return this.#consolidateSession(
+        { ...request, batchResults: partialResults },
+        level + 1
+      );
+    }
     const availableEvidenceIds = [
       ...new Set(request.batchResults.flatMap((batch) => batch.evidenceIds))
     ];
