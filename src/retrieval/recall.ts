@@ -12,6 +12,7 @@ import {
   type CanonicalMemory
 } from "../vault/index.js";
 import type { EmbeddingAdapter } from "./index.js";
+import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
 
 const tokenizer = getEncoding("o200k_base");
 const scopeSchema = z.enum(["current", "global", "project", "all_projects"]);
@@ -156,6 +157,27 @@ function ftsExpression(query: string): string | undefined {
     : unique.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
 }
 
+function queryTerms(query: string): readonly string[] {
+  return [...new Set(
+    (query.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((term) => term.length > 1)
+  )];
+}
+
+function lexicalCoverage(terms: readonly string[], text: string): {
+  readonly matchedCount: number;
+  readonly coverage: number;
+} {
+  if (terms.length === 0) return { matchedCount: 0, coverage: 0 };
+  const normalized = text.normalize("NFKC").toLocaleLowerCase("en-US");
+  const documentTerms = new Set(normalized.match(/[\p{L}\p{N}_]+/gu) ?? []);
+  const matchedCount = terms.filter((term) =>
+    /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(term)
+      ? normalized.includes(term)
+      : documentTerms.has(term)
+  ).length;
+  return { matchedCount, coverage: matchedCount / terms.length };
+}
+
 function cosine(left: readonly number[], right: readonly number[]): number {
   return left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0);
 }
@@ -249,6 +271,7 @@ export async function recallSearch(request: {
   });
   const cursor = request.cursor === undefined ? undefined : decodeCursor(request.cursor, binding);
   const documents = rows.map((row) => documentFromRow(row));
+  const terms = queryTerms(normalized);
 
   const lexicalRanks = new Map<string, number>();
   const expression = ftsExpression(normalized);
@@ -310,21 +333,46 @@ export async function recallSearch(request: {
       .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
       .map(([memoryId], index) => [memoryId, index + 1])
   );
+  const semanticRanking = [...semanticScores.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  const leadingSemanticMemoryId = semanticRanking[0]?.[0];
+  const leadingSemanticScore = semanticRanking[0]?.[1] ?? 0;
+  const secondSemanticScore = semanticRanking[1]?.[1] ?? 0;
   const ranked = documents.map((document) => {
     const lexicalRank = lexicalRanks.get(document.memoryId);
     const semanticRank = semanticRanks.get(document.memoryId);
     const semanticScore = semanticScores.get(document.memoryId) ?? 0;
+    const lexical = lexicalCoverage(terms, document.compactText);
+    const lexicalAdmitted = lexicalRank !== undefined && (
+      terms.length <= 2
+        ? lexical.coverage >= 0.5
+        : lexical.matchedCount >= 2 && lexical.coverage >= 0.3
+    );
+    const directIdentity = normalized.includes(document.memoryId.toLocaleLowerCase("en-US")) ||
+      normalized.includes(document.revisionId.toLocaleLowerCase("en-US"));
+    const standaloneSemantic = document.memoryId === leadingSemanticMemoryId &&
+      leadingSemanticScore >= approvedShadowEmbeddingProfile.semanticOnlyMinimumScore &&
+      leadingSemanticScore - secondSemanticScore >=
+        approvedShadowEmbeddingProfile.semanticOnlyMinimumTop1Margin;
+    const semanticCorroborated = semanticScore >= 0.58 && lexicalAdmitted;
     const rrf = (lexicalRank === undefined ? 0 : 1 / (60 + lexicalRank)) +
       (semanticRank === undefined ? 0 : 1 / (60 + semanticRank));
     const scopePriority = document.scope.kind === "project" &&
       document.scope.projectId === request.currentProjectId ? 1 : 0;
     const reasons = [
-      ...(lexicalRank === undefined ? [] : ["lexical_match"]),
-      ...(semanticScore < 0.58 ? [] : ["semantic_match"]),
+      ...(directIdentity ? ["memory_identity"] : []),
+      ...(lexicalAdmitted ? ["lexical_match"] : []),
+      ...(standaloneSemantic || semanticCorroborated ? ["semantic_match"] : []),
       ...(scopePriority === 0 ? [] : ["current_project"])
     ];
-    return { document, rrf, scopePriority, reasons };
-  }).filter((item) => item.rrf > 0 || item.reasons.length > 0)
+    return {
+      document,
+      rrf,
+      scopePriority,
+      reasons,
+      admitted: directIdentity || lexicalAdmitted || standaloneSemantic || semanticCorroborated
+    };
+  }).filter((item) => item.admitted)
     .sort((left, right) =>
       right.rrf - left.rrf ||
       right.scopePriority - left.scopePriority ||

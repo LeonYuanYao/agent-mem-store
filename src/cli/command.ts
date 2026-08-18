@@ -16,6 +16,7 @@ import { initializeMemStore } from "../operations/initialize.js";
 import { prepareShadowEmbedding } from "../operations/embedding-install.js";
 import { migrateMemoryCategories } from "../operations/category-migration.js";
 import {
+  acceptOfficialShadowProgramChange,
   inspectOfficialShadowWindow,
   migrateOfficialShadowIdentity,
   startOfficialShadowWindow
@@ -69,8 +70,10 @@ import {
   prepareReviewReminder
 } from "../review/reminders.js";
 import { runWorker, runWorkerOnce, type WorkerAdapters } from "../worker/main.js";
-import { loadTransformersEmbeddingAdapter } from "../retrieval/embeddings/transformers.js";
-import { approvedShadowEmbeddingProfile } from "../retrieval/shadow-profile.js";
+import {
+  EmbeddingArtifactMismatchError,
+  loadConfiguredEmbeddingAdapter
+} from "../retrieval/embeddings/configured.js";
 import {
   rememberAssert,
   rememberExtract,
@@ -146,6 +149,7 @@ function parseCommon(arguments_: readonly string[]) {
       "embedding-model-dir": { type: "string" },
       "probe-event": { type: "string" },
       window: { type: "string" },
+      reason: { type: "string" },
       "native-store": { type: "string", multiple: true },
       preview: { type: "boolean", default: false },
       json: { type: "boolean", default: false }
@@ -344,7 +348,6 @@ async function configuredWorkerAdapters(runtimeRoot: string): Promise<{
 }> {
   const codexHome = process.env.MEMSTORE_LUNA_CODEX_HOME;
   const notifierExecutable = process.env.MEMSTORE_NOTIFIER_EXECUTABLE;
-  const embeddingModelDirectory = process.env.MEMSTORE_EMBEDDING_MODEL_DIR;
   const luna = codexHome === undefined
     ? undefined
     : new CodexLunaAdapter({
@@ -352,30 +355,12 @@ async function configuredWorkerAdapters(runtimeRoot: string): Promise<{
         codexHome: resolve(codexHome),
         temporaryRoot: resolve(runtimeRoot, "tmp")
       });
-  const embedding = embeddingModelDirectory === undefined
-    ? undefined
-    : await loadTransformersEmbeddingAdapter({
-        modelIdentity: approvedShadowEmbeddingProfile.modelIdentity,
-        cacheDirectory: resolve(embeddingModelDirectory),
-        dtype: approvedShadowEmbeddingProfile.dtype,
-        queryPrefix: approvedShadowEmbeddingProfile.queryPrefix,
-        documentPrefix: approvedShadowEmbeddingProfile.documentPrefix,
-        batchSize: approvedShadowEmbeddingProfile.batchSize,
-        localFilesOnly: true
-      });
-  if (embedding !== undefined &&
-      JSON.stringify(embedding.adapter.identity) !== JSON.stringify({
-        adapterVersion: approvedShadowEmbeddingProfile.adapterVersion,
-        modelIdentity: approvedShadowEmbeddingProfile.modelIdentity,
-        artifactSha256: approvedShadowEmbeddingProfile.artifactSha256,
-        dimensions: approvedShadowEmbeddingProfile.dimensions,
-        normalization: approvedShadowEmbeddingProfile.normalization
-      })) {
-    await embedding.dispose();
-    throw new MemStoreCommandError(
-      "embedding_artifact_mismatch",
-      "The installed Shadow embedding artifact does not match the approved Gate 5 profile."
-    );
+  let embedding: Awaited<ReturnType<typeof loadConfiguredEmbeddingAdapter>>;
+  try {
+    embedding = await loadConfiguredEmbeddingAdapter(runtimeRoot);
+  } catch (error) {
+    if (!(error instanceof EmbeddingArtifactMismatchError)) throw error;
+    throw new MemStoreCommandError("embedding_artifact_mismatch", error.message);
   }
   const adapters = luna === undefined && notifierExecutable === undefined && embedding === undefined
     ? undefined
@@ -502,9 +487,36 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
         json: parsed.values.json
       };
     }
+    if (action === "accept-program-change") {
+      if (parsed.values.window === undefined) {
+        throw new MemStoreCommandError(
+          "shadow_window_required",
+          "shadow accept-program-change requires --window with the active official Shadow window id."
+        );
+      }
+      if (parsed.values.reason === undefined) {
+        throw new MemStoreCommandError(
+          "shadow_review_reason_required",
+          "shadow accept-program-change requires --reason describing the reviewed change."
+        );
+      }
+      return {
+        command: "shadow.accept-program-change",
+        result: await acceptOfficialShadowProgramChange({
+          runtimeRoot: location.runtimeRoot,
+          repositoryRoot: resolve(parsed.values.repo ?? process.cwd()),
+          homeRoot: resolve(parsed.values.home ?? homedir()),
+          windowId: parsed.values.window,
+          acceptedAt: now,
+          reason: parsed.values.reason,
+          preview: parsed.values.preview
+        }),
+        json: parsed.values.json
+      };
+    }
     throw new MemStoreCommandError(
       "unknown_command",
-      "Use shadow start, shadow status, or shadow migrate-identity."
+      "Use shadow start, shadow status, shadow migrate-identity, or shadow accept-program-change."
     );
   }
   if (command === "purge") {
@@ -814,18 +826,30 @@ async function runRecall(arguments_: readonly string[]): Promise<unknown> {
     const rawScope = parsed.values.scope ?? "current";
     const projectMatch = /^project:(.+)$/u.exec(rawScope);
     const normalizedScope = projectMatch === null ? rawScope.replace("all-projects", "all_projects") : "project";
-    return executeRecall("search", {
-      query,
-      scope: normalizedScope,
-      ...(projectMatch?.[1] === undefined ? {} : { project_id: projectMatch[1] }),
-      ...(optionalPositiveInteger(parsed.values.limit) === undefined
-        ? {}
-        : { limit: optionalPositiveInteger(parsed.values.limit) }),
-      ...(parsed.values.cursor === undefined ? {} : { cursor: parsed.values.cursor }),
-      ...(optionalPositiveInteger(parsed.values["target-tokens"]) === undefined
-        ? {}
-        : { target_tokens: optionalPositiveInteger(parsed.values["target-tokens"]) })
-    }, context);
+    let embedding: Awaited<ReturnType<typeof loadConfiguredEmbeddingAdapter>>;
+    try {
+      embedding = await loadConfiguredEmbeddingAdapter(location.runtimeRoot);
+      return await executeRecall("search", {
+        query,
+        scope: normalizedScope,
+        ...(projectMatch?.[1] === undefined ? {} : { project_id: projectMatch[1] }),
+        ...(optionalPositiveInteger(parsed.values.limit) === undefined
+          ? {}
+          : { limit: optionalPositiveInteger(parsed.values.limit) }),
+        ...(parsed.values.cursor === undefined ? {} : { cursor: parsed.values.cursor }),
+        ...(optionalPositiveInteger(parsed.values["target-tokens"]) === undefined
+          ? {}
+          : { target_tokens: optionalPositiveInteger(parsed.values["target-tokens"]) })
+      }, {
+        ...context,
+        ...(embedding === undefined ? {} : { embeddingAdapter: embedding.adapter })
+      });
+    } catch (error) {
+      if (!(error instanceof EmbeddingArtifactMismatchError)) throw error;
+      throw new MemStoreCommandError("embedding_artifact_mismatch", error.message);
+    } finally {
+      await embedding?.dispose();
+    }
   }
   if (["show", "provenance", "related"].includes(action ?? "")) {
     const memoryId = parsed.positionals[2];

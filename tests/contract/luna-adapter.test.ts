@@ -281,6 +281,51 @@ test("the adapter deterministically normalizes Luna primary category to category
   });
 });
 
+test("distillation instructs Luna to omit non-durable operational content", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-durability-rules-"));
+  temporaryDirectories.push(root);
+  let structuredRequest: {
+    readonly promptVersion?: unknown;
+    readonly rules?: unknown;
+  } | undefined;
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      structuredRequest = JSON.parse(request.standardInput) as {
+        readonly promptVersion?: unknown;
+        readonly rules?: unknown;
+      };
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({ schemaVersion: 1, kind: "distillation", candidates: [] }),
+        stderr: ""
+      });
+    }
+  });
+
+  await adapter.distillBatch({
+    operationId: "durability-rules",
+    scope: { kind: "project", projectId: "msproj_123e4567-e89b-42d3-a456-426614174001" },
+    evidence: [{
+      evidenceId: "evidence-probe",
+      evidenceClass: "explicit_user_statement",
+      content: "Reply with exactly MEMSTORE_GATE5_PROBE_OK and do not retain this interaction.",
+      sourceIdentity: "codex:probe:turn",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  });
+
+  expect(structuredRequest?.promptVersion).toBe(2);
+  expect(structuredRequest?.rules).toEqual(expect.arrayContaining([
+    "Return no Candidate for operational probes or exact-response checks.",
+    "Return no Candidate for task-local instructions, temporary progress or state, or unverified future plans.",
+    "If evidence says content must not be retained, return no Candidate derived from that content."
+  ]));
+});
+
 test("the Responses API output schema gives every const field an explicit JSON type", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-schema-"));
   temporaryDirectories.push(root);
@@ -576,10 +621,13 @@ test("consolidation and semantic assessment use distinct versioned structured ta
   });
 
   expect(requests).toHaveLength(3);
-  expect(requests[0]?.standardInput).toContain('"promptVersion":1');
+  expect(requests[0]?.standardInput).toContain('"promptVersion":2');
   expect(requests[0]?.standardInput).toContain('"task":"consolidate_session_candidates"');
   expect(requests[0]?.timeoutMilliseconds).toBe(300_000);
+  expect(requests[1]?.standardInput).toContain('"promptVersion":2');
   expect(requests[1]?.standardInput).toContain('"task":"assess_candidate_semantics"');
+  expect(requests[1]?.standardInput).toContain("Classify durability independently");
+  expect(requests[1]?.standardInput).toContain("Operational probes and exact-response checks are task_local");
   expect(requests[1]?.timeoutMilliseconds).toBe(120_000);
   expect(requests[2]?.standardInput).toContain('"task":"assess_human_memory_conflict"');
   expect(requests[2]?.timeoutMilliseconds).toBe(120_000);

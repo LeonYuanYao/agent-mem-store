@@ -78,6 +78,51 @@ async function badCaseFixture() {
   return { runtimeRoot, vaultRoot, badCase };
 }
 
+test("explicit recall rejects a generic one-token overlap but preserves the relevant result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-repair-admission-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const relevantMemoryId = "msmem_123e4567-e89b-42d3-a456-426614174421";
+  const memories = [
+    makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174420",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174430",
+      body: "Git project credentials are managed by the operating system keychain.",
+      compact: "Git project credentials use the system keychain.",
+      scope: { kind: "project", projectId }
+    }),
+    makeCanonicalMemory({
+      memoryId: relevantMemoryId,
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174431",
+      body: "A Git submodule inherits its parent repository Project id by default.",
+      compact: "Git submodules inherit the parent repository Project id.",
+      scope: { kind: "project", projectId }
+    })
+  ];
+  for (const memory of memories) {
+    await writeCanonicalMemory({ runtimeRoot, vaultRoot, actor: "human", memory });
+  }
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter,
+    builtAt: "2026-08-08T09:00:00.000Z"
+  });
+
+  const result = await recallSearch({
+    runtimeRoot,
+    vaultRoot,
+    query: "git submodule inherits parent repository project id",
+    scope: "all_projects",
+    callerIdentity: "codex:repair-replay",
+    requestedAt: "2026-08-08T09:01:00.000Z"
+  });
+
+  expect(result.semanticStage).toBe("lexical_only");
+  expect(result.items.map((item) => item.memoryId)).toEqual([relevantMemoryId]);
+});
+
 test("a synthetic irrelevant Bad Case passes the reviewed Class B repair loop", async () => {
   const fixture = await badCaseFixture();
   const prepared = await prepareRepair({

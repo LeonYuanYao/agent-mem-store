@@ -117,7 +117,7 @@ test("an explicit search cursor is rejected when its query binding changes", asy
   const roots = await createIndexedFixture();
   const first = await recallSearch({
     ...roots,
-    query: "memory rules",
+    query: "durable memory",
     scope: "current",
     currentProjectId: projectA,
     limit: 1,
@@ -179,6 +179,21 @@ test("explicit recall excludes knowledge outside its validity window", async () 
     callerIdentity: "codex:test-session",
     adapter,
     requestedAt: "2026-08-07T10:01:00.000Z"
+  });
+
+  expect(result.items).toEqual([]);
+});
+
+test("current Project scope cannot admit a Memory without an independent relevance match", async () => {
+  const roots = await createIndexedFixture();
+
+  const result = await recallSearch({
+    ...roots,
+    query: "long session batching backlog consolidation",
+    scope: "current",
+    currentProjectId: projectA,
+    callerIdentity: "codex:test-session",
+    requestedAt: "2026-08-07T10:02:30.000Z"
   });
 
   expect(result.items).toEqual([]);

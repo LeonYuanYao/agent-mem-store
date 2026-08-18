@@ -16,6 +16,7 @@ import {
 } from "../retrieval/index.js";
 import { runNextShadowEvaluation } from "../retrieval/shadow-worker.js";
 import {
+  advanceCandidateReevaluationBackfill,
   prepareNextCandidateEvaluation,
   runNextCandidateAssessment,
   type CandidateAssessmentAdapter
@@ -26,6 +27,7 @@ import {
 } from "./human-conflicts.js";
 import {
   prepareNextDistillationBatch,
+  prepareNextSessionConsolidation,
   runNextLunaWork,
   type LunaWorkerAdapter
 } from "./distillation.js";
@@ -58,9 +60,25 @@ async function retrievalIndexBuildIsCoolingDown(runtimeRoot: string, now: string
       const startedAt = Date.parse(z.string().parse(activity.started_at));
       return startedAt + 5 * 60 * 1_000 > Date.parse(now);
     }
-    if (activity.state !== "failed" || activity.completed_at === null) return false;
-    const failedAt = Date.parse(z.string().parse(activity.completed_at));
-    return failedAt + 5 * 60 * 1_000 > Date.parse(now);
+    if (activity.completed_at === null) return false;
+    const completedAt = Date.parse(z.string().parse(activity.completed_at));
+    const withinCooldown = completedAt + 5 * 60 * 1_000 > Date.parse(now);
+    if (activity.state === "failed") return withinCooldown;
+    if (activity.state !== "complete" || !withinCooldown) return false;
+    const backlog = database.prepare(
+      `SELECT
+         EXISTS(
+           SELECT 1 FROM luna_operations
+           WHERE state IN ('pending', 'processing', 'retrying', 'blocked')
+         ) OR EXISTS(
+           SELECT 1 FROM memory_candidates
+           WHERE state = 'waiting' AND successful_evaluation_at IS NULL
+         ) OR EXISTS(
+           SELECT 1 FROM capture_events
+           WHERE state IN ('pending', 'processing', 'retrying')
+         ) AS present`
+    ).get();
+    return backlog?.present === 1;
   } finally {
     database.close();
   }
@@ -143,6 +161,14 @@ export async function runWorkerOnce(request: {
       activities.push(`distillation:${prepared.state}`);
       shouldRefreshReview = true;
     }
+    const consolidation = await prepareNextSessionConsolidation({
+      runtimeRoot: request.runtimeRoot,
+      preparedAt: now
+    });
+    if (consolidation.state !== "empty") {
+      activities.push(`consolidation:${consolidation.state}`);
+      shouldRefreshReview = true;
+    }
     const luna = await runNextLunaWork({
       runtimeRoot: request.runtimeRoot,
       workerId: request.workerId,
@@ -164,6 +190,16 @@ export async function runWorkerOnce(request: {
       activities.push(`human-conflict:${conflict.state}`);
       shouldRefreshReview = true;
     }
+  }
+  const candidateBackfill = await advanceCandidateReevaluationBackfill({
+    runtimeRoot: request.runtimeRoot,
+    now
+  });
+  if (
+    candidateBackfill.state !== "empty" &&
+    candidateBackfill.reopenedCandidateCount > 0
+  ) {
+    activities.push(`candidate-backfill:${String(candidateBackfill.reopenedCandidateCount)}`);
   }
   const candidatePreparation = await prepareNextCandidateEvaluation({
     runtimeRoot: request.runtimeRoot,

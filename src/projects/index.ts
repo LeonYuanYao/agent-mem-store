@@ -27,6 +27,7 @@ const markerSchema = z.object({
 export interface ProjectResolutionRequest {
   readonly path: string;
   readonly runtimeRoot: string;
+  readonly busyTimeoutMilliseconds?: number;
 }
 
 export interface SubmoduleProjectOverrideNotice {
@@ -444,7 +445,10 @@ export async function resolveProject(
         if (git?.inheritedSubmodule === true) {
           const inherited = await resolveProject({
             path: git.repositoryRoot,
-            runtimeRoot: request.runtimeRoot
+            runtimeRoot: request.runtimeRoot,
+            ...(request.busyTimeoutMilliseconds === undefined
+              ? {}
+              : { busyTimeoutMilliseconds: request.busyTimeoutMilliseconds })
           });
           if (inherited.status === "resolved") {
             notices.push({
@@ -481,7 +485,12 @@ export async function resolveProject(
     }
   }
 
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRuntimeDatabase(
+    request.runtimeRoot,
+    request.busyTimeoutMilliseconds === undefined
+      ? {}
+      : { busyTimeoutMilliseconds: request.busyTimeoutMilliseconds }
+  );
   try {
     const git = await inspectGit(resolvedPath);
     if (git !== undefined) {

@@ -80,6 +80,13 @@ export interface SemanticAssessment {
     | "contradicted"
     | "insufficient_evidence";
   readonly evidenceIds: readonly string[];
+  readonly durabilityDisposition?:
+    | "durable"
+    | "task_local"
+    | "transient"
+    | "no_retention"
+    | "uncertain"
+    | "legacy_unclassified";
   readonly assessedBy: string;
   readonly operationId?: string;
 }
@@ -107,6 +114,13 @@ const controlledImportanceTags = new Set<ImportanceTag>([
   "limitation",
   "negation",
   "applicability_correction"
+]);
+
+const stableExplicitUserTags = new Set<ImportanceTag>([
+  "user_decision",
+  "stable_preference",
+  "constraint",
+  "exception"
 ]);
 
 function candidateFingerprint(
@@ -182,6 +196,16 @@ function hasEligibleEvidenceShape(evidence: CandidateEvidence): boolean {
     );
   }
   return false;
+}
+
+function hasIntactCapturedEvidenceShape(evidence: CandidateEvidence): boolean {
+  return (
+    !evidence.memoryEcho &&
+    !evidence.sourceTruncated &&
+    evidence.integrity === "intact" &&
+    evidence.evidenceContentIdentity !== undefined &&
+    /^[0-9a-f]{64}$/u.test(evidence.evidenceContentIdentity)
+  );
 }
 
 function readGitHead(repositoryRoot: string): Promise<string> {
@@ -329,6 +353,46 @@ async function isEligibleEvidence(request: {
   return true;
 }
 
+async function isSemanticallyAssessableEvidence(request: {
+  readonly evidence: CandidateEvidence;
+  readonly runtimeRoot: string;
+}): Promise<boolean> {
+  const { evidence } = request;
+  if (
+    evidence.evidenceClass !== "command_outcome" ||
+    !hasIntactCapturedEvidenceShape(evidence)
+  ) {
+    return false;
+  }
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  let captureRow: Record<string, unknown> | undefined;
+  try {
+    captureRow = database.prepare(
+      `SELECT event_kind, agent, occurred_at, project_id, session_id, turn_id,
+              source_truncated, whole_content_sha256
+       FROM capture_events WHERE event_id = ?`
+    ).get(evidence.evidenceId);
+  } finally {
+    database.close();
+  }
+  if (
+    captureRow?.event_kind !== "PostToolUse" ||
+    captureRow.source_truncated !== 0 ||
+    captureRow.whole_content_sha256 !== evidence.evidenceContentIdentity ||
+    captureRow.occurred_at !== evidence.occurredAt ||
+    (evidence.projectId !== undefined && captureRow.project_id !== evidence.projectId)
+  ) {
+    return false;
+  }
+  const expectedSourceIdentity = `${z.string().parse(captureRow.agent)}:${
+    typeof captureRow.session_id === "string" ? captureRow.session_id : "unknown"
+  }:${
+    typeof captureRow.turn_id === "string" ? captureRow.turn_id : evidence.evidenceId
+  }`;
+  if (evidence.sourceIdentity !== expectedSourceIdentity) return false;
+  return (await readCapturedEvent(request.runtimeRoot, evidence.evidenceId))?.eventKind === "PostToolUse";
+}
+
 function confirmsHighValueTag(
   tag: ImportanceTag,
   eligibleEvidence: readonly CandidateEvidence[],
@@ -431,11 +495,16 @@ export async function createAgentCandidate(request: {
   const eligibleEvidence = (
     await Promise.all(request.evidence.map(async (evidence) => ({
       evidence,
-      eligible: await isEligibleEvidence({
-        evidence,
-        runtimeRoot: request.runtimeRoot,
-        ...(request.vaultRoot === undefined ? {} : { vaultRoot: request.vaultRoot })
-      })
+      eligible:
+        await isEligibleEvidence({
+          evidence,
+          runtimeRoot: request.runtimeRoot,
+          ...(request.vaultRoot === undefined ? {} : { vaultRoot: request.vaultRoot })
+        }) ||
+        await isSemanticallyAssessableEvidence({
+          evidence,
+          runtimeRoot: request.runtimeRoot
+        })
     })))
   ).filter((item) =>
     item.eligible &&
@@ -834,6 +903,7 @@ async function loadDurableSemanticAssessment(request: {
   try {
     const row = database.prepare(
       `SELECT assessment.state, assessment.evidence_ids_json,
+              assessment.durability_disposition,
               assessment.assessed_by, assessment.evidence_generation,
               operation.payload_json, candidate.evidence_generation AS current_generation,
               operation.operation_kind, operation.state AS operation_state
@@ -874,6 +944,14 @@ async function loadDurableSemanticAssessment(request: {
       evidenceIds: z.array(z.string()).parse(
         JSON.parse(z.string().parse(row.evidence_ids_json))
       ),
+      durabilityDisposition: z.enum([
+        "durable",
+        "task_local",
+        "transient",
+        "no_retention",
+        "uncertain",
+        "legacy_unclassified"
+      ]).parse(row.durability_disposition),
       assessedBy: z.literal("gpt-5.6-luna").parse(row.assessed_by),
       operationId: request.operationId
     };
@@ -1023,26 +1101,43 @@ export async function evaluateCandidate(request: {
   if (semanticAssessment?.state === "contradicted") {
     return commitNonPromotion(request.runtimeRoot, request.candidateId, "rejected", "semantic_contradiction", evaluatedAt);
   }
-  const eligibleEvidence = (
-    await Promise.all(evidence.map(async (item) => ({
-      item,
-      eligible: await isEligibleEvidence({
-        evidence: item,
-        runtimeRoot: request.runtimeRoot,
-        vaultRoot: request.vaultRoot
-      })
-    })))
-  ).filter((item) =>
-    item.eligible &&
-    (scope.kind === "global" || item.item.projectId === scope.projectId)
-  ).map((item) => item.item);
-  if (eligibleEvidence.length === 0) {
+  const evidenceEligibility = await Promise.all(evidence.map(async (item) => ({
+    item,
+    deterministic: await isEligibleEvidence({
+      evidence: item,
+      runtimeRoot: request.runtimeRoot,
+      vaultRoot: request.vaultRoot
+    }),
+    semanticallyAssessable: await isSemanticallyAssessableEvidence({
+      evidence: item,
+      runtimeRoot: request.runtimeRoot
+    })
+  })));
+  const scopedEvidenceEligibility = evidenceEligibility.filter(({ item }) =>
+    scope.kind === "global" || item.projectId === scope.projectId
+  );
+  const deterministicEvidence = scopedEvidenceEligibility
+    .filter((item) => item.deterministic)
+    .map((item) => item.item);
+  const semanticOnlyEvidence = scopedEvidenceEligibility
+    .filter((item) => item.semanticallyAssessable && !item.deterministic)
+    .map((item) => item.item);
+  if (deterministicEvidence.length === 0 && semanticOnlyEvidence.length === 0) {
     return commitNonPromotion(request.runtimeRoot, request.candidateId, "wait", "insufficient_evidence", evaluatedAt);
   }
+  const onlyExplicitUserEvidence = scopedEvidenceEligibility.length > 0 &&
+    scopedEvidenceEligibility.every(
+      (item) => item.item.evidenceClass === "explicit_user_statement"
+    );
+  const hasStableExplicitUserClassification = candidate.importanceTags.some(
+    (tag) => stableExplicitUserTags.has(tag)
+  );
   const fullValidationRequired =
     scope.kind === "global" ||
     evidence.length > 1 ||
-    candidate.certainty !== "asserted";
+    candidate.certainty !== "asserted" ||
+    semanticOnlyEvidence.length > 0 ||
+    (onlyExplicitUserEvidence && !hasStableExplicitUserClassification);
   if (
     fullValidationRequired &&
     semanticAssessment?.state !== "supported"
@@ -1055,6 +1150,43 @@ export async function evaluateCandidate(request: {
       evaluatedAt,
       semanticAssessment !== undefined
     );
+  }
+  const assessedEvidenceIds = new Set(semanticAssessment?.evidenceIds ?? []);
+  const eligibleEvidence = [
+    ...deterministicEvidence,
+    ...semanticOnlyEvidence.filter((item) => assessedEvidenceIds.has(item.evidenceId))
+  ];
+  if (eligibleEvidence.length === 0) {
+    return commitNonPromotion(
+      request.runtimeRoot,
+      request.candidateId,
+      "wait",
+      "insufficient_evidence",
+      evaluatedAt
+    );
+  }
+  if (onlyExplicitUserEvidence && !hasStableExplicitUserClassification) {
+    const disposition = semanticAssessment?.durabilityDisposition ?? "legacy_unclassified";
+    if (["task_local", "transient", "no_retention"].includes(disposition)) {
+      return commitNonPromotion(
+        request.runtimeRoot,
+        request.candidateId,
+        "rejected",
+        `non_durable_${disposition}`,
+        evaluatedAt,
+        true
+      );
+    }
+    if (disposition === "uncertain") {
+      return commitNonPromotion(
+        request.runtimeRoot,
+        request.candidateId,
+        "wait",
+        "durability_uncertain",
+        evaluatedAt,
+        true
+      );
+    }
   }
   if (
     scope.kind === "global" &&
@@ -1070,9 +1202,6 @@ export async function evaluateCandidate(request: {
     );
   }
   if (scope.kind === "global" && typeof row.global_authorization_id !== "string") {
-    const assessedEvidenceIds = new Set(
-      semanticAssessment?.evidenceIds ?? []
-    );
     const independentProjects = new Set(
       eligibleEvidence.flatMap((item) =>
         item.projectId === undefined || !assessedEvidenceIds.has(item.evidenceId)

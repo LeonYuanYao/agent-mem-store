@@ -188,13 +188,20 @@ const semanticAssessmentOutputSchema = z.object({
     "contradicted",
     "insufficient_evidence"
   ]),
+  durabilityDisposition: z.enum([
+    "durable",
+    "task_local",
+    "transient",
+    "no_retention",
+    "uncertain"
+  ]).optional(),
   evidenceIds: z.array(z.string().min(1)).max(64)
 });
 
 const semanticAssessmentOutputJsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["schemaVersion", "kind", "state", "evidenceIds"],
+  required: ["schemaVersion", "kind", "state", "durabilityDisposition", "evidenceIds"],
   properties: {
     schemaVersion: { type: "integer", const: 1 },
     kind: { type: "string", const: "semantic_assessment" },
@@ -205,6 +212,9 @@ const semanticAssessmentOutputJsonSchema = {
         "contradicted",
         "insufficient_evidence"
       ]
+    },
+    durabilityDisposition: {
+      enum: ["durable", "task_local", "transient", "no_retention", "uncertain"]
     },
     evidenceIds: {
       type: "array",
@@ -499,11 +509,14 @@ export class CodexLunaAdapter {
       distillationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 1,
+        promptVersion: 2,
         task: "distill_memory_candidates",
         rules: [
           "Use only supplied evidence.",
           "Preserve scope, certainty, conditions, exclusions, and negations.",
+          "Return no Candidate for operational probes or exact-response checks.",
+          "Return no Candidate for task-local instructions, temporary progress or state, or unverified future plans.",
+          "If evidence says content must not be retained, return no Candidate derived from that content.",
           memoryCategoryPromptInstruction,
           "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Cite evidenceIds for every candidate.",
@@ -660,10 +673,12 @@ export class CodexLunaAdapter {
       consolidationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 1,
+        promptVersion: 2,
         task: "consolidate_session_candidates",
         rules: [
           "Use only structured Batch results and their evidence identities.",
+          "Omit operational probes, exact-response checks, task-local instructions, temporary progress or state, and unverified future plans.",
+          "If a structured candidate says content must not be retained, omit it from the consolidation result.",
           "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Do not infer from raw transcripts or execute commands.",
           "Preserve material conditions, exclusions, certainty, and negations.",
@@ -719,11 +734,13 @@ export class CodexLunaAdapter {
       semanticAssessmentOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 1,
+        promptVersion: 2,
         task: "assess_candidate_semantics",
         rules: [
           "Use only supplied evidence.",
           "Return a bounded support state and cite only supplied evidenceIds.",
+          "Classify durability independently: durable is reusable beyond the current task; task_local is only an instruction for the current task; transient is temporary progress or state; no_retention applies when evidence says not to retain the content; uncertain means durability is not established.",
+          "Operational probes and exact-response checks are task_local unless evidence explicitly establishes a reusable rule.",
           "Missing evidence is insufficient_evidence, never approval.",
           "Do not execute commands or invent verification results."
         ],

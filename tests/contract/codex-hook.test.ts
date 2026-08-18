@@ -11,6 +11,7 @@ import {
   listOpenCaptureHealthIncidents,
   readCapturedEvent
 } from "../../src/capture/index.js";
+import { inspectStatus } from "../../src/operations/status.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -163,7 +164,7 @@ test("a Hook validation failure records a body-free health incident when Runtime
   await expect(listOpenCaptureHealthIncidents(runtimeRoot)).resolves.toEqual([]);
 });
 
-test("a busy Runtime database makes the Hook fail open within 500 milliseconds", async () => {
+test("a busy Runtime database gets a bounded retry and records a body-free diagnostic", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-codex-hook-busy-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -201,9 +202,17 @@ test("a busy Runtime database makes the Hook fail open within 500 milliseconds",
       captured: false,
       state: "capture_unavailable"
     });
+    expect(elapsedMilliseconds).toBeGreaterThanOrEqual(350);
     expect(elapsedMilliseconds).toBeLessThan(500);
   } finally {
     database.exec("ROLLBACK");
     database.close();
   }
+  const status = await inspectStatus({ runtimeRoot, vaultRoot: join(root, "vault") });
+  expect(status.pipelines.capture).toMatchObject({
+    sqlite_busy_count: 1,
+    last_sqlite_busy_at: "2026-08-07T04:03:00.000Z",
+    last_sqlite_busy_event_kind: "Stop"
+  });
+  expect(JSON.stringify(status.pipelines.capture)).not.toContain("second");
 });

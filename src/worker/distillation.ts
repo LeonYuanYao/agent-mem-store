@@ -52,6 +52,7 @@ function operationPayloadSource(payload: unknown): {
 export async function prepareNextDistillationBatch(request: {
   readonly runtimeRoot: string;
   readonly maximumEvents: number;
+  readonly maximumRetainedBytes?: number;
   readonly preparedAt: string;
   readonly minimumEventAgeMilliseconds?: number;
 }): Promise<PrepareDistillationBatchResult> {
@@ -69,13 +70,16 @@ export async function prepareNextDistillationBatch(request: {
   ) {
     throw new Error("maximumEvents must be between one and 64.");
   }
+  const maximumRetainedBytes = z.number().int().min(64 * 1024).max(900_000).parse(
+    request.maximumRetainedBytes ?? 512 * 1024
+  );
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     database.exec("BEGIN IMMEDIATE");
     try {
       const first = database
         .prepare(
-          `SELECT event_id, session_id, project_id
+          `SELECT event_id, session_id, turn_id, project_id, created_at
            FROM capture_events AS capture
            WHERE capture.state = 'pending'
              AND NOT EXISTS (
@@ -83,19 +87,52 @@ export async function prepareNextDistillationBatch(request: {
                WHERE assigned.event_id = capture.event_id
              )
              AND (
-               capture.event_kind = 'SessionEnd'
-               OR capture.occurred_at <= ?
+               EXISTS (
+                 SELECT 1 FROM capture_events AS stopping
+                 WHERE stopping.event_kind = 'Stop'
+                   AND stopping.session_id = capture.session_id
+                   AND stopping.turn_id = capture.turn_id
+               )
                OR EXISTS (
                  SELECT 1 FROM capture_events AS ending
-                 WHERE ending.state = 'pending'
-                   AND ending.event_kind = 'SessionEnd'
+                 WHERE ending.event_kind = 'SessionEnd'
                    AND COALESCE(ending.session_id, 'event:' || ending.event_id) =
                      COALESCE(capture.session_id, 'event:' || capture.event_id)
+                   AND ending.created_at >= capture.created_at
+               )
+               OR (
+                 SELECT COUNT(*) FROM capture_events AS checkpoint
+                 WHERE checkpoint.state = 'pending'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM distillation_batch_events AS checkpoint_assigned
+                     WHERE checkpoint_assigned.event_id = checkpoint.event_id
+                   )
+                   AND COALESCE(checkpoint.session_id, 'event:' || checkpoint.event_id) =
+                     COALESCE(capture.session_id, 'event:' || capture.event_id)
+                   AND COALESCE(checkpoint.turn_id, 'session') =
+                     COALESCE(capture.turn_id, 'session')
+               ) >= ?
+               OR (
+                 SELECT COALESCE(SUM(checkpoint.retained_bytes), 0)
+                 FROM capture_events AS checkpoint
+                 WHERE checkpoint.state = 'pending'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM distillation_batch_events AS checkpoint_assigned
+                     WHERE checkpoint_assigned.event_id = checkpoint.event_id
+                   )
+                   AND COALESCE(checkpoint.session_id, 'event:' || checkpoint.event_id) =
+                     COALESCE(capture.session_id, 'event:' || capture.event_id)
+                   AND COALESCE(checkpoint.turn_id, 'session') =
+                     COALESCE(capture.turn_id, 'session')
+               ) >= ?
+               OR (
+                 capture.occurred_at <= ?
+                 AND capture.turn_id IS NULL
                )
              )
            ORDER BY capture.created_at ASC LIMIT 1`
         )
-        .get(eligibleBefore);
+        .get(request.maximumEvents, maximumRetainedBytes, eligibleBefore);
       if (first === undefined) {
         database.exec("COMMIT");
         return { state: "empty" };
@@ -105,17 +142,24 @@ export async function prepareNextDistillationBatch(request: {
         typeof first.session_id === "string"
           ? first.session_id
           : `event:${firstEventId}`;
-      const flushSession = database
+      const turnId = typeof first.turn_id === "string" ? first.turn_id : null;
+      const firstCreatedAt = z.string().parse(first.created_at);
+      const ending = database
         .prepare(
-          `SELECT 1 AS present FROM capture_events
-           WHERE state = 'pending' AND event_kind = 'SessionEnd'
+          `SELECT created_at FROM capture_events
+           WHERE event_kind = 'SessionEnd'
              AND COALESCE(session_id, 'event:' || event_id) = ?
+             AND created_at >= ?
+           ORDER BY created_at ASC
            LIMIT 1`
         )
-        .get(sessionId) !== undefined;
+        .get(sessionId, firstCreatedAt);
+      const sessionEndCutoff = typeof ending?.created_at === "string"
+        ? ending.created_at
+        : null;
       const rows = database
         .prepare(
-          `SELECT capture.event_id, capture.project_id
+          `SELECT capture.event_id, capture.project_id, capture.retained_bytes
            FROM capture_events AS capture
            WHERE capture.state = 'pending'
              AND COALESCE(capture.session_id, 'event:' || capture.event_id) = ?
@@ -123,13 +167,39 @@ export async function prepareNextDistillationBatch(request: {
                SELECT 1 FROM distillation_batch_events AS assigned
                WHERE assigned.event_id = capture.event_id
              )
-             AND (? = 1 OR capture.occurred_at <= ?)
+             AND (
+               (? IS NOT NULL AND capture.created_at <= ?)
+               OR (? IS NULL AND capture.turn_id = ?)
+               OR (? IS NULL AND ? IS NULL AND capture.turn_id IS NULL)
+             )
            ORDER BY capture.created_at ASC LIMIT ?`
         )
-        .all(sessionId, flushSession ? 1 : 0, eligibleBefore, request.maximumEvents);
+        .all(
+          sessionId,
+          sessionEndCutoff,
+          sessionEndCutoff,
+          sessionEndCutoff,
+          turnId,
+          sessionEndCutoff,
+          turnId,
+          request.maximumEvents
+        );
       if (rows.length === 0) throw new Error("Distillation batch selection failed.");
+      const selectedRows: Record<string, unknown>[] = [];
+      let selectedBytes = 0;
+      for (const row of rows) {
+        const retainedBytes = z.number().int().nonnegative().parse(row.retained_bytes);
+        if (
+          selectedRows.length > 0 &&
+          selectedBytes + retainedBytes > maximumRetainedBytes
+        ) {
+          break;
+        }
+        selectedRows.push(row);
+        selectedBytes += retainedBytes;
+      }
       const projectIds = new Set(
-        rows
+        selectedRows
           .map((row) => row.project_id)
           .filter((value): value is string => typeof value === "string")
       );
@@ -173,7 +243,7 @@ export async function prepareNextDistillationBatch(request: {
         `INSERT INTO distillation_batch_events(batch_id, event_id, event_ordinal)
          VALUES (?, ?, ?)`
       );
-      rows.forEach((row, index) => {
+      selectedRows.forEach((row, index) => {
         insertEvent.run(batchId, z.string().parse(row.event_id), index);
       });
       database.exec("COMMIT");
@@ -182,7 +252,7 @@ export async function prepareNextDistillationBatch(request: {
         batchId,
         operationId,
         sessionId,
-        eventCount: rows.length
+        eventCount: selectedRows.length
       };
     } catch (error) {
       database.exec("ROLLBACK");
@@ -360,63 +430,128 @@ async function queueConsolidationIfReady(
   runtimeRoot: string,
   sessionId: string,
   completedAt: string
-): Promise<void> {
+): Promise<{
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly fromBatchOrdinal: number;
+  readonly throughBatchOrdinal: number;
+} | undefined> {
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     database.exec("BEGIN IMMEDIATE");
     try {
-      const summary = database
+      const cursor = database
         .prepare(
-          `SELECT COUNT(DISTINCT batch.batch_id) AS batch_count,
-                  COUNT(DISTINCT CASE WHEN batch.state = 'completed' THEN batch.batch_id END)
-                    AS completed_count,
-                  MAX(CASE WHEN event_kind = 'SessionEnd' THEN 1 ELSE 0 END) AS has_session_end,
-                  MAX(CASE WHEN batch.source_selector IS NOT NULL THEN 1 ELSE 0 END) AS has_explicit
-           FROM distillation_batches AS batch
-           LEFT JOIN distillation_batch_events AS assigned ON assigned.batch_id = batch.batch_id
-           LEFT JOIN capture_events AS capture ON capture.event_id = assigned.event_id
-           WHERE batch.session_id = ? AND batch.split_at IS NULL`
+          `SELECT generation, through_batch_ordinal
+           FROM session_distillation_cursors WHERE session_id = ?`
         )
         .get(sessionId);
-      const batchCount = z.number().int().nonnegative().parse(summary?.batch_count);
-      const completedCount = z.number().int().nonnegative().parse(summary?.completed_count);
-      const hasSessionEnd = summary?.has_session_end === 1;
-      const hasExplicit = summary?.has_explicit === 1;
-      if (batchCount > 1 && batchCount === completedCount && (hasSessionEnd || hasExplicit)) {
-        const existing = database
-          .prepare(
-            "SELECT operation_id FROM session_consolidations WHERE session_id = ?"
-          )
-          .get(sessionId);
-        if (existing === undefined) {
-          const operationId = `msop_${randomUUID()}`;
-          const payload = operationPayloadSource({ sessionId });
-          database
-            .prepare(
-              `INSERT INTO luna_operations(
-                 operation_id, operation_kind, idempotency_key, session_id,
-                 payload_json, payload_sha256, state, created_at, updated_at
-               ) VALUES (?, 'consolidate_session', ?, ?, ?, ?, 'pending', ?, ?)`
-            )
-            .run(
-              operationId,
-              `consolidate:${sessionId}`,
-              sessionId,
-              payload.source,
-              payload.sha256,
-              completedAt,
-              completedAt
-            );
-          database
-          .prepare(
-            `INSERT INTO session_consolidations(
-               session_id, operation_id, state, created_at
-             ) VALUES (?, ?, 'queued', ?)`
-          )
-          .run(sessionId, operationId, completedAt);
-        }
+      const cursorGeneration = cursor === undefined
+        ? 0
+        : z.number().int().nonnegative().parse(cursor.generation);
+      const cursorThrough = cursor === undefined
+        ? -1
+        : z.number().int().nonnegative().parse(cursor.through_batch_ordinal);
+      const cutoff = database.prepare(
+        `SELECT MAX(batch.batch_ordinal) AS value
+         FROM distillation_batches AS batch
+         WHERE batch.session_id = ? AND batch.split_at IS NULL
+           AND (
+             batch.source_selector IS NOT NULL
+             OR EXISTS (
+               SELECT 1
+               FROM distillation_batch_events AS assigned
+               JOIN capture_events AS capture ON capture.event_id = assigned.event_id
+               WHERE assigned.batch_id = batch.batch_id
+                 AND capture.event_kind = 'SessionEnd'
+             )
+           )`
+      ).get(sessionId);
+      if (typeof cutoff?.value !== "number" || cutoff.value <= cursorThrough) {
+        database.exec("COMMIT");
+        return undefined;
+      }
+      const throughBatchOrdinal = z.number().int().nonnegative().parse(cutoff.value);
+      const summary = database.prepare(
+        `SELECT COUNT(*) AS batch_count,
+                SUM(CASE WHEN state = 'completed' THEN 1 ELSE 0 END) AS completed_count
+         FROM distillation_batches
+         WHERE session_id = ? AND split_at IS NULL
+           AND batch_ordinal > ? AND batch_ordinal <= ?`
+      ).get(sessionId, cursorThrough, throughBatchOrdinal);
+      const batchCount = z.number().int().positive().parse(summary?.batch_count);
+      const completedCount = z.number().int().nonnegative().parse(summary?.completed_count ?? 0);
+      if (batchCount !== completedCount) {
+        database.exec("COMMIT");
+        return undefined;
+      }
+      const existing = database.prepare(
+        `SELECT state FROM session_consolidations WHERE session_id = ?`
+      ).get(sessionId);
+      if (existing !== undefined && existing.state !== "completed") {
+        database.exec("COMMIT");
+        return undefined;
+      }
+      const generation = cursorGeneration + 1;
+      const fromBatchOrdinal = cursorThrough + 1;
+      const operationId = `msop_${randomUUID()}`;
+      const payload = operationPayloadSource({
+        sessionId,
+        generation,
+        fromBatchOrdinal,
+        throughBatchOrdinal
+      });
+      database.prepare(
+        `INSERT INTO luna_operations(
+           operation_id, operation_kind, idempotency_key, session_id,
+           payload_json, payload_sha256, state, created_at, updated_at
+         ) VALUES (?, 'consolidate_session', ?, ?, ?, ?, 'pending', ?, ?)`
+      ).run(
+        operationId,
+        `consolidate:${sessionId}:${String(generation)}:${String(fromBatchOrdinal)}:${String(throughBatchOrdinal)}`,
+        sessionId,
+        payload.source,
+        payload.sha256,
+        completedAt,
+        completedAt
+      );
+      if (existing === undefined) {
+        database.prepare(
+          `INSERT INTO session_consolidations(
+             session_id, operation_id, state, created_at, generation,
+             from_batch_ordinal, through_batch_ordinal
+           ) VALUES (?, ?, 'queued', ?, ?, ?, ?)`
+        ).run(
+          sessionId,
+          operationId,
+          completedAt,
+          generation,
+          fromBatchOrdinal,
+          throughBatchOrdinal
+        );
+      } else {
+        database.prepare(
+          `UPDATE session_consolidations
+           SET operation_id = ?, state = 'queued', result_json = NULL,
+               created_at = ?, completed_at = NULL, generation = ?,
+               from_batch_ordinal = ?, through_batch_ordinal = ?
+           WHERE session_id = ? AND state = 'completed'`
+        ).run(
+          operationId,
+          completedAt,
+          generation,
+          fromBatchOrdinal,
+          throughBatchOrdinal,
+          sessionId
+        );
       }
       database.exec("COMMIT");
+      return {
+        sessionId,
+        generation,
+        fromBatchOrdinal,
+        throughBatchOrdinal
+      };
     } catch (error) {
       database.exec("ROLLBACK");
       throw error;
@@ -424,6 +559,59 @@ async function queueConsolidationIfReady(
   } finally {
     database.close();
   }
+}
+
+export type PrepareSessionConsolidationResult =
+  | { readonly state: "empty" }
+  | {
+      readonly state: "queued";
+      readonly sessionId: string;
+      readonly generation: number;
+      readonly fromBatchOrdinal: number;
+      readonly throughBatchOrdinal: number;
+    };
+
+export async function prepareNextSessionConsolidation(request: {
+  readonly runtimeRoot: string;
+  readonly preparedAt: string;
+}): Promise<PrepareSessionConsolidationResult> {
+  const preparedAt = z.iso.datetime().parse(request.preparedAt);
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  let sessionIds: readonly string[];
+  try {
+    sessionIds = database.prepare(
+      `SELECT DISTINCT batch.session_id
+       FROM distillation_batches AS batch
+       WHERE batch.state = 'completed' AND batch.split_at IS NULL
+         AND (
+           batch.source_selector IS NOT NULL
+           OR EXISTS (
+             SELECT 1
+             FROM distillation_batch_events AS assigned
+             JOIN capture_events AS capture ON capture.event_id = assigned.event_id
+             WHERE assigned.batch_id = batch.batch_id
+               AND capture.event_kind = 'SessionEnd'
+           )
+         )
+         AND batch.batch_ordinal > COALESCE((
+           SELECT cursor.through_batch_ordinal
+           FROM session_distillation_cursors AS cursor
+           WHERE cursor.session_id = batch.session_id
+         ), -1)
+       ORDER BY COALESCE(batch.completed_at, batch.created_at), batch.session_id`
+    ).all().map((row) => z.string().parse(row.session_id));
+  } finally {
+    database.close();
+  }
+  for (const sessionId of sessionIds) {
+    const queued = await queueConsolidationIfReady(
+      request.runtimeRoot,
+      sessionId,
+      preparedAt
+    );
+    if (queued !== undefined) return { state: "queued", ...queued };
+  }
+  return { state: "empty" };
 }
 
 async function splitLargeSchemaInvalidBatch(request: {
@@ -562,15 +750,17 @@ async function finalizeCompletedBatch(request: {
   const database = await openRuntimeDatabase(request.runtimeRoot);
   let sessionId: string;
   let batchCount: number;
+  let batchOrdinal: number;
   let hasSessionEnd: boolean;
   let output: DistillationOutput | undefined;
   try {
     const batch = database.prepare(
-      `SELECT session_id, result_json, source_selector FROM distillation_batches
+      `SELECT session_id, batch_ordinal, result_json, source_selector FROM distillation_batches
        WHERE batch_id = ? AND state = 'completed'`
     ).get(request.batchId);
     if (batch === undefined) throw new Error("Completed Batch result is unavailable.");
     sessionId = z.string().parse(batch.session_id);
+    batchOrdinal = z.number().int().nonnegative().parse(batch.batch_ordinal);
     const summary = database.prepare(
       `SELECT COUNT(DISTINCT candidate_batch.batch_id) AS batch_count,
               MAX(CASE WHEN capture.event_kind = 'SessionEnd' THEN 1 ELSE 0 END)
@@ -615,12 +805,32 @@ async function finalizeCompletedBatch(request: {
       evidence: batch.evidence,
       createdAt: request.completedAt
     });
+    const cursorDatabase = await openRuntimeDatabase(request.runtimeRoot);
+    try {
+      cursorDatabase.prepare(
+        `INSERT INTO session_distillation_cursors(
+           session_id, generation, through_batch_ordinal, updated_at
+         ) VALUES (?, 1, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           generation = session_distillation_cursors.generation + 1,
+           through_batch_ordinal = excluded.through_batch_ordinal,
+           updated_at = excluded.updated_at
+         WHERE session_distillation_cursors.through_batch_ordinal < excluded.through_batch_ordinal`
+      ).run(sessionId, batchOrdinal, request.completedAt);
+    } finally {
+      cursorDatabase.close();
+    }
   }
 }
 
 const operationPayloadSchema = z.union([
   z.object({ batchId: z.string().min(1) }),
-  z.object({ sessionId: z.string().min(1) })
+  z.object({
+    sessionId: z.string().min(1),
+    generation: z.number().int().positive().optional(),
+    fromBatchOrdinal: z.number().int().nonnegative().optional(),
+    throughBatchOrdinal: z.number().int().nonnegative().optional()
+  })
 ]);
 
 export type RunNextLunaWorkResult =
@@ -650,7 +860,7 @@ export async function runNextLunaWork(request: {
     workerId: request.workerId,
     now: request.now,
     leaseSeconds: 300,
-    kinds: ["distill_batch", "consolidate_session"]
+    kinds: ["consolidate_session", "distill_batch"]
   });
   if (claimed.state === "empty") return { state: "empty" };
   const operation = claimed.operation;
@@ -677,13 +887,16 @@ export async function runNextLunaWork(request: {
     }
     if (operation.kind === "consolidate_session" && "sessionId" in payload) {
       const consolidation = processingDatabase
-        .prepare("SELECT state FROM session_consolidations WHERE session_id = ?")
-        .get(payload.sessionId);
-      alreadyPersisted = consolidation?.state === "completed";
+        .prepare("SELECT state FROM session_consolidations WHERE operation_id = ?")
+        .get(operation.operationId);
+      if (consolidation === undefined) {
+        throw new Error("Consolidation operation is not bound to an active range.");
+      }
+      alreadyPersisted = consolidation.state === "completed";
       if (!alreadyPersisted) {
         processingDatabase
-          .prepare("UPDATE session_consolidations SET state = 'processing' WHERE session_id = ?")
-          .run(payload.sessionId);
+          .prepare("UPDATE session_consolidations SET state = 'processing' WHERE operation_id = ?")
+          .run(operation.operationId);
       }
     }
   } finally {
@@ -767,14 +980,31 @@ export async function runNextLunaWork(request: {
       }
       const database = await openRuntimeDatabase(request.runtimeRoot);
       let batchRows: readonly Record<string, unknown>[];
+      let consolidationGeneration: number;
+      let throughBatchOrdinal: number;
       try {
+        const consolidation = database.prepare(
+          `SELECT session_id, generation, from_batch_ordinal, through_batch_ordinal
+           FROM session_consolidations WHERE operation_id = ?`
+        ).get(operation.operationId);
+        if (consolidation === undefined || consolidation.session_id !== payload.sessionId) {
+          throw new Error("Consolidation range is unavailable.");
+        }
+        consolidationGeneration = z.number().int().positive().parse(consolidation.generation);
+        const fromBatchOrdinal = z.number().int().nonnegative().parse(
+          consolidation.from_batch_ordinal
+        );
+        throughBatchOrdinal = z.number().int().nonnegative().parse(
+          consolidation.through_batch_ordinal
+        );
         batchRows = database
           .prepare(
             `SELECT batch_id, result_json FROM distillation_batches
-             WHERE session_id = ? AND state = 'completed'
+             WHERE session_id = ? AND state = 'completed' AND split_at IS NULL
+               AND batch_ordinal >= ? AND batch_ordinal <= ?
              ORDER BY batch_ordinal ASC`
           )
-          .all(payload.sessionId);
+          .all(payload.sessionId, fromBatchOrdinal, throughBatchOrdinal);
       } finally {
         database.close();
       }
@@ -815,13 +1045,32 @@ export async function runNextLunaWork(request: {
       });
       const updateDatabase = await openRuntimeDatabase(request.runtimeRoot);
       try {
-        updateDatabase
-          .prepare(
+        updateDatabase.exec("BEGIN IMMEDIATE");
+        try {
+          updateDatabase.prepare(
             `UPDATE session_consolidations
              SET state = 'completed', result_json = ?, completed_at = ?
-             WHERE session_id = ?`
-          )
-          .run(JSON.stringify(output), completedAt, payload.sessionId);
+             WHERE operation_id = ?`
+          ).run(JSON.stringify(output), completedAt, operation.operationId);
+          updateDatabase.prepare(
+            `INSERT INTO session_distillation_cursors(
+               session_id, generation, through_batch_ordinal, updated_at
+             ) VALUES (?, ?, ?, ?)
+             ON CONFLICT(session_id) DO UPDATE SET
+               generation = excluded.generation,
+               through_batch_ordinal = excluded.through_batch_ordinal,
+               updated_at = excluded.updated_at`
+          ).run(
+            payload.sessionId,
+            consolidationGeneration,
+            throughBatchOrdinal,
+            completedAt
+          );
+          updateDatabase.exec("COMMIT");
+        } catch (error) {
+          updateDatabase.exec("ROLLBACK");
+          throw error;
+        }
       } finally {
         updateDatabase.close();
       }
@@ -864,8 +1113,8 @@ export async function runNextLunaWork(request: {
       }
       if (operation.kind === "consolidate_session" && "sessionId" in payload) {
         failedDatabase
-          .prepare("UPDATE session_consolidations SET state = ? WHERE session_id = ?")
-          .run(failed.state, payload.sessionId);
+          .prepare("UPDATE session_consolidations SET state = ? WHERE operation_id = ?")
+          .run(failed.state, operation.operationId);
       }
     } finally {
       failedDatabase.close();

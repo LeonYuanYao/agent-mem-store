@@ -129,17 +129,52 @@ const migrations: readonly Migration[] = [
     version: 24,
     name: "backfill_luna_retry_epoch_attempts",
     path: new URL("../../migrations/0024-backfill-luna-retry-epoch-attempts.sql", import.meta.url)
+  },
+  {
+    version: 25,
+    name: "incremental_session_consolidation",
+    path: new URL("../../migrations/0025-incremental-session-consolidation.sql", import.meta.url)
+  },
+  {
+    version: 26,
+    name: "reevaluate_generic_tool_evidence",
+    path: new URL("../../migrations/0026-reevaluate-generic-tool-evidence.sql", import.meta.url)
+  },
+  {
+    version: 27,
+    name: "candidate_reevaluation_backfill",
+    path: new URL("../../migrations/0027-candidate-reevaluation-backfill.sql", import.meta.url)
+  },
+  {
+    version: 28,
+    name: "candidate_durability",
+    path: new URL("../../migrations/0028-candidate-durability.sql", import.meta.url)
   }
 ];
 
-export async function openRuntimeDatabase(runtimeRoot: string): Promise<DatabaseSync> {
+export interface OpenRuntimeDatabaseOptions {
+  readonly busyTimeoutMilliseconds?: number;
+}
+
+export async function openRuntimeDatabase(
+  runtimeRoot: string,
+  options: OpenRuntimeDatabaseOptions = {}
+): Promise<DatabaseSync> {
+  const busyTimeoutMilliseconds = options.busyTimeoutMilliseconds ?? 250;
+  if (
+    !Number.isInteger(busyTimeoutMilliseconds) ||
+    busyTimeoutMilliseconds < 0 ||
+    busyTimeoutMilliseconds > 60_000
+  ) {
+    throw new Error("SQLite busy timeout must be an integer from 0 through 60000 milliseconds.");
+  }
   const stateDirectory = join(runtimeRoot, "state");
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const database = new DatabaseSync(join(stateDirectory, "memstore.sqlite"));
 
   database.exec("PRAGMA journal_mode = WAL");
   database.exec("PRAGMA foreign_keys = ON");
-  database.exec("PRAGMA busy_timeout = 250");
+  database.exec(`PRAGMA busy_timeout = ${String(busyTimeoutMilliseconds)}`);
   database.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,

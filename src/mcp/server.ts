@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { errorEnvelope, successEnvelope } from "../contracts/envelope.js";
 import { executeRecall, type RecallContext } from "../operations/recall.js";
+import type { EmbeddingAdapter } from "../retrieval/index.js";
 
 export interface MemStoreMcpServerOptions {
   readonly runtimeRoot: string;
@@ -10,6 +11,7 @@ export interface MemStoreMcpServerOptions {
   readonly path: string;
   readonly callerIdentity?: string;
   readonly now?: () => string;
+  readonly embeddingAdapter?: EmbeddingAdapter;
 }
 
 function toolResult(command: string, result: unknown) {
@@ -42,7 +44,10 @@ export function createMemStoreMcpServer(
     vaultRoot: options.vaultRoot,
     path: options.path,
     callerIdentity: options.callerIdentity ?? `mcp:${String(process.pid)}`,
-    requestedAt: options.now?.() ?? new Date().toISOString()
+    requestedAt: options.now?.() ?? new Date().toISOString(),
+    ...(options.embeddingAdapter === undefined
+      ? {}
+      : { embeddingAdapter: options.embeddingAdapter })
   });
 
   server.registerTool("memstore_search", {

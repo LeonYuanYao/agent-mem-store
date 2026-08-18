@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 
 import { createMemStoreMcpServer } from "../../../src/mcp/server.js";
+import { buildRetrievalIndex, type EmbeddingAdapter } from "../../../src/retrieval/index.js";
+import { writeCanonicalMemory } from "../../../src/vault/index.js";
+import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -54,6 +57,77 @@ test("the stdio server exposes exactly the five accepted progressive-recall tool
     schema_version: 1,
     ok: false,
     command: "recall.show"
+  });
+  await client.close();
+  await server.close();
+});
+
+test("MCP explicit Recall uses the configured semantic adapter", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-mcp-semantic-"));
+  temporaryDirectories.push(root);
+  const workspace = join(root, "workspace");
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174009";
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, ".memstore-project"), JSON.stringify({
+    schema_version: 1,
+    project_id: projectId
+  }));
+  const adapter: EmbeddingAdapter = {
+    identity: {
+      adapterVersion: "mcp-semantic-v1",
+      modelIdentity: "mcp-semantic-fixture",
+      artifactSha256: "c".repeat(64),
+      dimensions: 2,
+      normalization: "l2"
+    },
+    embed: (texts) => Promise.resolve(texts.map((text) =>
+      /sqlite|wal/iu.test(text) ? [1, 0] : [0, 1]
+    )),
+    embedQuery: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174209",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174219",
+      scope: { kind: "project", projectId },
+      body: "Use SQLite WAL for durable local state.",
+      compact: "Use SQLite WAL for durable state."
+    })
+  });
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter,
+    builtAt: "2026-08-18T01:00:00.000Z"
+  });
+  const server = createMemStoreMcpServer({
+    runtimeRoot,
+    vaultRoot,
+    path: workspace,
+    callerIdentity: "mcp-semantic-test",
+    embeddingAdapter: adapter
+  });
+  const client = new Client({ name: "semantic-client", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+
+  const result = await client.callTool({
+    name: "memstore_search",
+    arguments: { query: "transaction journal persistence" }
+  });
+
+  expect(result.structuredContent).toMatchObject({
+    ok: true,
+    result: {
+      semanticStage: "complete",
+      items: [{ memoryId: "msmem_123e4567-e89b-42d3-a456-426614174209" }]
+    }
   });
   await client.close();
   await server.close();

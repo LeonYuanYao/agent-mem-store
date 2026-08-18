@@ -211,6 +211,40 @@ test("a Candidate stays outside recall until the deterministic Promotion Gate co
   ]);
 });
 
+test("a task-local explicit-user instruction cannot use lightweight promotion", async () => {
+  const roots = await createRoot();
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  const evidence = await captureUserEvidence({
+    runtimeRoot: roots.runtimeRoot,
+    evidenceId: "evidence-exact-response-probe",
+    projectId,
+    occurredAt: "2026-08-07T08:05:00.000Z",
+    prompt: "Run pwd once and reply with exactly MEMSTORE_POST_TOOL_PROBE_OK."
+  });
+  const created = requireCandidate(await createAgentCandidate({
+    ...roots,
+    scope: { kind: "project", projectId },
+    candidate: {
+      ...candidate,
+      statement: "For this operation, run pwd and reply with MEMSTORE_POST_TOOL_PROBE_OK.",
+      importanceTags: []
+    },
+    evidence: [evidence],
+    sourceSessionId: "probe-session",
+    createdAt: "2026-08-07T08:05:01.000Z"
+  }));
+
+  await expect(evaluateCandidate({
+    ...roots,
+    candidateId: created.candidateId,
+    evaluatedAt: "2026-08-07T08:05:02.000Z"
+  })).resolves.toMatchObject({
+    state: "wait",
+    reason: "semantic_assessment_required"
+  });
+  await expect(listRecallEligibleMemoryIds(roots.runtimeRoot)).resolves.toEqual([]);
+});
+
 test("retention cannot expire a Candidate while its promotion is reserved", async () => {
   const roots = await createRoot();
   const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
@@ -291,7 +325,7 @@ test("Global promotion requires supported semantics and two independent non-Echo
   const created = requireCandidate(await createAgentCandidate({
     ...roots,
     scope: { kind: "global" },
-    candidate: { ...candidate, importanceTags: [] },
+    candidate,
     evidence: initialEvidence,
     sourceSessionId: "session-global",
     createdAt: "2026-08-07T08:10:02.000Z"
@@ -321,7 +355,7 @@ test("Global promotion requires supported semantics and two independent non-Echo
   const merged = requireCandidate(await createAgentCandidate({
     ...roots,
     scope: { kind: "global" },
-    candidate: { ...candidate, importanceTags: [] },
+    candidate,
     evidence: [independentEvidence],
     sourceSessionId: "session-global-2",
     createdAt: "2026-08-07T08:10:04.000Z"

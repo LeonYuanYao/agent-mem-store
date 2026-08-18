@@ -180,6 +180,11 @@ export async function claimLunaOperation(
     kinds === undefined
       ? ""
       : ` AND operation_kind IN (${kinds.map(() => "?").join(", ")})`;
+  const kindOrder = kinds === undefined
+    ? ""
+    : `CASE operation_kind ${kinds.map((kind, index) =>
+      `WHEN '${kind}' THEN ${String(index)}`
+    ).join(" ")} ELSE ${String(kinds.length)} END, `;
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     database.exec("BEGIN IMMEDIATE");
@@ -192,7 +197,7 @@ export async function claimLunaOperation(
              OR (state = 'retrying' AND next_retry_at <= ?)
              OR (state = 'processing' AND lease_until < ?)
            )${kindFilter}
-           ORDER BY created_at ASC LIMIT 1`
+           ORDER BY ${kindOrder}created_at ASC LIMIT 1`
         )
         .get(now, now, ...(kinds ?? []));
       if (row === undefined) {

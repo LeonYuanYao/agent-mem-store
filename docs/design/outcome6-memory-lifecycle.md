@@ -14,7 +14,9 @@ authorize Outcome 7, installation, a real Vault write, or global integration.
   cited evidence identity must have been supplied by MemStore.
 - Multi-Batch results are intermediate data. A completed one-Batch Session may
   create Candidates directly; a completed multi-Batch Session creates
-  Candidates only from its structured consolidation result.
+  Candidates only from its structured consolidation result. Active Turns wait
+  for `Stop` and checkpoint only at 64 events or 512 KiB; resumed Sessions
+  consolidate only the closed Batch ordinals after their durable cursor.
 - Luna operations are leased, idempotent, retryable, and health-observable.
   Authentication, model, and configuration failures become visibly
   unavailable. Transient failures use bounded exponential backoff. Local
@@ -31,7 +33,9 @@ authorize Outcome 7, installation, a real Vault write, or global integration.
   revision and content identity where Git applies; non-Git files bind an exact
   content identity within the registered Project root. Human references must bind the current Human
   revision and content identity. Captured command evidence must still match its
-  checksum-verified Capture Event.
+  checksum-verified Capture Event. Generic intact `PostToolUse` evidence that
+  lacks deterministic command fields requires a durable supported Luna
+  assessment that cites the exact event before it can contribute to promotion.
 - Global automatic promotion requires a supported semantic assessment and two
   independent Project, source, and content identities. A copied upstream
   assertion therefore does not gain independence merely by appearing under two
@@ -80,10 +84,10 @@ authorize Outcome 7, installation, a real Vault write, or global integration.
 | --- | --- |
 | Luna uses the exact isolated Codex contract, strict schemas, versioned tasks, evidence binding, and no fallback | `tests/contract/luna-adapter.test.ts` |
 | Model health, backoff, explicit retry, and two-signal recovery are body-free and queryable | `tests/fault/luna-health.test.ts` |
-| Long Sessions are processed in multiple Batches and consolidated without resending raw evidence to the consolidation call | `tests/e2e/distillation.test.ts` |
+| Long Turns coalesce until Stop or a bounded checkpoint, and resumed Sessions consolidate only new closed ranges without resending raw evidence | `tests/e2e/distillation.test.ts` |
 | A transient failure retains work, and replay after a persisted result does not reinvoke Luna or duplicate a Candidate | `tests/fault/luna-worker.test.ts` |
 | Candidates stay outside recall until the Promotion Gate; evidence, Global, Echo, Verification Request, retention, and Tombstone rules hold | `tests/integration/lifecycle/candidate-lifecycle.test.ts` |
-| Durable semantic assessment feeds the deterministic Global Promotion Gate | `tests/integration/lifecycle/semantic-worker.test.ts` |
+| Durable semantic assessment feeds the deterministic Promotion Gate, including generic tool evidence and historical backfill | `tests/integration/lifecycle/semantic-worker.test.ts` |
 | Direct Human Assertions retain exact text, isolate conflicts, and create traceable successors only on explicit replacement | `tests/integration/lifecycle/human-assertion.test.ts` |
 | Durable conflict assessment informs review without rewriting text or resolving Human authority | `tests/integration/lifecycle/human-conflict-worker.test.ts` |
 | High-value anomalies remain diagnostic and require two evaluations to become persistent | `tests/integration/lifecycle/high-value-anomaly.test.ts` |

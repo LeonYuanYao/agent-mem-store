@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 
 import { MemStoreCommandError } from "../contracts/envelope.js";
+import { inspectHookSqliteBusyDiagnostics } from "../capture/index.js";
 
 async function databasePath(runtimeRoot: string): Promise<string> {
   const path = join(runtimeRoot, "state", "memstore.sqlite");
@@ -71,6 +72,7 @@ export async function inspectStatus(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
 }) {
+  const hookSqliteBusy = await inspectHookSqliteBusyDiagnostics(request.runtimeRoot);
   const database = new DatabaseSync(await databasePath(request.runtimeRoot), { readOnly: true });
   try {
     const health = database.prepare("SELECT * FROM luna_health_state WHERE singleton = 1").get();
@@ -113,6 +115,37 @@ export async function inspectStatus(request: {
        WHERE operation_kind = 'semantic_assessment'
          AND state IN ('pending', 'processing', 'retrying', 'blocked')`
     ).get();
+    const unbatchedCapture = database.prepare(
+      `SELECT COUNT(*) AS count, MIN(capture.occurred_at) AS oldest_at
+       FROM capture_events AS capture
+       WHERE capture.state = 'pending'
+         AND NOT EXISTS (
+           SELECT 1 FROM distillation_batch_events AS assigned
+           WHERE assigned.event_id = capture.event_id
+         )`
+    ).get();
+    const activeOperationRows = database.prepare(
+      `SELECT operation_kind, COUNT(*) AS active_count,
+              SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) AS blocked_count
+       FROM luna_operations
+       WHERE state IN ('pending', 'processing', 'retrying', 'blocked')
+       GROUP BY operation_kind`
+    ).all();
+    const candidateBackfill = database.prepare(
+      `SELECT state, scanned_candidate_count, reopened_candidate_count, updated_at
+       FROM candidate_reevaluation_backfill WHERE singleton = 1`
+    ).get();
+    const operationCounts = new Map(activeOperationRows.map((row) => [
+      z.string().parse(row.operation_kind),
+      {
+        active: z.number().int().nonnegative().parse(row.active_count),
+        blocked: z.number().int().nonnegative().parse(row.blocked_count ?? 0)
+      }
+    ]));
+    const pipeline = (kind: string) => ({
+      active_operation_count: operationCounts.get(kind)?.active ?? 0,
+      blocked_operation_count: operationCounts.get(kind)?.blocked ?? 0
+    });
     return {
       mode: "read_only_inspection",
       runtime_root: request.runtimeRoot,
@@ -155,9 +188,33 @@ export async function inspectStatus(request: {
         phase: governance.current_phase,
         coverage_through: governance.coverage_through
       },
+      pipelines: {
+        capture: {
+          unbatched_event_count: z.number().int().nonnegative().parse(unbatchedCapture?.count),
+          oldest_unbatched_at: typeof unbatchedCapture?.oldest_at === "string"
+            ? unbatchedCapture.oldest_at
+            : null,
+          sqlite_busy_count: hookSqliteBusy.count,
+          last_sqlite_busy_at: hookSqliteBusy.lastOccurredAt,
+          last_sqlite_busy_event_kind: hookSqliteBusy.lastEventKind
+        },
+        distillation: pipeline("distill_batch"),
+        session_consolidation: pipeline("consolidate_session"),
+        semantic_assessment: pipeline("semantic_assessment"),
+        conflict_assessment: pipeline("conflict_assessment"),
+        candidate_reevaluation_backfill: candidateBackfill === undefined ? null : {
+          state: candidateBackfill.state,
+          scanned_candidate_count: candidateBackfill.scanned_candidate_count,
+          reopened_candidate_count: candidateBackfill.reopened_candidate_count,
+          updated_at: candidateBackfill.updated_at
+        }
+      },
       candidates: {
         waiting_count: z.number().int().nonnegative().parse(candidates?.waiting_count),
         unevaluated_count: z.number().int().nonnegative().parse(candidates?.unevaluated_count ?? 0),
+        evaluated_waiting_count:
+          z.number().int().nonnegative().parse(candidates?.waiting_count) -
+          z.number().int().nonnegative().parse(candidates?.unevaluated_count ?? 0),
         pending_semantic_assessment_count: z.number().int().nonnegative().parse(
           semanticAssessments?.count
         ),

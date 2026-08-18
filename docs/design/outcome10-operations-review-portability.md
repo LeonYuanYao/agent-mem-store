@@ -54,8 +54,10 @@ attempt still fails, the durable operation becomes `blocked`; an exact manual
 retry may attempt the preserved operation again but does not reset its automatic
 retry history.
 
-`status` exposes Luna health/backlog, the active retrieval index, Worker pause
-state, Review Inbox/reminder backlog, and the active governance run. `doctor`
+`status` exposes Luna health, the active retrieval index, Worker pause state,
+Review Inbox/reminder backlog, the active governance run, and separate Capture,
+distillation, Session consolidation, semantic assessment, conflict assessment,
+and historical Candidate-reevaluation lanes. `doctor`
 is read-only and never repairs: it checks configuration, SQLite integrity, and,
 in deep mode, each catalogued Canonical file identity. `operation retry` targets
 exactly one blocked or retrying Luna operation, retains its payload and gates,
@@ -65,6 +67,7 @@ Every meaningful operator mutation has a zero-write `--preview` route and every
 new command can emit the stable JSON envelope. The bounded families are:
 
 - `doctor [--deep]`, `status`;
+- `shadow status|start|migrate-identity|accept-program-change`;
 - `operation status|retry <id>`;
 - `worker once|run`;
 - `review generate`, typed Review actions, and `review reminder prepare|dispatch`;

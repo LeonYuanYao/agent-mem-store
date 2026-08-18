@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { createMemStoreMcpServer } from "./server.js";
+import { loadConfiguredEmbeddingAdapter } from "../retrieval/embeddings/configured.js";
 
 const runtimeRoot = process.env.MEMSTORE_RUNTIME_ROOT;
 const vaultRoot = process.env.MEMSTORE_VAULT_ROOT;
@@ -14,10 +15,12 @@ if (runtimeRoot === undefined || vaultRoot === undefined) {
   );
   process.exitCode = 2;
 } else {
+  const embedding = await loadConfiguredEmbeddingAdapter(resolve(runtimeRoot));
   const server = createMemStoreMcpServer({
     runtimeRoot: resolve(runtimeRoot),
     vaultRoot: resolve(vaultRoot),
-    path: process.cwd()
+    path: process.cwd(),
+    ...(embedding === undefined ? {} : { embeddingAdapter: embedding.adapter })
   });
   await server.connect(new StdioServerTransport());
 }

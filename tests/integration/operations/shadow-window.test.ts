@@ -7,6 +7,7 @@ import { afterEach, expect, test } from "vitest";
 import { handleCodexHook } from "../../../src/adapters/codex/hook.js";
 import { initializeMemStore } from "../../../src/operations/initialize.js";
 import {
+  acceptOfficialShadowProgramChange,
   inspectOfficialShadowWindow,
   migrateOfficialShadowIdentity,
   startOfficialShadowWindow
@@ -323,7 +324,63 @@ test("an official Shadow window requires a completed real-Hook probe and records
     gate6ReviewEligible: false,
     invalidationReasons: ["program_changed"]
   });
-  await writeFile(programPath, "export const fixture = true;\n");
+  await expect(acceptOfficialShadowProgramChange({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    windowId: legacyWindowId,
+    acceptedAt: "2026-08-16T03:00:02.510Z",
+    reason: "Reviewed long-session pipeline optimization.",
+    preview: true
+  })).resolves.toMatchObject({
+    state: "preview",
+    dryRun: true,
+    windowId: legacyWindowId
+  });
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:02.520Z"
+  })).resolves.toMatchObject({
+    state: "invalidated",
+    invalidationReasons: ["program_changed"]
+  });
+  await expect(acceptOfficialShadowProgramChange({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    windowId: legacyWindowId,
+    acceptedAt: "2026-08-16T03:00:02.530Z",
+    reason: "Reviewed long-session pipeline optimization."
+  })).resolves.toMatchObject({
+    state: "accepted",
+    dryRun: false,
+    windowId: legacyWindowId,
+    reason: "Reviewed long-session pipeline optimization."
+  });
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:02.540Z"
+  })).resolves.toMatchObject({
+    state: "active",
+    invalidationReasons: [],
+    startedAt: "2026-08-09T03:00:02.000Z",
+    minimumEndAt: "2026-08-16T03:00:02.000Z",
+    coverage: {
+      completed_evaluations: { baseline: 1, current: 1, delta: 0 }
+    },
+    continuityAdjustments: [
+      { kind: "exclude_native_memory_from_shadow_identity" },
+      {
+        kind: "accept_reviewed_program_change",
+        acceptedAt: "2026-08-16T03:00:02.530Z",
+        reason: "Reviewed long-session pipeline optimization."
+      }
+    ]
+  });
   await writeFile(join(homeRoot, ".codex", "config.toml"), [
     "model = \"unrelated-change\"",
     "",

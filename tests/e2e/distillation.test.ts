@@ -8,9 +8,11 @@ import { listSessionCandidates } from "../../src/candidates/index.js";
 import {
   inspectSessionDistillation,
   prepareNextDistillationBatch,
+  prepareNextSessionConsolidation,
   runNextLunaWork,
   type LunaWorkerAdapter
 } from "../../src/worker/distillation.js";
+import { openRuntimeDatabase } from "../../src/runtime/database.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -206,4 +208,367 @@ test("the Worker coalescing window waits briefly but SessionEnd flushes the whol
     sessionId: "coalescing-session",
     eventCount: 3
   });
+});
+
+test("an active long-running Turn waits for Stop instead of creating micro-Batches", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-long-turn-coalescing-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const turnId = "long-turn-1";
+  const eventKinds = ["UserPromptSubmit", "PostToolUse", "PostToolUse"] as const;
+  for (const [index, eventKind] of eventKinds.entries()) {
+    await captureEvent({
+      runtimeRoot,
+      event: {
+        schemaVersion: 1,
+        eventId: `msevent_long_turn_${String(index)}`,
+        deduplicationKey: `codex:long-turn:${String(index)}`,
+        agent: "codex",
+        eventKind,
+        occurredAt: `2026-08-07T09:00:0${String(index)}.000Z`,
+        projectId: "msproj_long_turn",
+        sessionId: "long-turn-session",
+        turnId,
+        payload: { index }
+      }
+    });
+  }
+
+  await expect(prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 64,
+    preparedAt: "2026-08-07T10:00:00.000Z",
+    minimumEventAgeMilliseconds: 30_000
+  })).resolves.toEqual({ state: "empty" });
+
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent_long_turn_stop",
+      deduplicationKey: "codex:long-turn:stop",
+      agent: "codex",
+      eventKind: "Stop",
+      occurredAt: "2026-08-07T10:00:01.000Z",
+      projectId: "msproj_long_turn",
+      sessionId: "long-turn-session",
+      turnId,
+      payload: { assistantMessage: "Completed the long-running task." }
+    }
+  });
+
+  await expect(prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 64,
+    preparedAt: "2026-08-07T10:00:02.000Z",
+    minimumEventAgeMilliseconds: 30_000
+  })).resolves.toMatchObject({
+    state: "queued",
+    sessionId: "long-turn-session",
+    eventCount: 4
+  });
+});
+
+test("an active long-running Turn checkpoints after reaching the retained-byte budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-long-turn-byte-checkpoint-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  for (let index = 0; index < 2; index += 1) {
+    await captureEvent({
+      runtimeRoot,
+      event: {
+        schemaVersion: 1,
+        eventId: `msevent_long_turn_bytes_${String(index)}`,
+        deduplicationKey: `codex:long-turn-bytes:${String(index)}`,
+        agent: "codex",
+        eventKind: "PostToolUse",
+        occurredAt: `2026-08-07T11:00:0${String(index)}.000Z`,
+        projectId: "msproj_long_turn_bytes",
+        sessionId: "long-turn-byte-session",
+        turnId: "long-turn-byte-1",
+        payload: { output: "x".repeat(300 * 1024) }
+      }
+    });
+  }
+
+  await expect(prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 64,
+    maximumRetainedBytes: 512 * 1024,
+    preparedAt: "2026-08-07T11:01:00.000Z"
+  })).resolves.toMatchObject({
+    state: "queued",
+    sessionId: "long-turn-byte-session"
+  });
+});
+
+test("a resumed Session consolidates each newly closed Batch range", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-resumed-session-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const projectId = "msproj_resumed_session";
+
+  const captureEpisode = async (episode: number): Promise<void> => {
+    for (let index = 0; index < 3; index += 1) {
+      await captureEvent({
+        runtimeRoot,
+        event: {
+          schemaVersion: 1,
+          eventId: `msevent_resumed_${String(episode)}_${String(index)}`,
+          deduplicationKey: `codex:resumed:${String(episode)}:${String(index)}`,
+          agent: "codex",
+          eventKind: index === 2 ? "SessionEnd" : "PostToolUse",
+          occurredAt: `2026-08-07T1${String(episode)}:00:0${String(index)}.000Z`,
+          projectId,
+          sessionId: "resumed-session",
+          ...(index === 2 ? {} : { turnId: `episode-${String(episode)}-turn` }),
+          payload: { episode, index }
+        }
+      });
+    }
+    for (let index = 0; index < 2; index += 1) {
+      await expect(prepareNextDistillationBatch({
+        runtimeRoot,
+        maximumEvents: 2,
+        preparedAt: `2026-08-07T1${String(episode)}:01:0${String(index)}.000Z`
+      })).resolves.toMatchObject({ state: "queued", sessionId: "resumed-session" });
+    }
+  };
+
+  let consolidationCalls = 0;
+  const adapter: LunaWorkerAdapter = {
+    distillBatch(request) {
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: [{
+          statement: `Batch ${request.operationId}`,
+          primaryCategory: "workflow_environment_toolchain",
+          categoryTags: ["workflow_environment_toolchain"],
+          applicabilitySummary: "resumed session",
+          conditions: [],
+          exclusions: [],
+          preservedNegations: [],
+          certainty: "asserted",
+          sensitivity: "normal",
+          evidenceIds: [request.evidence[0]?.evidenceId ?? "missing-evidence"],
+          importanceTags: [],
+          importanceReasons: []
+        }]
+      });
+    },
+    consolidateSession(request) {
+      consolidationCalls += 1;
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "consolidation",
+        candidates: [{
+          statement: `Resumed Session generation ${String(consolidationCalls)}.`,
+          primaryCategory: "workflow_environment_toolchain",
+          categoryTags: ["workflow_environment_toolchain"],
+          applicabilitySummary: "resumed session",
+          conditions: [],
+          exclusions: [],
+          preservedNegations: [],
+          certainty: "asserted",
+          sensitivity: "normal",
+          evidenceIds: [request.batchResults[0]?.evidenceIds[0] ?? "missing-evidence"],
+          importanceTags: [],
+          importanceReasons: []
+        }]
+      });
+    }
+  };
+
+  await captureEpisode(2);
+  for (let index = 0; index < 3; index += 1) {
+    await runNextLunaWork({
+      runtimeRoot,
+      workerId: "worker-resumed",
+      now: `2026-08-07T12:02:0${String(index)}.000Z`,
+      adapter
+    });
+  }
+
+  await captureEpisode(3);
+  for (let index = 0; index < 3; index += 1) {
+    await runNextLunaWork({
+      runtimeRoot,
+      workerId: "worker-resumed",
+      now: `2026-08-07T13:02:0${String(index)}.000Z`,
+      adapter
+    });
+  }
+
+  expect(consolidationCalls).toBe(2);
+  await expect(listSessionCandidates(runtimeRoot, "resumed-session")).resolves.toHaveLength(2);
+});
+
+test("completed legacy Batch ranges are discovered for consolidation backfill", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-consolidation-backfill-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  for (let index = 0; index < 3; index += 1) {
+    await captureEvent({
+      runtimeRoot,
+      event: {
+        schemaVersion: 1,
+        eventId: `msevent_backfill_${String(index)}`,
+        deduplicationKey: `codex:backfill:${String(index)}`,
+        agent: "codex",
+        eventKind: index === 2 ? "SessionEnd" : "PostToolUse",
+        occurredAt: `2026-08-07T14:00:0${String(index)}.000Z`,
+        projectId: "msproj_backfill",
+        sessionId: "backfill-session",
+        ...(index === 2 ? {} : { turnId: "backfill-turn" }),
+        payload: { index }
+      }
+    });
+  }
+  for (let index = 0; index < 2; index += 1) {
+    await prepareNextDistillationBatch({
+      runtimeRoot,
+      maximumEvents: 2,
+      preparedAt: `2026-08-07T14:01:0${String(index)}.000Z`
+    });
+  }
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare(
+      `UPDATE distillation_batches
+       SET state = 'completed', result_json = ?, completed_at = ?`
+    ).run(
+      JSON.stringify({ schemaVersion: 1, kind: "distillation", candidates: [] }),
+      "2026-08-07T14:02:00.000Z"
+    );
+    database.prepare(
+      `UPDATE luna_operations
+       SET state = 'completed', completed_at = ?, updated_at = ?
+       WHERE operation_kind = 'distill_batch'`
+    ).run("2026-08-07T14:02:00.000Z", "2026-08-07T14:02:00.000Z");
+  } finally {
+    database.close();
+  }
+
+  await expect(prepareNextSessionConsolidation({
+    runtimeRoot,
+    preparedAt: "2026-08-07T14:03:00.000Z"
+  })).resolves.toMatchObject({
+    state: "queued",
+    sessionId: "backfill-session",
+    fromBatchOrdinal: 0,
+    throughBatchOrdinal: 1
+  });
+});
+
+test("a directly ingested single-Batch episode is excluded from later consolidation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-direct-episode-cursor-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const projectId = "msproj_direct_episode";
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent_direct_episode_1",
+      deduplicationKey: "codex:direct-episode:1",
+      agent: "codex",
+      eventKind: "SessionEnd",
+      occurredAt: "2026-08-07T15:00:00.000Z",
+      projectId,
+      sessionId: "direct-episode-session",
+      payload: { episode: 1 }
+    }
+  });
+  await prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 2,
+    preparedAt: "2026-08-07T15:00:01.000Z"
+  });
+
+  let consolidationBatchCount = 0;
+  const adapter: LunaWorkerAdapter = {
+    distillBatch(request) {
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: [{
+          statement: `Episode evidence ${request.evidence[0]?.evidenceId ?? "missing"}`,
+          primaryCategory: "durable_reference",
+          categoryTags: ["durable_reference"],
+          applicabilitySummary: "direct episode",
+          conditions: [],
+          exclusions: [],
+          preservedNegations: [],
+          certainty: "asserted",
+          sensitivity: "normal",
+          evidenceIds: [request.evidence[0]?.evidenceId ?? "missing"],
+          importanceTags: [],
+          importanceReasons: []
+        }]
+      });
+    },
+    consolidateSession(request) {
+      consolidationBatchCount = request.batchResults.length;
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "consolidation",
+        candidates: [{
+          statement: "Episode 2 consolidated knowledge.",
+          primaryCategory: "durable_reference",
+          categoryTags: ["durable_reference"],
+          applicabilitySummary: "direct episode",
+          conditions: [],
+          exclusions: [],
+          preservedNegations: [],
+          certainty: "asserted",
+          sensitivity: "normal",
+          evidenceIds: [request.batchResults[0]?.evidenceIds[0] ?? "missing"],
+          importanceTags: [],
+          importanceReasons: []
+        }]
+      });
+    }
+  };
+  await runNextLunaWork({
+    runtimeRoot,
+    workerId: "worker-direct-episode",
+    now: "2026-08-07T15:00:02.000Z",
+    adapter
+  });
+
+  for (let index = 0; index < 3; index += 1) {
+    await captureEvent({
+      runtimeRoot,
+      event: {
+        schemaVersion: 1,
+        eventId: `msevent_direct_episode_2_${String(index)}`,
+        deduplicationKey: `codex:direct-episode:2:${String(index)}`,
+        agent: "codex",
+        eventKind: index === 2 ? "SessionEnd" : "PostToolUse",
+        occurredAt: `2026-08-07T16:00:0${String(index)}.000Z`,
+        projectId,
+        sessionId: "direct-episode-session",
+        ...(index === 2 ? {} : { turnId: "direct-episode-turn-2" }),
+        payload: { episode: 2, index }
+      }
+    });
+  }
+  for (let index = 0; index < 2; index += 1) {
+    await prepareNextDistillationBatch({
+      runtimeRoot,
+      maximumEvents: 2,
+      preparedAt: `2026-08-07T16:01:0${String(index)}.000Z`
+    });
+  }
+  for (let index = 0; index < 3; index += 1) {
+    await runNextLunaWork({
+      runtimeRoot,
+      workerId: "worker-direct-episode",
+      now: `2026-08-07T16:02:0${String(index)}.000Z`,
+      adapter
+    });
+  }
+
+  expect(consolidationBatchCount).toBe(2);
 });

@@ -42,6 +42,135 @@ export type PrepareCandidateEvaluationResult =
       readonly operationId: string;
     };
 
+export type AdvanceCandidateReevaluationBackfillResult =
+  | { readonly state: "empty" }
+  | {
+      readonly state: "advanced" | "completed";
+      readonly scannedCandidateCount: number;
+      readonly reopenedCandidateCount: number;
+    };
+
+export async function advanceCandidateReevaluationBackfill(request: {
+  readonly runtimeRoot: string;
+  readonly now: string;
+  readonly maximumCandidates?: number;
+}): Promise<AdvanceCandidateReevaluationBackfillResult> {
+  const now = z.iso.datetime().parse(request.now);
+  const maximumCandidates = z.number().int().min(1).max(256).parse(
+    request.maximumCandidates ?? 64
+  );
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const progress = database.prepare(
+        `SELECT state, last_candidate_id
+         FROM candidate_reevaluation_backfill WHERE singleton = 1`
+      ).get();
+      if (progress?.state !== "active") {
+        database.exec("COMMIT");
+        return { state: "empty" };
+      }
+      const lastCandidateId = typeof progress.last_candidate_id === "string"
+        ? progress.last_candidate_id
+        : "";
+      const rows = database.prepare(
+        `SELECT candidate.candidate_id,
+                CASE WHEN
+                  candidate.state = 'waiting'
+                  AND candidate.successful_evaluation_at IS NOT NULL
+                  AND (
+                    SELECT decision.reason
+                    FROM governance_decisions AS decision
+                    WHERE decision.candidate_id = candidate.candidate_id
+                    ORDER BY decision.decided_at DESC, decision.decision_id DESC
+                    LIMIT 1
+                  ) = 'insufficient_evidence'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM candidate_evidence AS evidence
+                    JOIN capture_events AS capture
+                      ON capture.event_id = evidence.evidence_id
+                    WHERE evidence.candidate_id = candidate.candidate_id
+                      AND evidence.evidence_class = 'command_outcome'
+                      AND evidence.integrity = 'intact'
+                      AND evidence.source_truncated = 0
+                      AND evidence.memory_echo = 0
+                      AND evidence.evidence_content_identity IS NOT NULL
+                      AND capture.event_kind = 'PostToolUse'
+                      AND capture.source_truncated = 0
+                      AND capture.whole_content_sha256 = evidence.evidence_content_identity
+                      AND capture.occurred_at = evidence.occurred_at
+                      AND evidence.source_identity =
+                        capture.agent || ':' ||
+                        COALESCE(capture.session_id, 'unknown') || ':' ||
+                        COALESCE(capture.turn_id, capture.event_id)
+                      AND NOT (
+                        evidence.command_text IS NOT NULL
+                        AND length(evidence.command_text) > 0
+                        AND evidence.command_cwd IS NOT NULL
+                        AND evidence.command_cwd LIKE '/%'
+                        AND evidence.command_exit_code IS NOT NULL
+                        AND evidence.command_result_identity IS NOT NULL
+                      )
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM semantic_assessments AS assessment
+                    WHERE assessment.candidate_id = candidate.candidate_id
+                      AND assessment.evidence_generation = candidate.evidence_generation
+                  )
+                THEN 1 ELSE 0 END AS should_reopen
+         FROM memory_candidates AS candidate
+         WHERE candidate.candidate_id > ?
+         ORDER BY candidate.candidate_id
+         LIMIT ?`
+      ).all(lastCandidateId, maximumCandidates);
+      let reopenedCandidateCount = 0;
+      const reopen = database.prepare(
+        `UPDATE memory_candidates
+         SET successful_evaluation_at = NULL, updated_at = ?
+         WHERE candidate_id = ? AND successful_evaluation_at IS NOT NULL`
+      );
+      for (const row of rows) {
+        if (row.should_reopen !== 1) continue;
+        reopenedCandidateCount += Number(
+          reopen.run(now, z.string().parse(row.candidate_id)).changes
+        );
+      }
+      const completed = rows.length < maximumCandidates;
+      const newestCandidateId = rows.length === 0
+        ? lastCandidateId
+        : z.string().parse(rows.at(-1)?.candidate_id);
+      database.prepare(
+        `UPDATE candidate_reevaluation_backfill
+         SET state = ?, last_candidate_id = ?,
+             scanned_candidate_count = scanned_candidate_count + ?,
+             reopened_candidate_count = reopened_candidate_count + ?,
+             updated_at = ?
+         WHERE singleton = 1`
+      ).run(
+        completed ? "completed" : "active",
+        newestCandidateId || null,
+        rows.length,
+        reopenedCandidateCount,
+        now
+      );
+      database.exec("COMMIT");
+      return {
+        state: completed ? "completed" : "advanced",
+        scannedCandidateCount: rows.length,
+        reopenedCandidateCount
+      };
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    database.close();
+  }
+}
+
 export async function prepareNextCandidateEvaluation(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
@@ -177,7 +306,7 @@ async function readPersistedAssessment(
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     const row = database.prepare(
-      `SELECT state, evidence_ids_json, assessed_by
+      `SELECT state, evidence_ids_json, durability_disposition, assessed_by
        FROM semantic_assessments WHERE operation_id = ?`
     ).get(operationId);
     if (row === undefined) return undefined;
@@ -191,6 +320,14 @@ async function readPersistedAssessment(
       evidenceIds: z.array(z.string()).parse(
         JSON.parse(z.string().parse(row.evidence_ids_json))
       ),
+      durabilityDisposition: z.enum([
+        "durable",
+        "task_local",
+        "transient",
+        "no_retention",
+        "uncertain",
+        "legacy_unclassified"
+      ]).parse(row.durability_disposition),
       assessedBy: z.string().parse(row.assessed_by),
       operationId
     };
@@ -253,14 +390,16 @@ export async function runNextCandidateAssessment(request: {
         database.prepare(
           `INSERT INTO semantic_assessments(
              assessment_id, operation_id, candidate_id, state,
-             evidence_ids_json, evidence_generation, assessed_by, assessed_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 'gpt-5.6-luna', ?)`
+             evidence_ids_json, durability_disposition, evidence_generation,
+             assessed_by, assessed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'gpt-5.6-luna', ?)`
         ).run(
           `msassessment_${claimed.operation.operationId}`,
           claimed.operation.operationId,
           payload.candidateId,
           assessment.state,
           JSON.stringify(assessment.evidenceIds),
+          assessment.durabilityDisposition ?? "legacy_unclassified",
           payload.evidenceGeneration,
           request.now
         );

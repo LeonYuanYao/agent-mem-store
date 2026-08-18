@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { captureEvent } from "../../src/capture/index.js";
-import type { EmbeddingAdapter } from "../../src/retrieval/index.js";
+import { enqueueLunaOperation } from "../../src/luna/operations.js";
+import {
+  buildRetrievalIndex,
+  inspectActiveRetrievalIndex,
+  type EmbeddingAdapter
+} from "../../src/retrieval/index.js";
 import { openRuntimeDatabase } from "../../src/runtime/database.js";
 import { writeCanonicalMemory } from "../../src/vault/index.js";
 import { runWorkerOnce, type WorkerAdapters } from "../../src/worker/main.js";
@@ -155,4 +160,88 @@ test("a recent index build blocks a duplicate Worker but a stale building record
     activities: ["retrieval-index:published"]
   });
   expect(attempts).toBe(1);
+});
+
+test("a completed index is coalesced during backlog and refreshes immediately after drain", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-index-worker-backlog-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const builtAt = "2026-08-17T20:00:00.000Z";
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(builtAt));
+  const embedding: EmbeddingAdapter = {
+    identity: {
+      adapterVersion: "backlog-fixture-v1",
+      modelIdentity: "backlog-fixture",
+      artifactSha256: "b".repeat(64),
+      dimensions: 2,
+      normalization: "l2"
+    },
+    embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174801",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174811",
+      body: "The first memory is present in the initial index."
+    })
+  });
+  await buildRetrievalIndex({ runtimeRoot, vaultRoot, adapter: embedding, builtAt });
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174802",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174812",
+      body: "The second memory should wait for a coalesced index refresh."
+    })
+  });
+  const operation = await enqueueLunaOperation({
+    runtimeRoot,
+    kind: "semantic_assessment",
+    idempotencyKey: "retrieval-backlog-fixture",
+    payload: { candidateId: "candidate-fixture" },
+    createdAt: "2026-08-17T20:00:30.000Z"
+  });
+
+  await expect(runWorkerOnce({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "backlog-worker",
+    now: "2026-08-17T20:01:00.000Z",
+    workerStartedAt: builtAt,
+    adapters: { embedding }
+  })).resolves.toEqual({ state: "idle" });
+  await expect(inspectActiveRetrievalIndex(runtimeRoot)).resolves.toMatchObject({
+    documentCount: 1
+  });
+
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare(
+      `UPDATE luna_operations SET state = 'completed', completed_at = ?, updated_at = ?
+       WHERE operation_id = ?`
+    ).run("2026-08-17T20:01:30.000Z", "2026-08-17T20:01:30.000Z", operation.operationId);
+  } finally {
+    database.close();
+  }
+  await expect(runWorkerOnce({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "drained-worker",
+    now: "2026-08-17T20:02:00.000Z",
+    workerStartedAt: builtAt,
+    adapters: { embedding }
+  })).resolves.toEqual({
+    state: "worked",
+    activities: ["retrieval-index:published"]
+  });
+  await expect(inspectActiveRetrievalIndex(runtimeRoot)).resolves.toMatchObject({
+    documentCount: 2
+  });
 });

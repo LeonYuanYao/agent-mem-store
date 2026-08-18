@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, open, readFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 
@@ -34,6 +34,7 @@ export interface CaptureRequest {
   readonly runtimeRoot: string;
   readonly event: CaptureEvent;
   readonly recoverHealthCategory?: "hook_capture";
+  readonly busyTimeoutMilliseconds?: number;
 }
 
 export type CaptureResult =
@@ -93,7 +94,8 @@ async function recordSensitivityFinding(
   runtimeRoot: string,
   event: CaptureEvent,
   finding: Exclude<LocalSensitivityFinding, { readonly state: "normal" }>,
-  state: "blocked_secret" | "quarantined"
+  state: "blocked_secret" | "quarantined",
+  busyTimeoutMilliseconds?: number
 ): Promise<
   Extract<CaptureResult, { readonly state: "blocked_secret" | "quarantined" }>
 > {
@@ -106,7 +108,10 @@ async function recordSensitivityFinding(
   const sourceIdentity = createHmac("sha256", key)
     .update(event.deduplicationKey)
     .digest("hex");
-  const database = await openRuntimeDatabase(runtimeRoot);
+  const database = await openRuntimeDatabase(
+    runtimeRoot,
+    busyTimeoutMilliseconds === undefined ? {} : { busyTimeoutMilliseconds }
+  );
   try {
     database.exec("BEGIN IMMEDIATE");
     try {
@@ -220,7 +225,8 @@ export async function captureEvent(request: CaptureRequest): Promise<CaptureResu
       request.runtimeRoot,
       event,
       sensitivity,
-      "blocked_secret"
+      "blocked_secret",
+      request.busyTimeoutMilliseconds
     );
   }
   if (sensitivity.state === "uncertain") {
@@ -228,7 +234,8 @@ export async function captureEvent(request: CaptureRequest): Promise<CaptureResu
       request.runtimeRoot,
       event,
       sensitivity,
-      "quarantined"
+      "quarantined",
+      request.busyTimeoutMilliseconds
     );
   }
   const sourceBytes = serializedPayload.byteLength;
@@ -236,7 +243,12 @@ export async function captureEvent(request: CaptureRequest): Promise<CaptureResu
   const retainedPayload = retained.payload;
   const sourceTruncated = retained.truncated;
   const segments = segment(retainedPayload);
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRuntimeDatabase(
+    request.runtimeRoot,
+    request.busyTimeoutMilliseconds === undefined
+      ? {}
+      : { busyTimeoutMilliseconds: request.busyTimeoutMilliseconds }
+  );
   const captureSucceededAt = new Date().toISOString();
 
   try {
@@ -645,6 +657,79 @@ export interface RecordCaptureHealthIncidentRequest {
   readonly category: "hook_capture" | "capture_processing";
   readonly errorCode: string;
   readonly occurredAt: string;
+}
+
+const hookSqliteBusyDiagnosticSchema = z.object({
+  schemaVersion: z.literal(1),
+  occurredAt: z.iso.datetime(),
+  eventKind: z.enum([
+    "SessionStart",
+    "UserPromptSubmit",
+    "PostToolUse",
+    "Stop",
+    "SessionEnd"
+  ]),
+  errorCode: z.literal("sqlite_busy")
+});
+
+export interface HookSqliteBusyDiagnosticSummary {
+  readonly count: number;
+  readonly lastOccurredAt: string | null;
+  readonly lastEventKind: string | null;
+}
+
+function hookSqliteBusyDiagnosticPath(runtimeRoot: string): string {
+  return join(runtimeRoot, "state", "hook-sqlite-busy.ndjson");
+}
+
+export async function recordHookSqliteBusyDiagnostic(request: {
+  readonly runtimeRoot: string;
+  readonly occurredAt: string;
+  readonly eventKind: string;
+}): Promise<void> {
+  const diagnostic = hookSqliteBusyDiagnosticSchema.parse({
+    schemaVersion: 1,
+    occurredAt: request.occurredAt,
+    eventKind: request.eventKind,
+    errorCode: "sqlite_busy"
+  });
+  await mkdir(join(request.runtimeRoot, "state"), { recursive: true, mode: 0o700 });
+  await appendFile(
+    hookSqliteBusyDiagnosticPath(request.runtimeRoot),
+    `${JSON.stringify(diagnostic)}\n`,
+    { encoding: "utf8", mode: 0o600 }
+  );
+}
+
+export async function inspectHookSqliteBusyDiagnostics(
+  runtimeRoot: string
+): Promise<HookSqliteBusyDiagnosticSummary> {
+  let source: string;
+  try {
+    source = await readFile(hookSqliteBusyDiagnosticPath(runtimeRoot), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { count: 0, lastOccurredAt: null, lastEventKind: null };
+    }
+    throw error;
+  }
+  const diagnostics = source
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .flatMap((line) => {
+      try {
+        const parsed = hookSqliteBusyDiagnosticSchema.safeParse(JSON.parse(line) as unknown);
+        return parsed.success ? [parsed.data] : [];
+      } catch {
+        return [];
+      }
+    });
+  const last = diagnostics.at(-1);
+  return {
+    count: diagnostics.length,
+    lastOccurredAt: last?.occurredAt ?? null,
+    lastEventKind: last?.eventKind ?? null
+  };
 }
 
 export async function recordCaptureHealthIncident(

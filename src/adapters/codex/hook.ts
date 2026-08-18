@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   captureEvent,
+  recordHookSqliteBusyDiagnostic,
   recordCaptureHealthIncident
 } from "../../capture/index.js";
 import { classifyLocalSensitivity } from "../../contracts/sensitivity.js";
@@ -178,18 +179,21 @@ export async function handleCodexHook(
   request: CodexHookRequest
 ): Promise<CodexHookResult> {
   let eventKind = "unknown";
+  let occurredAt = new Date().toISOString();
   try {
     const input = hookInputSchema.parse(request.input);
     eventKind = input.hook_event_name;
-    const occurredAt = z.iso.datetime().parse(request.receivedAt ?? new Date().toISOString());
+    occurredAt = z.iso.datetime().parse(request.receivedAt ?? occurredAt);
     const identity = hookIdentity(input);
     const project = await resolveProject({
       path: input.cwd,
-      runtimeRoot: request.runtimeRoot
+      runtimeRoot: request.runtimeRoot,
+      busyTimeoutMilliseconds: 400
     });
     const captured = await captureEvent({
       runtimeRoot: request.runtimeRoot,
       recoverHealthCategory: "hook_capture",
+      busyTimeoutMilliseconds: 400,
       event: {
         schemaVersion: 1,
         eventId: identity.eventId,
@@ -222,7 +226,13 @@ export async function handleCodexHook(
     const message = error instanceof Error ? error.message : "";
     const runtimeIsBusy =
       systemCode === "SQLITE_BUSY" || /database is locked|SQLITE_BUSY/iu.test(message);
-    if (!runtimeIsBusy) {
+    if (runtimeIsBusy) {
+      await recordHookSqliteBusyDiagnostic({
+        runtimeRoot: request.runtimeRoot,
+        occurredAt,
+        eventKind
+      }).catch(() => undefined);
+    } else {
       const errorCode = error instanceof z.ZodError
         ? "invalid_hook_input"
         : "capture_unavailable";
