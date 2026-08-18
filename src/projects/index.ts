@@ -496,20 +496,34 @@ export async function resolveProject(
     if (git !== undefined) {
       const match = database
         .prepare(
-          `SELECT p.project_id, p.display_name
+          `SELECT p.project_id, p.display_name, e.common_directory
            FROM project_git_evidence e
            JOIN projects p ON p.project_id = e.project_id
            WHERE e.common_directory = ?
               OR (? IS NOT NULL AND e.origin_identity = ? AND e.basename_key = ?)
-           ORDER BY e.last_used_at DESC
+           ORDER BY CASE WHEN e.common_directory = ? THEN 0 ELSE 1 END,
+                    e.last_used_at DESC
            LIMIT 1`
         )
         .get(
           git.commonDirectory,
           git.originIdentity ?? null,
           git.originIdentity ?? null,
-          git.basenameKey
+          git.basenameKey,
+          git.commonDirectory
         );
+      if (match?.common_directory === git.commonDirectory) {
+        const projectId = z.string().parse(match.project_id);
+        const displayName = z.string().parse(match.display_name);
+        return {
+          status: "resolved",
+          projectId,
+          displayName,
+          source: git.inheritedSubmodule ? "inherited_submodule" : "git",
+          root: git.repositoryRoot,
+          notices: []
+        };
+      }
       const sameBasename = database
         .prepare(
           `SELECT project_id, origin_identity

@@ -729,25 +729,57 @@ export class CodexLunaAdapter {
   public async assessCandidateSemantics(
     request: SemanticAssessmentRequest
   ): Promise<SemanticAssessmentOutput> {
-    const output = await this.#invokeStructured(
+    const aliasByEvidenceId = new Map(
+      request.evidence.map((item, index) => [item.evidenceId, `e${String(index + 1)}`])
+    );
+    const evidenceIdByAlias = new Map(
+      [...aliasByEvidenceId].map(([evidenceId, alias]) => [alias, evidenceId])
+    );
+    const aliasedOutput = await this.#invokeStructured(
       "semantic-assessment-output.schema.json",
       semanticAssessmentOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 2,
+        promptVersion: 3,
         task: "assess_candidate_semantics",
         rules: [
           "Use only supplied evidence.",
           "Return a bounded support state and cite only supplied evidenceIds.",
+          "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Classify durability independently: durable is reusable beyond the current task; task_local is only an instruction for the current task; transient is temporary progress or state; no_retention applies when evidence says not to retain the content; uncertain means durability is not established.",
           "Operational probes and exact-response checks are task_local unless evidence explicitly establishes a reusable rule.",
           "Missing evidence is insufficient_evidence, never approval.",
           "Do not execute commands or invent verification results."
         ],
-        request
+        request: {
+          ...request,
+          evidence: request.evidence.map((item) => ({
+            ...item,
+            evidenceId: aliasByEvidenceId.get(item.evidenceId)
+          }))
+        }
       },
       semanticAssessmentOutputSchema
     );
+    const originalEvidenceIds = new Set(request.evidence.map((item) => item.evidenceId));
+    const restore = (value: string): string => {
+      const evidenceId = evidenceIdByAlias.get(value) ?? (
+        originalEvidenceIds.has(value) ? value : undefined
+      );
+      if (evidenceId === undefined) {
+        throw new LunaInvocationError(
+          "schema_invalid",
+          true,
+          "Luna structured output cites unavailable evidence.",
+          { stage: "evidence_binding", code: "unknown_evidence_alias" }
+        );
+      }
+      return evidenceId;
+    };
+    const output = semanticAssessmentOutputSchema.parse({
+      ...aliasedOutput,
+      evidenceIds: aliasedOutput.evidenceIds.map(restore)
+    });
     requireKnownEvidenceIds(
       output.evidenceIds,
       request.evidence.map((item) => item.evidenceId),

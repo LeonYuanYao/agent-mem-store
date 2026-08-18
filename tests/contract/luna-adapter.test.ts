@@ -624,7 +624,7 @@ test("consolidation and semantic assessment use distinct versioned structured ta
   expect(requests[0]?.standardInput).toContain('"promptVersion":2');
   expect(requests[0]?.standardInput).toContain('"task":"consolidate_session_candidates"');
   expect(requests[0]?.timeoutMilliseconds).toBe(300_000);
-  expect(requests[1]?.standardInput).toContain('"promptVersion":2');
+  expect(requests[1]?.standardInput).toContain('"promptVersion":3');
   expect(requests[1]?.standardInput).toContain('"task":"assess_candidate_semantics"');
   expect(requests[1]?.standardInput).toContain("Classify durability independently");
   expect(requests[1]?.standardInput).toContain("Operational probes and exact-response checks are task_local");
@@ -900,6 +900,52 @@ test("structured output cannot cite evidence that MemStore did not supply", asyn
     exclusions: [],
     evidence: []
   })).rejects.toMatchObject({ category: "schema_invalid", retryable: true });
+});
+
+test("semantic assessment uses short evidence aliases and restores exact source identities", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-semantic-alias-"));
+  temporaryDirectories.push(root);
+  const originalEvidenceId = "msevent_semantic_evidence_identity_that_must_not_be_retyped";
+  let promptSource = "";
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      promptSource = request.standardInput;
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "semantic_assessment",
+          state: "supported",
+          durabilityDisposition: "durable",
+          evidenceIds: ["e1"]
+        }),
+        stderr: ""
+      });
+    }
+  });
+
+  await expect(adapter.assessCandidateSemantics({
+    operationId: "msop-semantic-alias",
+    statement: "Use a stable package manager for this repository.",
+    conditions: [],
+    exclusions: [],
+    evidence: [{
+      evidenceId: originalEvidenceId,
+      evidenceClass: "explicit_user_statement",
+      content: "Use pnpm for this repository.",
+      sourceIdentity: "source-semantic-alias",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  })).resolves.toMatchObject({
+    state: "supported",
+    evidenceIds: [originalEvidenceId]
+  });
+  expect(promptSource).not.toContain(originalEvidenceId);
+  expect(promptSource).toContain('"evidenceId":"e1"');
 });
 
 test("duplicate Luna importance reasons for the same tag are rejected", async () => {

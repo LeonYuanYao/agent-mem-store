@@ -73,21 +73,41 @@ export async function prepareNextDistillationBatch(request: {
   const maximumRetainedBytes = z.number().int().min(64 * 1024).max(900_000).parse(
     request.maximumRetainedBytes ?? 512 * 1024
   );
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const selectionDatabase = await openRuntimeDatabase(request.runtimeRoot);
+  let sessionId: string;
+  let selectedRows: readonly Record<string, unknown>[];
+  let projectId: string | null;
   try {
-    database.exec("BEGIN IMMEDIATE");
-    try {
-      const first = database
-        .prepare(
-          `SELECT event_id, session_id, turn_id, project_id, created_at
+    const first = selectionDatabase
+      .prepare(
+        `WITH pending AS MATERIALIZED (
+           SELECT capture.*,
+                  COALESCE(capture.session_id, 'event:' || capture.event_id)
+                    AS distillation_session_id,
+                  COALESCE(capture.turn_id, 'session') AS distillation_turn_id,
+                  COUNT(*) OVER (
+                    PARTITION BY
+                      COALESCE(capture.session_id, 'event:' || capture.event_id),
+                      COALESCE(capture.turn_id, 'session')
+                  ) AS distillation_event_count,
+                  SUM(capture.retained_bytes) OVER (
+                    PARTITION BY
+                      COALESCE(capture.session_id, 'event:' || capture.event_id),
+                      COALESCE(capture.turn_id, 'session')
+                  ) AS distillation_retained_bytes
            FROM capture_events AS capture
            WHERE capture.state = 'pending'
              AND NOT EXISTS (
                SELECT 1 FROM distillation_batch_events AS assigned
                WHERE assigned.event_id = capture.event_id
              )
-             AND (
-               EXISTS (
+         )
+         SELECT event_id, session_id, turn_id, project_id, created_at
+         FROM pending AS capture
+         WHERE (
+               capture.distillation_event_count >= ?
+               OR capture.distillation_retained_bytes >= ?
+               OR EXISTS (
                  SELECT 1 FROM capture_events AS stopping
                  WHERE stopping.event_kind = 'Stop'
                    AND stopping.session_id = capture.session_id
@@ -97,113 +117,110 @@ export async function prepareNextDistillationBatch(request: {
                  SELECT 1 FROM capture_events AS ending
                  WHERE ending.event_kind = 'SessionEnd'
                    AND COALESCE(ending.session_id, 'event:' || ending.event_id) =
-                     COALESCE(capture.session_id, 'event:' || capture.event_id)
+                     capture.distillation_session_id
                    AND ending.created_at >= capture.created_at
                )
-               OR (
-                 SELECT COUNT(*) FROM capture_events AS checkpoint
-                 WHERE checkpoint.state = 'pending'
-                   AND NOT EXISTS (
-                     SELECT 1 FROM distillation_batch_events AS checkpoint_assigned
-                     WHERE checkpoint_assigned.event_id = checkpoint.event_id
-                   )
-                   AND COALESCE(checkpoint.session_id, 'event:' || checkpoint.event_id) =
-                     COALESCE(capture.session_id, 'event:' || capture.event_id)
-                   AND COALESCE(checkpoint.turn_id, 'session') =
-                     COALESCE(capture.turn_id, 'session')
-               ) >= ?
-               OR (
-                 SELECT COALESCE(SUM(checkpoint.retained_bytes), 0)
-                 FROM capture_events AS checkpoint
-                 WHERE checkpoint.state = 'pending'
-                   AND NOT EXISTS (
-                     SELECT 1 FROM distillation_batch_events AS checkpoint_assigned
-                     WHERE checkpoint_assigned.event_id = checkpoint.event_id
-                   )
-                   AND COALESCE(checkpoint.session_id, 'event:' || checkpoint.event_id) =
-                     COALESCE(capture.session_id, 'event:' || capture.event_id)
-                   AND COALESCE(checkpoint.turn_id, 'session') =
-                     COALESCE(capture.turn_id, 'session')
-               ) >= ?
                OR (
                  capture.occurred_at <= ?
                  AND capture.turn_id IS NULL
                )
              )
-           ORDER BY capture.created_at ASC LIMIT 1`
-        )
-        .get(request.maximumEvents, maximumRetainedBytes, eligibleBefore);
-      if (first === undefined) {
+         ORDER BY capture.created_at ASC LIMIT 1`
+      )
+      .get(request.maximumEvents, maximumRetainedBytes, eligibleBefore);
+    if (first === undefined) return { state: "empty" };
+    const firstEventId = z.string().parse(first.event_id);
+    sessionId =
+      typeof first.session_id === "string"
+        ? first.session_id
+        : `event:${firstEventId}`;
+    const turnId = typeof first.turn_id === "string" ? first.turn_id : null;
+    const firstCreatedAt = z.string().parse(first.created_at);
+    const ending = selectionDatabase
+      .prepare(
+        `SELECT created_at FROM capture_events
+         WHERE event_kind = 'SessionEnd'
+           AND COALESCE(session_id, 'event:' || event_id) = ?
+           AND created_at >= ?
+         ORDER BY created_at ASC
+         LIMIT 1`
+      )
+      .get(sessionId, firstCreatedAt);
+    const sessionEndCutoff = typeof ending?.created_at === "string"
+      ? ending.created_at
+      : null;
+    const rows = selectionDatabase
+      .prepare(
+        `SELECT capture.event_id, capture.project_id, capture.retained_bytes
+         FROM capture_events AS capture
+         WHERE capture.state = 'pending'
+           AND COALESCE(capture.session_id, 'event:' || capture.event_id) = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM distillation_batch_events AS assigned
+             WHERE assigned.event_id = capture.event_id
+           )
+           AND (
+             (? IS NOT NULL AND capture.created_at <= ?)
+             OR (? IS NULL AND capture.turn_id = ?)
+             OR (? IS NULL AND ? IS NULL AND capture.turn_id IS NULL)
+           )
+         ORDER BY capture.created_at ASC LIMIT ?`
+      )
+      .all(
+        sessionId,
+        sessionEndCutoff,
+        sessionEndCutoff,
+        sessionEndCutoff,
+        turnId,
+        sessionEndCutoff,
+        turnId,
+        request.maximumEvents
+      );
+    if (rows.length === 0) throw new Error("Distillation batch selection failed.");
+    const boundedRows: Record<string, unknown>[] = [];
+    let selectedBytes = 0;
+    for (const row of rows) {
+      const retainedBytes = z.number().int().nonnegative().parse(row.retained_bytes);
+      if (
+        boundedRows.length > 0 &&
+        selectedBytes + retainedBytes > maximumRetainedBytes
+      ) {
+        break;
+      }
+      boundedRows.push(row);
+      selectedBytes += retainedBytes;
+    }
+    selectedRows = boundedRows;
+    const projectIds = new Set(
+      selectedRows
+        .map((row) => row.project_id)
+        .filter((value): value is string => typeof value === "string")
+    );
+    projectId = projectIds.size === 1 ? [...projectIds][0] ?? null : null;
+  } finally {
+    selectionDatabase.close();
+  }
+
+  const selectedEventIds = selectedRows.map((row) => z.string().parse(row.event_id));
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const placeholders = selectedEventIds.map(() => "?").join(", ");
+      const available = database.prepare(
+        `SELECT COUNT(*) AS count
+         FROM capture_events AS capture
+         WHERE capture.event_id IN (${placeholders})
+           AND capture.state = 'pending'
+           AND NOT EXISTS (
+             SELECT 1 FROM distillation_batch_events AS assigned
+             WHERE assigned.event_id = capture.event_id
+           )`
+      ).get(...selectedEventIds);
+      if (available?.count !== selectedEventIds.length) {
         database.exec("COMMIT");
         return { state: "empty" };
       }
-      const firstEventId = z.string().parse(first.event_id);
-      const sessionId =
-        typeof first.session_id === "string"
-          ? first.session_id
-          : `event:${firstEventId}`;
-      const turnId = typeof first.turn_id === "string" ? first.turn_id : null;
-      const firstCreatedAt = z.string().parse(first.created_at);
-      const ending = database
-        .prepare(
-          `SELECT created_at FROM capture_events
-           WHERE event_kind = 'SessionEnd'
-             AND COALESCE(session_id, 'event:' || event_id) = ?
-             AND created_at >= ?
-           ORDER BY created_at ASC
-           LIMIT 1`
-        )
-        .get(sessionId, firstCreatedAt);
-      const sessionEndCutoff = typeof ending?.created_at === "string"
-        ? ending.created_at
-        : null;
-      const rows = database
-        .prepare(
-          `SELECT capture.event_id, capture.project_id, capture.retained_bytes
-           FROM capture_events AS capture
-           WHERE capture.state = 'pending'
-             AND COALESCE(capture.session_id, 'event:' || capture.event_id) = ?
-             AND NOT EXISTS (
-               SELECT 1 FROM distillation_batch_events AS assigned
-               WHERE assigned.event_id = capture.event_id
-             )
-             AND (
-               (? IS NOT NULL AND capture.created_at <= ?)
-               OR (? IS NULL AND capture.turn_id = ?)
-               OR (? IS NULL AND ? IS NULL AND capture.turn_id IS NULL)
-             )
-           ORDER BY capture.created_at ASC LIMIT ?`
-        )
-        .all(
-          sessionId,
-          sessionEndCutoff,
-          sessionEndCutoff,
-          sessionEndCutoff,
-          turnId,
-          sessionEndCutoff,
-          turnId,
-          request.maximumEvents
-        );
-      if (rows.length === 0) throw new Error("Distillation batch selection failed.");
-      const selectedRows: Record<string, unknown>[] = [];
-      let selectedBytes = 0;
-      for (const row of rows) {
-        const retainedBytes = z.number().int().nonnegative().parse(row.retained_bytes);
-        if (
-          selectedRows.length > 0 &&
-          selectedBytes + retainedBytes > maximumRetainedBytes
-        ) {
-          break;
-        }
-        selectedRows.push(row);
-        selectedBytes += retainedBytes;
-      }
-      const projectIds = new Set(
-        selectedRows
-          .map((row) => row.project_id)
-          .filter((value): value is string => typeof value === "string")
-      );
-      const projectId = projectIds.size === 1 ? [...projectIds][0] ?? null : null;
       const ordinalRow = database
         .prepare(
           `SELECT COALESCE(MAX(batch_ordinal), -1) + 1 AS next_ordinal
@@ -243,8 +260,8 @@ export async function prepareNextDistillationBatch(request: {
         `INSERT INTO distillation_batch_events(batch_id, event_id, event_ordinal)
          VALUES (?, ?, ?)`
       );
-      selectedRows.forEach((row, index) => {
-        insertEvent.run(batchId, z.string().parse(row.event_id), index);
+      selectedEventIds.forEach((eventId, index) => {
+        insertEvent.run(batchId, eventId, index);
       });
       database.exec("COMMIT");
       return {

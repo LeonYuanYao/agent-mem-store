@@ -18,6 +18,7 @@ import {
   listProjectCollisions,
   resolveProject
 } from "../../../src/projects/index.js";
+import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 
 const temporaryDirectories: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -219,6 +220,29 @@ test("same-basename Git checkouts with the same origin share one Project", async
   });
   if (first.status === "resolved" && second.status === "resolved") {
     expect(second.projectId).toBe(first.projectId);
+  }
+});
+
+test("an already registered Git root resolves without competing for the writer lock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-project-git-read-fast-path-"));
+  temporaryDirectories.push(root);
+  const projectRoot = join(root, "workspace");
+  const runtimeRoot = join(root, "runtime");
+  await execFileAsync("git", ["init", projectRoot]);
+  const first = await resolveProject({ path: projectRoot, runtimeRoot });
+
+  const writer = await openRuntimeDatabase(runtimeRoot);
+  try {
+    writer.exec("BEGIN IMMEDIATE");
+    await expect(resolveProject({
+      path: projectRoot,
+      runtimeRoot,
+      busyTimeoutMilliseconds: 25
+    })).resolves.toEqual(first);
+    writer.exec("ROLLBACK");
+  } finally {
+    if (writer.isTransaction) writer.exec("ROLLBACK");
+    writer.close();
   }
 });
 

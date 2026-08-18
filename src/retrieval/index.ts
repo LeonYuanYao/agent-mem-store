@@ -183,6 +183,8 @@ async function buildRetrievalIndexImpl(request: {
   readonly vaultRoot: string;
   readonly adapter: EmbeddingAdapter;
   readonly builtAt: string;
+  readonly publicationBatchSize: number;
+  readonly onPublicationBatchCommitted?: (publishedDocumentCount: number) => Promise<void>;
 }): Promise<{
   readonly state: "published";
   readonly indexRevisionId: string;
@@ -256,6 +258,41 @@ async function buildRetrievalIndexImpl(request: {
     if (vector === undefined) throw new Error("Retrieval vector is missing.");
     return vector;
   });
+  const documents = memories.map((memory, ordinal) => {
+    const text = texts[ordinal];
+    if (text === undefined) throw new Error("Retrieval text is missing.");
+    const identityLabel = memory.representations.identity?.label;
+    const identityTokenCount = identityLabel === undefined
+      ? 0
+      : tokenizer.encode(identityLabel).length;
+    const compactTokenCount = tokenizer.encode(memory.representations.compact.text).length;
+    const standardTokenCount = tokenizer.encode(memory.representations.standard.text).length;
+    return {
+      ordinal,
+      memory,
+      text,
+      identityLabel: identityLabel ?? null,
+      identityTokenCount,
+      identityValidated:
+        memory.representations.identity?.validated === true &&
+        memory.representations.identity.sourceRevisionId === memory.revisionId &&
+        identityLabel !== undefined &&
+        identityLabel.trim().length > 0 &&
+        identityTokenCount <= 48,
+      compactTokenCount,
+      compactValidated:
+        memory.representations.compact.validated &&
+        memory.representations.compact.sourceRevisionId === memory.revisionId &&
+        memory.representations.compact.text.trim().length > 0 &&
+        compactTokenCount <= 96,
+      standardTokenCount,
+      standardValidated:
+        memory.representations.standard.validated &&
+        memory.representations.standard.sourceRevisionId === memory.revisionId &&
+        memory.representations.standard.text.trim().length > 0 &&
+        standardTokenCount <= 192
+    };
+  });
   const indexRevisionId = `msindex_${randomUUID()}`;
   const indexesRoot = join(request.runtimeRoot, "indexes");
   const stagingDirectory = join(indexesRoot, `.staging-${indexRevisionId}`);
@@ -299,10 +336,9 @@ async function buildRetrievalIndexImpl(request: {
              index_revision_id, state, built_at, selected_at, directory_path,
              manifest_sha256, adapter_version, model_identity, artifact_sha256,
              dimensions, normalization, document_count
-           ) VALUES (?, 'complete', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           ) VALUES (?, 'failed', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
           indexRevisionId,
-          builtAt,
           builtAt,
           finalDirectory,
           manifestSha256,
@@ -317,69 +353,94 @@ async function buildRetrievalIndexImpl(request: {
           `INSERT INTO retrieval_index_sources(index_revision_id, catalog_sha256)
            VALUES (?, ?)`
         ).run(indexRevisionId, sourceCatalogSha256);
-        const insertDocument = database.prepare(
-          `INSERT INTO retrieval_documents(
-             index_revision_id, vector_ordinal, memory_id, revision_id,
-             content_identity, scope_kind, project_id, authority, sensitivity,
-             lifecycle, category, base_priority_tier, session_order_key,
-             importance_tags_json, startup,
-             applicability_summary, applicability_conditions_json,
-             validity_state, valid_from, valid_until, identity_label,
-             identity_validated, identity_token_count, compact_text,
-             compact_validated, compact_token_count, standard_text,
-             standard_validated, standard_token_count, searchable_text, revised_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+
+      const insertDocument = database.prepare(
+        `INSERT INTO retrieval_documents(
+           index_revision_id, vector_ordinal, memory_id, revision_id,
+           content_identity, scope_kind, project_id, authority, sensitivity,
+           lifecycle, category, base_priority_tier, session_order_key,
+           importance_tags_json, startup,
+           applicability_summary, applicability_conditions_json,
+           validity_state, valid_from, valid_until, identity_label,
+           identity_validated, identity_token_count, compact_text,
+           compact_validated, compact_token_count, standard_text,
+           standard_validated, standard_token_count, searchable_text, revised_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      const insertFts = database.prepare(
+        "INSERT INTO fts_memories(index_revision_id, memory_id, searchable_text) VALUES (?, ?, ?)"
+      );
+      let publishedDocumentCount = 0;
+      for (
+        let batchStart = 0;
+        batchStart < documents.length;
+        batchStart += request.publicationBatchSize
+      ) {
+        const batch = documents.slice(
+          batchStart,
+          batchStart + request.publicationBatchSize
         );
-        const insertFts = database.prepare(
-          "INSERT INTO fts_memories(index_revision_id, memory_id, searchable_text) VALUES (?, ?, ?)"
-        );
-        for (const [ordinal, memory] of memories.entries()) {
-          const text = texts[ordinal];
-          if (text === undefined) throw new Error("Retrieval text is missing.");
-          insertDocument.run(
-            indexRevisionId,
-            ordinal,
-            memory.memoryId,
-            memory.revisionId,
-            memory.contentIdentity,
-            memory.scope.kind,
-            memory.scope.kind === "project" ? memory.scope.projectId : null,
-            memory.authority,
-            memory.sensitivity,
-            memory.primaryCategory,
-            basePriorityTier(memory),
-            sessionOrderKey(memory),
-            JSON.stringify(memory.importanceTags),
-            memory.startup,
-            memory.applicability.summary,
-            JSON.stringify(memory.applicability.conditions),
-            memory.validity.state,
-            memory.validity.validFrom ?? null,
-            memory.validity.validUntil ?? null,
-            memory.representations.identity?.label ?? null,
-            memory.representations.identity?.validated === true &&
-              memory.representations.identity.sourceRevisionId === memory.revisionId &&
-              memory.representations.identity.label.trim().length > 0 &&
-              tokenizer.encode(memory.representations.identity.label).length <= 48 ? 1 : 0,
-            memory.representations.identity === undefined
-              ? 0
-              : tokenizer.encode(memory.representations.identity.label).length,
-            memory.representations.compact.text,
-            memory.representations.compact.validated &&
-              memory.representations.compact.sourceRevisionId === memory.revisionId &&
-              memory.representations.compact.text.trim().length > 0 &&
-              tokenizer.encode(memory.representations.compact.text).length <= 96 ? 1 : 0,
-            tokenizer.encode(memory.representations.compact.text).length,
-            memory.representations.standard.text,
-            memory.representations.standard.validated &&
-              memory.representations.standard.sourceRevisionId === memory.revisionId &&
-              memory.representations.standard.text.trim().length > 0 &&
-              tokenizer.encode(memory.representations.standard.text).length <= 192 ? 1 : 0,
-            tokenizer.encode(memory.representations.standard.text).length,
-            text,
-            memory.revisedAt
-          );
-          insertFts.run(indexRevisionId, memory.memoryId, text);
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          for (const document of batch) {
+            const { memory } = document;
+            insertDocument.run(
+              indexRevisionId,
+              document.ordinal,
+              memory.memoryId,
+              memory.revisionId,
+              memory.contentIdentity,
+              memory.scope.kind,
+              memory.scope.kind === "project" ? memory.scope.projectId : null,
+              memory.authority,
+              memory.sensitivity,
+              memory.primaryCategory,
+              basePriorityTier(memory),
+              sessionOrderKey(memory),
+              JSON.stringify(memory.importanceTags),
+              memory.startup,
+              memory.applicability.summary,
+              JSON.stringify(memory.applicability.conditions),
+              memory.validity.state,
+              memory.validity.validFrom ?? null,
+              memory.validity.validUntil ?? null,
+              document.identityLabel,
+              document.identityValidated ? 1 : 0,
+              document.identityTokenCount,
+              memory.representations.compact.text,
+              document.compactValidated ? 1 : 0,
+              document.compactTokenCount,
+              memory.representations.standard.text,
+              document.standardValidated ? 1 : 0,
+              document.standardTokenCount,
+              document.text,
+              memory.revisedAt
+            );
+            insertFts.run(indexRevisionId, memory.memoryId, document.text);
+          }
+          database.exec("COMMIT");
+        } catch (error) {
+          database.exec("ROLLBACK");
+          throw error;
+        }
+        publishedDocumentCount += batch.length;
+        await request.onPublicationBatchCommitted?.(publishedDocumentCount);
+      }
+
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const completed = database.prepare(
+          `UPDATE retrieval_index_revisions
+           SET state = 'complete', selected_at = ?
+           WHERE index_revision_id = ? AND state = 'failed'`
+        ).run(builtAt, indexRevisionId);
+        if (completed.changes !== 1) {
+          throw new Error("Retrieval index revision could not be completed.");
         }
         database.prepare(
           `INSERT INTO active_retrieval_index(singleton, index_revision_id)
@@ -452,6 +513,8 @@ export async function buildRetrievalIndex(request: {
   readonly vaultRoot: string;
   readonly adapter: EmbeddingAdapter;
   readonly builtAt: string;
+  readonly publicationBatchSize?: number;
+  readonly onPublicationBatchCommitted?: (publishedDocumentCount: number) => Promise<void>;
 }): Promise<{
   readonly state: "published";
   readonly indexRevisionId: string;
@@ -476,7 +539,13 @@ export async function buildRetrievalIndex(request: {
     activityDatabase.close();
   }
   try {
-    const result = await buildRetrievalIndexImpl(request);
+    const publicationBatchSize = z.number().int().min(1).max(512).parse(
+      request.publicationBatchSize ?? 64
+    );
+    const result = await buildRetrievalIndexImpl({
+      ...request,
+      publicationBatchSize
+    });
     const completedAt = new Date().toISOString();
     const completionDatabase = await openRuntimeDatabase(request.runtimeRoot);
     try {

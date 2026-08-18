@@ -149,6 +149,11 @@ const migrations: readonly Migration[] = [
     version: 28,
     name: "candidate_durability",
     path: new URL("../../migrations/0028-candidate-durability.sql", import.meta.url)
+  },
+  {
+    version: 29,
+    name: "distillation_selection_indexes",
+    path: new URL("../../migrations/0029-distillation-selection-indexes.sql", import.meta.url)
   }
 ];
 
@@ -227,13 +232,18 @@ export async function openRuntimeDatabase(
     }
   }
 
-  database
-    .prepare(
-      `INSERT OR IGNORE INTO runtime_identity(
-         singleton, runtime_id, created_at
-       ) VALUES (1, ?, ?)`
-    )
-    .run(`msruntime_${randomUUID()}`, new Date().toISOString());
+  const runtimeIdentity = database
+    .prepare("SELECT runtime_id FROM runtime_identity WHERE singleton = 1")
+    .get();
+  if (runtimeIdentity === undefined) {
+    database
+      .prepare(
+        `INSERT INTO runtime_identity(
+           singleton, runtime_id, created_at
+         ) VALUES (1, ?, ?)`
+      )
+      .run(`msruntime_${randomUUID()}`, new Date().toISOString());
+  }
 
   return database;
 }

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 
+import { handleCodexHook } from "../../../src/adapters/codex/hook.js";
 import {
   buildRetrievalIndex,
   inspectActiveRetrievalIndex,
@@ -147,4 +148,75 @@ test("a new index revision embeds only Canonical Memory missing from the compati
     builtAt: "2026-08-07T10:02:00.000Z"
   });
   expect(incompatibleEmbeddingCount).toBe(3);
+});
+
+test("index publication yields between bounded batches while the previous index stays active", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-index-publication-yield-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const firstMemory = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174301",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174311",
+    body: "The foreground capture path must stay available."
+  });
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: firstMemory
+  });
+  const firstIndex = await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter,
+    builtAt: "2026-08-07T11:00:00.000Z"
+  });
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174302",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174312",
+      body: "Retrieval metadata is published in bounded batches."
+    })
+  });
+
+  let capturedDuringPublication = false;
+  const rebuilt = await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter,
+    builtAt: "2026-08-07T11:01:00.000Z",
+    publicationBatchSize: 1,
+    onPublicationBatchCommitted: async (publishedDocumentCount) => {
+      if (publishedDocumentCount !== 1) return;
+      await expect(inspectActiveRetrievalIndex(runtimeRoot)).resolves.toMatchObject({
+        indexRevisionId: firstIndex.indexRevisionId
+      });
+      const capture = await handleCodexHook({
+        runtimeRoot,
+        receivedAt: "2026-08-07T11:01:01.000Z",
+        input: {
+          hook_event_name: "PostToolUse",
+          session_id: "index-publication-session",
+          turn_id: "index-publication-turn",
+          cwd: root,
+          tool_name: "exec_command",
+          tool_use_id: "index-publication-tool",
+          tool_input: { cmd: "git status --short" },
+          tool_response: { exit_code: 0 }
+        }
+      });
+      expect(capture).toMatchObject({ captured: true, state: "captured" });
+      capturedDuringPublication = true;
+    }
+  });
+
+  expect(capturedDuringPublication).toBe(true);
+  await expect(inspectActiveRetrievalIndex(runtimeRoot)).resolves.toMatchObject({
+    indexRevisionId: rebuilt.indexRevisionId,
+    documentCount: 2
+  });
 });
