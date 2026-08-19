@@ -20,6 +20,117 @@ afterEach(async () => {
   );
 });
 
+test("compact generation and fidelity validation use separate constrained Luna calls", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-compact-"));
+  temporaryDirectories.push(root);
+  const prompts: unknown[] = [];
+  const outputs = [
+    {
+      schemaVersion: 1,
+      kind: "compact_generation",
+      items: [{ memoryId: "msmem_1", compactText: "Run typecheck before release." }]
+    },
+    {
+      schemaVersion: 1,
+      kind: "compact_validation",
+      items: [{
+        memoryId: "msmem_1",
+        state: "preserves",
+        reasonCode: "all_material_facts_preserved"
+      }]
+    }
+  ];
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      prompts.push(JSON.parse(request.standardInput) as unknown);
+      const output = outputs.shift();
+      if (output === undefined) throw new Error("Unexpected Luna call.");
+      return Promise.resolve({ exitCode: 0, stdout: JSON.stringify(output), stderr: "" });
+    }
+  });
+  const memory = {
+    memoryId: "msmem_1",
+    revisionId: "msrev_1",
+    body: "Run typecheck before release.",
+    applicability: { summary: "Releases", conditions: [] },
+    semanticContract: {
+      schemaVersion: 1 as const,
+      claims: ["Run typecheck before release."],
+      conditions: [],
+      exclusions: [],
+      preservedNegations: []
+    }
+  };
+
+  await expect(adapter.generateCompacts({
+    operationId: "generation-1",
+    memories: [memory]
+  })).resolves.toMatchObject({ kind: "compact_generation" });
+  await expect(adapter.validateCompacts({
+    operationId: "validation-1",
+    memories: [{ ...memory, compactText: "Run typecheck before release." }]
+  })).resolves.toMatchObject({ kind: "compact_validation" });
+
+  expect(prompts).toHaveLength(2);
+  expect(prompts[0]).toMatchObject({ task: "generate_compact_memory_representations" });
+  expect(prompts[1]).toMatchObject({ task: "validate_compact_memory_fidelity" });
+});
+
+test("duplicate assessment returns only a bounded decision for supplied cluster identities", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-duplicates-"));
+  temporaryDirectories.push(root);
+  let prompt: unknown;
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      prompt = JSON.parse(request.standardInput) as unknown;
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "duplicate_assessment",
+          items: [{
+            clusterId: "msdupe_1",
+            decision: "equivalent",
+            reasonCode: "same_claim_same_applicability"
+          }]
+        }),
+        stderr: ""
+      });
+    }
+  });
+  const side = {
+    memoryId: "msmem_1",
+    revisionId: "msrev_1",
+    body: "Run typecheck before release.",
+    scope: { kind: "global" as const },
+    applicability: { summary: "Releases", conditions: [] },
+    semanticContract: {
+      schemaVersion: 1 as const,
+      claims: ["Run typecheck before release."],
+      conditions: [],
+      exclusions: [],
+      preservedNegations: []
+    }
+  };
+
+  await expect(adapter.assessDuplicateClusters({
+    operationId: "duplicate-1",
+    clusters: [{
+      clusterId: "msdupe_1",
+      similarity: 0.95,
+      left: side,
+      right: { ...side, memoryId: "msmem_2", revisionId: "msrev_2" }
+    }]
+  })).resolves.toMatchObject({ kind: "duplicate_assessment" });
+  expect(prompt).toMatchObject({ task: "assess_memory_duplicate_clusters" });
+});
+
 test("the Luna adapter makes the running Node executable discoverable in a restricted Worker PATH", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-path-"));
   temporaryDirectories.push(root);
@@ -504,6 +615,42 @@ test("an API invalid_json_schema response is classified as a visible non-retryab
 
   await expect(adapter.assessCandidateSemantics({
     operationId: "schema-failure",
+    statement: "A claim.",
+    conditions: [],
+    exclusions: [],
+    evidence: []
+  })).rejects.toMatchObject({
+    category: "invalid_configuration",
+    retryable: false
+  });
+});
+
+test("an uppercase Codex ERROR block preserves the invalid JSON schema classification", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-api-schema-uppercase-"));
+  temporaryDirectories.push(root);
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 1,
+      stdout: "",
+      stderr: [
+        "request failed",
+        "ERROR: {",
+        "  \"error\": {",
+        "    \"code\": \"invalid_json_schema\",",
+        "    \"message\": \"Schema must have a type key.\",",
+        "    \"param\": \"text.format.schema\"",
+        "  },",
+        "  \"status\": 400",
+        "}"
+      ].join("\n")
+    })
+  });
+
+  await expect(adapter.assessCandidateSemantics({
+    operationId: "schema-failure-uppercase",
     statement: "A claim.",
     conditions: [],
     exclusions: [],

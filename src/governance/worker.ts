@@ -48,6 +48,7 @@ interface RunRow {
   readonly coverageThrough: string;
   readonly currentPhase: "weekly" | "monthly" | "finalize";
   readonly attemptCount: number;
+  readonly consecutiveFailureCount: number;
 }
 
 function parseRun(row: Record<string, unknown>): RunRow {
@@ -60,7 +61,8 @@ function parseRun(row: Record<string, unknown>): RunRow {
     monthlyFrom: z.string().nullable().parse(row.monthly_from),
     coverageThrough: z.iso.datetime().parse(row.coverage_through),
     currentPhase: z.enum(["weekly", "monthly", "finalize"]).parse(row.current_phase),
-    attemptCount: z.number().int().nonnegative().parse(row.attempt_count)
+    attemptCount: z.number().int().nonnegative().parse(row.attempt_count),
+    consecutiveFailureCount: z.number().int().nonnegative().parse(row.consecutive_failure_count)
   };
 }
 
@@ -110,25 +112,62 @@ async function loadAuditSignals(
     const duplicateRows = activeIndexRevisionId === null
       ? []
       : database.prepare(
-          `SELECT standard_text, memory_id FROM retrieval_documents
+          `SELECT standard_text, memory_id, scope_kind, project_id,
+                  applicability_summary, applicability_conditions_json
+           FROM retrieval_documents
            WHERE index_revision_id = ? ORDER BY standard_text, memory_id`
         ).all(activeIndexRevisionId);
     const duplicateMap = new Map<string, string[]>();
     for (const row of duplicateRows) {
-      const text = z.string().parse(row.standard_text).trim().toLocaleLowerCase("en-US");
-      const ids = duplicateMap.get(text) ?? [];
+      const key = JSON.stringify({
+        text: z.string().parse(row.standard_text).trim().toLocaleLowerCase("en-US"),
+        scope: row.scope_kind === "global"
+          ? "global"
+          : `project:${z.string().parse(row.project_id)}`,
+        applicabilitySummary: z.string().parse(row.applicability_summary),
+        applicabilityConditions: z.array(z.string()).parse(
+          JSON.parse(z.string().parse(row.applicability_conditions_json))
+        )
+      });
+      const ids = duplicateMap.get(key) ?? [];
       ids.push(z.string().parse(row.memory_id));
-      duplicateMap.set(text, ids);
+      duplicateMap.set(key, ids);
     }
     const exactDuplicateGroups = [...duplicateMap.values()]
       .filter((ids) => ids.length > 1)
       .slice(0, 100);
+    const reviewedDuplicateClusters = database.prepare(
+      `SELECT cluster.cluster_id, cluster.left_memory_id, cluster.right_memory_id,
+              cluster.decision, cluster.reason_code
+       FROM memory_duplicate_clusters AS cluster
+       JOIN memory_catalog AS left_memory ON left_memory.memory_id = cluster.left_memory_id
+       JOIN memory_catalog AS right_memory ON right_memory.memory_id = cluster.right_memory_id
+       WHERE cluster.state = 'completed'
+         AND cluster.decision IN (
+           'equivalent', 'left_subsumes_right', 'right_subsumes_left', 'conflicts'
+         )
+         AND left_memory.current_revision_id = cluster.left_revision_id
+         AND right_memory.current_revision_id = cluster.right_revision_id
+         AND left_memory.lifecycle = 'active' AND right_memory.lifecycle = 'active'
+       ORDER BY cluster.completed_at DESC, cluster.cluster_id LIMIT 100`
+    ).all().map((row) => ({
+      clusterId: z.string().parse(row.cluster_id),
+      memoryIds: [
+        z.string().parse(row.left_memory_id),
+        z.string().parse(row.right_memory_id)
+      ] as const,
+      decision: z.enum([
+        "equivalent", "left_subsumes_right", "right_subsumes_left", "conflicts"
+      ]).parse(row.decision),
+      reasonCode: z.string().parse(row.reason_code)
+    }));
     const health = database.prepare(
       "SELECT state FROM luna_health_state WHERE singleton = 1"
     ).get();
     return {
       brokenRelationshipTargets,
       exactDuplicateGroups,
+      reviewedDuplicateClusters,
       openVaultConflictCount: count("SELECT COUNT(*) AS count FROM vault_conflicts WHERE state = 'open'"),
       persistentHighValueAnomalyCount: count(
         "SELECT COUNT(*) AS count FROM high_value_anomalies WHERE state = 'persistent'"
@@ -324,6 +363,8 @@ async function applyAgentAction(request: {
     desiredStateAlreadyPresent = source.lifecycle === "archived" &&
       source.successorMemoryId === request.action.successorMemoryId &&
       source.lifecycleDetails.reason?.startsWith(`governance:${request.runId}:`) === true;
+  } else if (request.action.kind === "mark_review_due") {
+    desiredStateAlreadyPresent = source.validity.state === "review_due";
   } else {
     const relationshipType = request.action.relationshipType;
     const targetMemoryId = request.action.targetMemoryId;
@@ -389,6 +430,18 @@ async function applyAgentAction(request: {
       }
     });
     result = { state: "superseded", successorMemoryId: successor.memoryId };
+  } else if (request.action.kind === "mark_review_due") {
+    await writeAgentRevision({
+      runtimeRoot: request.runtimeRoot,
+      vaultRoot: request.vaultRoot,
+      current: source,
+      runId: request.runId,
+      revisedAt: request.coverageThrough,
+      changes: {
+        validity: { ...source.validity, state: "review_due" }
+      }
+    });
+    result = { state: "review_due" };
   } else {
     const relationshipType = request.action.relationshipType;
     const targetMemoryId = request.action.targetMemoryId;
@@ -580,6 +633,7 @@ export async function runNextGovernanceStep(request: {
   readonly adapter: GovernanceAdapter;
   readonly workerId?: string;
   readonly modelLeaseSeconds?: number;
+  readonly foregroundTurnCompleted?: boolean;
 }): Promise<StepResult> {
   const now = z.iso.datetime().parse(request.now);
   const workerId = z.string().min(1).parse(request.workerId ?? `worker-${String(process.pid)}`);
@@ -599,6 +653,13 @@ export async function runNextGovernanceStep(request: {
         typeof row.next_retry_at === "string" && row.next_retry_at > now) {
       return { state: "idle" };
     }
+    const overdueRetry = run.state === "retrying" &&
+      typeof row.next_retry_at === "string" && row.next_retry_at <= now;
+    const reviewedCheckpoint = database.prepare(
+      `SELECT 1 FROM governance_checkpoints
+       WHERE run_id = ? AND phase = ? AND state = 'reviewed'
+       LIMIT 1`
+    ).get(run.runId, run.currentPhase);
     const backlog = database.prepare(
       `SELECT 1 FROM capture_events
        WHERE state IN ('pending', 'processing', 'retrying') LIMIT 1`
@@ -607,7 +668,9 @@ export async function runNextGovernanceStep(request: {
       `SELECT 1 FROM retrieval_index_build_activity
        WHERE singleton = 1 AND state = 'building' AND lease_until > ?`
     ).get(now);
-    if (backlog !== undefined || indexBacklog !== undefined) {
+    if (indexBacklog !== undefined ||
+        (backlog !== undefined && request.foregroundTurnCompleted !== true &&
+          !overdueRetry && reviewedCheckpoint === undefined)) {
       return { state: "yielded", reason: "foreground_backlog" };
     }
   } finally {
@@ -778,13 +841,25 @@ export async function runNextGovernanceStep(request: {
     const outputSource = JSON.stringify(output);
     const resultDatabase = await openRuntimeDatabase(request.runtimeRoot);
     try {
-      const updated = resultDatabase.prepare(
-        `UPDATE governance_checkpoints
-         SET state = 'reviewed', output_json = ?, output_sha256 = ?,
-             lease_token = NULL, leased_by = NULL, lease_until = NULL
-         WHERE checkpoint_id = ? AND state = 'model_processing' AND lease_token = ?`
-      ).run(outputSource, sha256(outputSource), checkpointId, checkpointLeaseToken);
-      if (updated.changes !== 1) throw new Error("Governance model lease was lost.");
+      resultDatabase.exec("BEGIN IMMEDIATE");
+      try {
+        const updated = resultDatabase.prepare(
+          `UPDATE governance_checkpoints
+           SET state = 'reviewed', output_json = ?, output_sha256 = ?,
+               lease_token = NULL, leased_by = NULL, lease_until = NULL
+           WHERE checkpoint_id = ? AND state = 'model_processing' AND lease_token = ?`
+        ).run(outputSource, sha256(outputSource), checkpointId, checkpointLeaseToken);
+        if (updated.changes !== 1) throw new Error("Governance model lease was lost.");
+        resultDatabase.prepare(
+          `UPDATE governance_runs
+           SET consecutive_failure_count = 0, last_error_category = NULL, updated_at = ?
+           WHERE run_id = ?`
+        ).run(now, run.runId);
+        resultDatabase.exec("COMMIT");
+      } catch (error) {
+        resultDatabase.exec("ROLLBACK");
+        throw error;
+      }
     } finally {
       resultDatabase.close();
     }
@@ -799,10 +874,11 @@ export async function runNextGovernanceStep(request: {
     const invocationError = error instanceof LunaInvocationError
       ? error
       : new LunaInvocationError("schema_invalid", true, "Governance output failed local validation.");
+    const failureAttemptCount = run.consecutiveFailureCount + 1;
     const failure = await recordLunaWorkFailure({
       runtimeRoot: request.runtimeRoot,
       workId: `${run.runId}:${input.phase}:${String(input.pageOrdinal)}`,
-      attemptCount: run.attemptCount + 1,
+      attemptCount: failureAttemptCount,
       failedAt: now,
       error: invocationError
     });
@@ -816,8 +892,16 @@ export async function runNextGovernanceStep(request: {
       ).run(checkpointId, checkpointLeaseToken);
       failureDatabase.prepare(
         `UPDATE governance_runs SET state = ?, next_retry_at = ?,
-         last_error_category = ?, updated_at = ? WHERE run_id = ?`
-      ).run(failure.state, failure.nextRetryAt, invocationError.category, now, run.runId);
+         last_error_category = ?, consecutive_failure_count = ?, updated_at = ?
+         WHERE run_id = ?`
+      ).run(
+        failure.state,
+        failure.nextRetryAt,
+        invocationError.category,
+        failureAttemptCount,
+        now,
+        run.runId
+      );
       failureDatabase.exec("COMMIT");
     } catch (databaseError) {
       failureDatabase.exec("ROLLBACK");

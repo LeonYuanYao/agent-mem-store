@@ -154,6 +154,36 @@ const migrations: readonly Migration[] = [
     version: 29,
     name: "distillation_selection_indexes",
     path: new URL("../../migrations/0029-distillation-selection-indexes.sql", import.meta.url)
+  },
+  {
+    version: 30,
+    name: "memory_quality_pipeline",
+    path: new URL("../../migrations/0030-memory-quality-pipeline.sql", import.meta.url)
+  },
+  {
+    version: 31,
+    name: "memory_duplicate_clusters",
+    path: new URL("../../migrations/0031-memory-duplicate-clusters.sql", import.meta.url)
+  },
+  {
+    version: 32,
+    name: "duplicate_discovery_schedule",
+    path: new URL("../../migrations/0032-duplicate-discovery-schedule.sql", import.meta.url)
+  },
+  {
+    version: 33,
+    name: "governance_review_due_action",
+    path: new URL("../../migrations/0033-governance-review-due-action.sql", import.meta.url)
+  },
+  {
+    version: 34,
+    name: "memory_quality_schedule",
+    path: new URL("../../migrations/0034-memory-quality-schedule.sql", import.meta.url)
+  },
+  {
+    version: 35,
+    name: "governance_retry_epochs",
+    path: new URL("../../migrations/0035-governance-retry-epochs.sql", import.meta.url)
   }
 ];
 

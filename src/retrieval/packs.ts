@@ -39,6 +39,7 @@ interface IndexedMemory {
   readonly applicabilityConditions: readonly string[];
   readonly validFrom?: string;
   readonly validUntil?: string;
+  readonly validityState: "valid" | "review_due";
   readonly identityLabel?: string;
   readonly identityValidated: boolean;
   readonly identityTokenCount: number;
@@ -99,6 +100,7 @@ function rowToMemory(row: Record<string, unknown>): IndexedMemory {
     ),
     ...(typeof row.valid_from === "string" ? { validFrom: row.valid_from } : {}),
     ...(typeof row.valid_until === "string" ? { validUntil: row.valid_until } : {}),
+    validityState: z.enum(["valid", "review_due"]).parse(row.validity_state),
     ...(typeof row.identity_label === "string" ? { identityLabel: row.identity_label } : {}),
     identityValidated: row.identity_validated === 1,
     identityTokenCount: z.number().int().nonnegative().parse(row.identity_token_count),
@@ -111,6 +113,10 @@ function rowToMemory(row: Record<string, unknown>): IndexedMemory {
     searchableText: z.string().parse(row.searchable_text),
     vectorOrdinal: z.number().int().nonnegative().parse(row.vector_ordinal)
   };
+}
+
+function eligibleForAutomaticRecall(memory: IndexedMemory): boolean {
+  return !(memory.authority === "agent_derived" && memory.validityState === "review_due");
 }
 
 function tierFor(memory: IndexedMemory, projectId: string): PriorityTier {
@@ -214,7 +220,7 @@ async function visitPagedSessionCandidates(request: {
             );
             bucketPageCount += 1;
             rowsExamined += pageRows.length;
-            bucket.queue.push(...pageRows.map((row) => rowToMemory(row)));
+            bucket.queue.push(...pageRows.map((row) => rowToMemory(row)).filter(eligibleForAutomaticRecall));
             bucket.exhausted = pageRows.length < SESSION_BUCKET_PAGE_SIZE;
             const last = pageRows.at(-1);
             if (last !== undefined) bucket.cursor = z.string().parse(last.session_order_key);
@@ -313,6 +319,7 @@ async function loadActiveScope(request: {
        ORDER BY memory_id`
     ).all(indexRevisionId, request.projectId);
     const memories = rows.map((row) => rowToMemory(row)).filter((memory) =>
+      eligibleForAutomaticRecall(memory) &&
       (memory.validFrom === undefined || memory.validFrom <= request.requestedAt) &&
       (memory.validUntil === undefined || memory.validUntil >= request.requestedAt)
     );

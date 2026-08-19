@@ -135,6 +135,7 @@ test("the uninstalled Shadow loop reaches review without injecting or touching g
         schemaVersion: 1 as const,
         kind: "semantic_assessment" as const,
         state: "supported" as const,
+        durabilityDisposition: "durable" as const,
         evidenceIds: request.evidence.map((item) => item.evidenceId)
       });
     },

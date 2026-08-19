@@ -184,6 +184,62 @@ test("explicit recall excludes knowledge outside its validity window", async () 
   expect(result.items).toEqual([]);
 });
 
+test("explicit recall keeps Agent-derived review-due knowledge readable with a warning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-recall-review-due-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const memoryId = "msmem_123e4567-e89b-42d3-a456-426614174206";
+  await writeCanonicalMemory({
+    vaultRoot,
+    runtimeRoot,
+    actor: "agent",
+    memory: makeCanonicalMemory({
+      memoryId,
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174216",
+      scope: { kind: "project", projectId: projectA },
+      authority: "agent_derived",
+      body: "Use SQLite WAL for this durable local queue.",
+      compact: "Use SQLite WAL for this durable local queue.",
+      validity: { state: "review_due" }
+    })
+  });
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter,
+    builtAt: "2026-08-07T10:00:00.000Z"
+  });
+
+  const search = await recallSearch({
+    runtimeRoot,
+    vaultRoot,
+    query: "SQLite WAL durable local queue",
+    scope: "current",
+    currentProjectId: projectA,
+    callerIdentity: "codex:test-session",
+    adapter,
+    requestedAt: "2026-08-07T10:01:00.000Z"
+  });
+  expect(search.items).toEqual([
+    expect.objectContaining({
+      memoryId,
+      warnings: ["agent_derived_review_due"]
+    })
+  ]);
+
+  const shown = await recallShow({
+    runtimeRoot,
+    vaultRoot,
+    memoryId,
+    detail: "full",
+    callerIdentity: "codex:test-session",
+    requestedAt: "2026-08-07T10:01:01.000Z"
+  });
+  expect(shown.warning).toContain("review is due");
+  expect(shown.body).toBe("Use SQLite WAL for this durable local queue.");
+});
+
 test("current Project scope cannot admit a Memory without an independent relevance match", async () => {
   const roots = await createIndexedFixture();
 

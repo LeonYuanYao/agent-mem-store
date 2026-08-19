@@ -422,7 +422,8 @@ export async function recordLunaWorkFailure(request: {
 }): Promise<{ readonly state: "retrying" | "blocked"; readonly nextRetryAt: string | null }> {
   const failedAt = z.iso.datetime().parse(request.failedAt);
   const attemptCount = z.number().int().positive().parse(request.attemptCount);
-  const nextRetryAt = request.error.retryable
+  const automaticRetry = canAutomaticallyRetry(request.error.retryable, attemptCount);
+  const nextRetryAt = automaticRetry
     ? calculateRetryAt(z.string().min(1).parse(request.workId), attemptCount, failedAt)
     : null;
   const database = await openRuntimeDatabase(request.runtimeRoot);
@@ -438,7 +439,7 @@ export async function recordLunaWorkFailure(request: {
   } finally {
     database.close();
   }
-  return { state: request.error.retryable ? "retrying" : "blocked", nextRetryAt };
+  return { state: automaticRetry ? "retrying" : "blocked", nextRetryAt };
 }
 
 export async function recordLunaWorkSuccess(request: {

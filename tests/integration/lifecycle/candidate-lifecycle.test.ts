@@ -128,6 +128,7 @@ async function runDurableAssessment(request: {
         schemaVersion: 1,
         kind: "semantic_assessment",
         state: request.state,
+        durabilityDisposition: "durable",
         evidenceIds: [...request.evidenceIds]
       })
     }
@@ -206,6 +207,15 @@ test("a Candidate stays outside recall until the deterministic Promotion Gate co
   expect(concurrentStateChangeBlocked).toBe(true);
   expect(evaluated).toMatchObject({ state: "promoted" });
   if (evaluated.state !== "promoted") throw new Error("Expected promotion.");
+  const promotedMemory = await readCanonicalMemory({
+    ...roots,
+    memoryId: evaluated.memoryId
+  });
+  expect(promotedMemory?.memory.representations.compact).toMatchObject({
+    text: candidate.statement,
+    validated: true,
+    sourceRevisionId: promotedMemory?.memory.revisionId
+  });
   await expect(listRecallEligibleMemoryIds(roots.runtimeRoot)).resolves.toEqual([
     evaluated.memoryId
   ]);

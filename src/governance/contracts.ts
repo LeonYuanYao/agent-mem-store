@@ -18,6 +18,12 @@ export const governanceAgentActionSchema = z.discriminatedUnion("kind", [
     evidenceRefs: evidenceRefsSchema
   }),
   z.object({
+    kind: z.literal("mark_review_due"),
+    targetMemoryId: z.string().min(1),
+    reason: z.string().min(1).max(1024),
+    evidenceRefs: evidenceRefsSchema
+  }),
+  z.object({
     kind: z.literal("add_relationship"),
     sourceMemoryId: z.string().min(1),
     targetMemoryId: z.string().min(1),
@@ -55,18 +61,18 @@ export const governanceOutputJsonSchema = {
     "futurePurgeObligations", "summaryItems"
   ],
   properties: {
-    schemaVersion: { const: 1 },
-    kind: { const: "governance_page_review" },
+    schemaVersion: { type: "integer", const: 1 },
+    kind: { type: "string", const: "governance_page_review" },
     agentActions: {
       type: "array",
       maxItems: 100,
       items: {
-        oneOf: [
+        anyOf: [
           {
             type: "object", additionalProperties: false,
             required: ["kind", "targetMemoryId", "reason", "evidenceRefs"],
             properties: {
-              kind: { const: "archive" }, targetMemoryId: { type: "string", minLength: 1 },
+              kind: { type: "string", const: "archive" }, targetMemoryId: { type: "string", minLength: 1 },
               reason: { type: "string", minLength: 1, maxLength: 1024 },
               evidenceRefs: { type: "array", minItems: 1, maxItems: 16, items: { type: "string", minLength: 1, maxLength: 512 } }
             }
@@ -75,8 +81,17 @@ export const governanceOutputJsonSchema = {
             type: "object", additionalProperties: false,
             required: ["kind", "targetMemoryId", "successorMemoryId", "reason", "evidenceRefs"],
             properties: {
-              kind: { const: "supersede" }, targetMemoryId: { type: "string", minLength: 1 },
+              kind: { type: "string", const: "supersede" }, targetMemoryId: { type: "string", minLength: 1 },
               successorMemoryId: { type: "string", minLength: 1 },
+              reason: { type: "string", minLength: 1, maxLength: 1024 },
+              evidenceRefs: { type: "array", minItems: 1, maxItems: 16, items: { type: "string", minLength: 1, maxLength: 512 } }
+            }
+          },
+          {
+            type: "object", additionalProperties: false,
+            required: ["kind", "targetMemoryId", "reason", "evidenceRefs"],
+            properties: {
+              kind: { type: "string", const: "mark_review_due" }, targetMemoryId: { type: "string", minLength: 1 },
               reason: { type: "string", minLength: 1, maxLength: 1024 },
               evidenceRefs: { type: "array", minItems: 1, maxItems: 16, items: { type: "string", minLength: 1, maxLength: 512 } }
             }
@@ -85,7 +100,7 @@ export const governanceOutputJsonSchema = {
             type: "object", additionalProperties: false,
             required: ["kind", "sourceMemoryId", "targetMemoryId", "relationshipType", "reason", "evidenceRefs"],
             properties: {
-              kind: { const: "add_relationship" }, sourceMemoryId: { type: "string", minLength: 1 },
+              kind: { type: "string", const: "add_relationship" }, sourceMemoryId: { type: "string", minLength: 1 },
               targetMemoryId: { type: "string", minLength: 1 }, relationshipType: { type: "string", minLength: 1, maxLength: 128 },
               reason: { type: "string", minLength: 1, maxLength: 1024 },
               evidenceRefs: { type: "array", minItems: 1, maxItems: 16, items: { type: "string", minLength: 1, maxLength: 512 } }
@@ -143,6 +158,12 @@ export interface GovernanceMemoryInput {
 export interface GovernanceAuditSignals {
   readonly brokenRelationshipTargets: readonly string[];
   readonly exactDuplicateGroups: readonly (readonly string[])[];
+  readonly reviewedDuplicateClusters: readonly {
+    readonly clusterId: string;
+    readonly memoryIds: readonly [string, string];
+    readonly decision: "equivalent" | "left_subsumes_right" | "right_subsumes_left" | "conflicts";
+    readonly reasonCode: string;
+  }[];
   readonly openVaultConflictCount: number;
   readonly persistentHighValueAnomalyCount: number;
   readonly openBadCaseCount: number;

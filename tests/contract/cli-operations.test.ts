@@ -87,3 +87,25 @@ test("Shadow status is reachable through the public CLI", async () => {
     command: "shadow.status"
   });
 });
+
+test("quality pipeline preview and status are reachable through the public CLI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-cli-quality-status-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  const common = ["--runtime", runtimeRoot, "--vault", vaultRoot, "--json"];
+
+  await expect(cli(["quality", "compact-backfill", "--preview", ...common])).resolves.toMatchObject({
+    command: "quality.compact-backfill",
+    result: { state: "preview", eligibleCount: 0, enqueuedCount: 0 }
+  });
+  await expect(cli(["quality", "status", ...common])).resolves.toMatchObject({
+    command: "quality.status",
+    result: { totalCount: 0, pendingCount: 0 }
+  });
+  await expect(cli(["quality", "duplicate-status", ...common])).resolves.toMatchObject({
+    command: "quality.duplicate-status",
+    result: { totalCount: 0, pendingCount: 0 }
+  });
+}, 15_000);

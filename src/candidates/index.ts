@@ -12,6 +12,7 @@ import {
   selectPrimaryCategory,
   type MemoryCategory
 } from "../memories/categories.js";
+import { assessExactCompact } from "../memories/representations.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import {
   readCanonicalMemory,
@@ -822,6 +823,12 @@ function canonicalFromCandidate(request: {
 }): CanonicalMemory {
   const memoryId = request.memoryId;
   const revisionId = request.revisionId;
+  const compact = assessExactCompact({
+    body: request.candidate.statement,
+    conditions: request.candidate.conditions,
+    exclusions: request.candidate.exclusions,
+    preservedNegations: request.candidate.preservedNegations
+  });
   return {
     schemaVersion: 1,
     memoryId,
@@ -852,11 +859,11 @@ function canonicalFromCandidate(request: {
     },
     representations: {
       compact: {
-        text: request.candidate.statement,
-        validated: false,
+        text: compact.text,
+        validated: compact.validated,
         generatorIdentity: "gpt-5.6-luna",
         sourceRevisionId: revisionId,
-        renderedTokenCount: tokenEstimate(request.candidate.statement)
+        renderedTokenCount: compact.renderedTokenCount
       },
       standard: {
         text: request.candidate.statement,
@@ -1165,8 +1172,8 @@ export async function evaluateCandidate(request: {
       evaluatedAt
     );
   }
-  if (onlyExplicitUserEvidence && !hasStableExplicitUserClassification) {
-    const disposition = semanticAssessment?.durabilityDisposition ?? "legacy_unclassified";
+  if (semanticAssessment !== undefined) {
+    const disposition = semanticAssessment.durabilityDisposition ?? "legacy_unclassified";
     if (["task_local", "transient", "no_retention"].includes(disposition)) {
       return commitNonPromotion(
         request.runtimeRoot,
@@ -1177,12 +1184,14 @@ export async function evaluateCandidate(request: {
         true
       );
     }
-    if (disposition === "uncertain") {
+    if (disposition === "uncertain" || disposition === "legacy_unclassified") {
       return commitNonPromotion(
         request.runtimeRoot,
         request.candidateId,
         "wait",
-        "durability_uncertain",
+        disposition === "uncertain"
+          ? "durability_uncertain"
+          : "durability_assessment_required",
         evaluatedAt,
         true
       );

@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 
 import { captureEvent, inspectCaptureEventState } from "../../src/capture/index.js";
 import { listSessionCandidates } from "../../src/candidates/index.js";
@@ -17,6 +17,7 @@ import { openRuntimeDatabase } from "../../src/runtime/database.js";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       rm(directory, { recursive: true, force: true })
@@ -266,6 +267,52 @@ test("an active long-running Turn waits for Stop instead of creating micro-Batch
     state: "queued",
     sessionId: "long-turn-session",
     eventCount: 4
+  });
+});
+
+test("an abandoned Turn is sealed after a bounded inactivity window", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-08-07T09:00:00.000Z"));
+  const root = await mkdtemp(join(tmpdir(), "memstore-abandoned-turn-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const turnId = "abandoned-turn-1";
+  for (let index = 0; index < 3; index += 1) {
+    await captureEvent({
+      runtimeRoot,
+      event: {
+        schemaVersion: 1,
+        eventId: `msevent_abandoned_turn_${String(index)}`,
+        deduplicationKey: `codex:abandoned-turn:${String(index)}`,
+        agent: "codex",
+        eventKind: "PostToolUse",
+        occurredAt: `2026-08-07T09:00:0${String(index)}.000Z`,
+        projectId: "msproj_abandoned_turn",
+        sessionId: "abandoned-turn-session",
+        turnId,
+        payload: { index }
+      }
+    });
+  }
+
+  await expect(prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 64,
+    preparedAt: "2026-08-07T10:00:00.000Z",
+    minimumEventAgeMilliseconds: 30_000,
+    staleTurnInactivityMilliseconds: 2 * 60 * 60 * 1_000
+  })).resolves.toEqual({ state: "empty" });
+
+  await expect(prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 64,
+    preparedAt: "2026-08-07T11:00:03.000Z",
+    minimumEventAgeMilliseconds: 30_000,
+    staleTurnInactivityMilliseconds: 2 * 60 * 60 * 1_000
+  })).resolves.toMatchObject({
+    state: "queued",
+    sessionId: "abandoned-turn-session",
+    eventCount: 3
   });
 });
 

@@ -35,6 +35,7 @@ interface RetrievalDocument {
     | { readonly kind: "project"; readonly projectId: string }
     | { readonly kind: "global" };
   readonly authority: "human_authored" | "agent_derived";
+  readonly validityState: "valid" | "review_due";
   readonly compactText: string;
   readonly compactValidated: boolean;
   readonly category: string;
@@ -48,6 +49,7 @@ export interface RecallSearchItem {
   readonly authority: RetrievalDocument["authority"];
   readonly description: string;
   readonly relevanceReasons: readonly string[];
+  readonly warnings?: readonly string[];
 }
 
 interface CursorPayload {
@@ -118,6 +120,7 @@ function documentFromRow(row: Record<string, unknown>): RetrievalDocument {
     revisionId: z.string().parse(row.revision_id),
     scope,
     authority: z.enum(["human_authored", "agent_derived"]).parse(row.authority),
+    validityState: z.enum(["valid", "review_due"]).parse(row.validity_state),
     compactText: z.string().parse(row.compact_text),
     compactValidated: row.compact_validated === 1,
     category: z.string().parse(row.category),
@@ -399,7 +402,11 @@ export async function recallSearch(request: {
       description: rankedItem.document.compactValidated && rankedItem.document.compactText.length > 0
         ? rankedItem.document.compactText
         : `No validated compact description; read ${rankedItem.document.memoryId} by identity.`,
-      relevanceReasons: rankedItem.reasons.slice(0, 3)
+      relevanceReasons: rankedItem.reasons.slice(0, 3),
+      ...(rankedItem.document.authority === "agent_derived" &&
+        rankedItem.document.validityState === "review_due"
+        ? { warnings: ["agent_derived_review_due"] }
+        : {})
     };
     const itemTokens = tokenizer.encode(renderSearchItem(item)).length;
     if (selected.length > 0 && renderedTokenCount + itemTokens > targetTokens) break;
@@ -1073,6 +1080,9 @@ export async function recallShow(request: {
     requestedAt: request.requestedAt,
     ...(request.chainId === undefined ? {} : { chainId: request.chainId })
   });
+  const reviewWarning = memory.authority === "agent_derived" && memory.validity.state === "review_due"
+    ? "This Agent-derived Memory is explicitly readable, but review is due; verify it against current workspace state before relying on it."
+    : undefined;
   return {
     memoryId: memory.memoryId,
     revisionId: memory.revisionId,
@@ -1082,6 +1092,9 @@ export async function recallShow(request: {
     body,
     receiptId,
     renderedTokenCount,
-    ...chain
+    ...chain,
+    ...(reviewWarning === undefined
+      ? {}
+      : { warning: chain.warning === undefined ? reviewWarning : `${reviewWarning} ${chain.warning}` })
   };
 }

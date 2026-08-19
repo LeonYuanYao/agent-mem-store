@@ -23,6 +23,20 @@ import {
 } from "../operations/shadow-window.js";
 import { inspectDoctor, retryOperation } from "../operations/maintenance.js";
 import {
+  archiveOperationalMemories,
+  auditMemoryQuality,
+  repairExactCompactRepresentations
+} from "../operations/quality.js";
+import {
+  enqueueCompactBackfill,
+  inspectMemoryQualityPipeline,
+  scheduleCompactQuality
+} from "../quality/pipeline.js";
+import {
+  discoverDuplicateClusters,
+  inspectDuplicateClusters
+} from "../quality/duplicates.js";
+import {
   createRuntimeBackup,
   inspectMigrationReadiness,
   pauseForMigration,
@@ -365,7 +379,7 @@ async function configuredWorkerAdapters(runtimeRoot: string): Promise<{
   const adapters = luna === undefined && notifierExecutable === undefined && embedding === undefined
     ? undefined
     : {
-    ...(luna === undefined ? {} : { luna, governance: luna }),
+    ...(luna === undefined ? {} : { luna, governance: luna, quality: luna }),
     ...(embedding === undefined ? {} : { embedding: embedding.adapter }),
     ...(notifierExecutable === undefined
       ? {}
@@ -567,6 +581,99 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
     return {
       command: "doctor",
       result: await inspectDoctor({ ...location, deep: parsed.values.deep }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "quality" && parsed.positionals[1] === "audit") {
+    const limit = optionalPositiveInteger(parsed.values.limit);
+    return {
+      command: "quality.audit",
+      result: await auditMemoryQuality({
+        ...location,
+        ...(parsed.values.cursor === undefined ? {} : { cursor: parsed.values.cursor }),
+        ...(limit === undefined ? {} : { limit })
+      }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "quality" && parsed.positionals[1] === "repair-representations") {
+    const limit = optionalPositiveInteger(parsed.values.limit);
+    return {
+      command: "quality.repair-representations",
+      result: await repairExactCompactRepresentations({
+        ...location,
+        repairedAt: now,
+        preview: parsed.values.preview,
+        ...(parsed.values.cursor === undefined ? {} : { cursor: parsed.values.cursor }),
+        ...(limit === undefined ? {} : { limit })
+      }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "quality" && parsed.positionals[1] === "archive-operational") {
+    const limit = optionalPositiveInteger(parsed.values.limit);
+    return {
+      command: "quality.archive-operational",
+      result: await archiveOperationalMemories({
+        ...location,
+        archivedAt: now,
+        preview: parsed.values.preview,
+        ...(parsed.values.cursor === undefined ? {} : { cursor: parsed.values.cursor }),
+        ...(limit === undefined ? {} : { limit })
+      }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "quality" && parsed.positionals[1] === "compact-backfill") {
+    const limit = optionalPositiveInteger(parsed.values.limit);
+    return {
+      command: "quality.compact-backfill",
+      result: await enqueueCompactBackfill({
+        ...location,
+        requestedAt: now,
+        preview: parsed.values.preview,
+        ...(parsed.values.cursor === undefined ? {} : { cursor: parsed.values.cursor }),
+        ...(limit === undefined ? {} : { limit })
+      }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "quality" && parsed.positionals[1] === "status") {
+    return {
+      command: "quality.status",
+      result: await inspectMemoryQualityPipeline({ runtimeRoot: location.runtimeRoot }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "quality" && parsed.positionals[1] === "start") {
+    return {
+      command: "quality.start",
+      result: await scheduleCompactQuality({
+        runtimeRoot: location.runtimeRoot,
+        requestedAt: now,
+        preview: parsed.values.preview
+      }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "quality" && parsed.positionals[1] === "duplicate-discovery") {
+    const limit = optionalPositiveInteger(parsed.values.limit);
+    return {
+      command: "quality.duplicate-discovery",
+      result: await discoverDuplicateClusters({
+        runtimeRoot: location.runtimeRoot,
+        requestedAt: now,
+        preview: parsed.values.preview,
+        ...(parsed.values.cursor === undefined ? {} : { cursor: parsed.values.cursor }),
+        ...(limit === undefined ? {} : { limit })
+      }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "quality" && parsed.positionals[1] === "duplicate-status") {
+    return {
+      command: "quality.duplicate-status",
+      result: await inspectDuplicateClusters({ runtimeRoot: location.runtimeRoot }),
       json: parsed.values.json
     };
   }
@@ -1067,7 +1174,7 @@ async function run(arguments_: readonly string[]): Promise<void> {
     else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
-  if (["doctor", "vault", "worker", "review", "runtime", "portability", "purge", "shadow", "category"].includes(command ?? "") ||
+  if (["doctor", "vault", "worker", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command ?? "") ||
       (command === "operation" && arguments_[1] === "retry")) {
     const output = await runOperations(arguments_);
     writeResult(output.command, output.result, output.json);

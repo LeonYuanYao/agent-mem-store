@@ -93,6 +93,12 @@ test("weekly governance applies only authorized Agent changes and suggests Human
             relationshipType: "supports",
             reason: "The rule is grounded by the human source.",
             evidenceRefs: ["test:evidence"]
+          },
+          {
+            kind: "mark_review_due",
+            targetMemoryId: agentRelationId,
+            reason: "The rule is time-sensitive and requires current-state verification.",
+            evidenceRefs: ["test:evidence"]
           }
         ],
         reviewSuggestions: [{
@@ -128,6 +134,8 @@ test("weekly governance applies only authorized Agent changes and suggests Human
     .toBe("active");
   expect((await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: agentRelationId }))?.memory.relationships)
     .toContainEqual({ type: "supports", targetMemoryId: humanId });
+  expect((await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: agentRelationId }))?.memory.validity.state)
+    .toBe("review_due");
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     expect(database.prepare(

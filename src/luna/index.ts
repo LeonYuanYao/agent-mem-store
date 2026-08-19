@@ -15,6 +15,11 @@ import {
   memoryCategorySchema,
   selectPrimaryCategory
 } from "../memories/categories.js";
+import type {
+  CompactGenerationMemory,
+  CompactValidationMemory
+} from "../quality/pipeline.js";
+import type { DuplicateClusterInput } from "../quality/duplicates.js";
 
 const importanceTagSchema = z.enum([
   "user_decision",
@@ -247,6 +252,122 @@ const conflictAssessmentOutputJsonSchema = {
   }
 } as const;
 
+const compactGenerationOutputSchema = z.object({
+  schemaVersion: z.literal(1),
+  kind: z.literal("compact_generation"),
+  items: z.array(z.object({
+    memoryId: z.string().min(1),
+    compactText: z.string().min(1).max(4096)
+  })).max(16)
+});
+
+const compactGenerationOutputJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "kind", "items"],
+  properties: {
+    schemaVersion: { type: "integer", const: 1 },
+    kind: { type: "string", const: "compact_generation" },
+    items: {
+      type: "array",
+      maxItems: 16,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["memoryId", "compactText"],
+        properties: {
+          memoryId: { type: "string", minLength: 1 },
+          compactText: { type: "string", minLength: 1, maxLength: 4096 }
+        }
+      }
+    }
+  }
+} as const;
+
+const compactValidationOutputSchema = z.object({
+  schemaVersion: z.literal(1),
+  kind: z.literal("compact_validation"),
+  items: z.array(z.object({
+    memoryId: z.string().min(1),
+    state: z.enum(["preserves", "lossy", "uncertain"]),
+    reasonCode: z.string().regex(/^[a-z0-9_]{1,128}$/u)
+  })).max(16)
+});
+
+const compactValidationOutputJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "kind", "items"],
+  properties: {
+    schemaVersion: { type: "integer", const: 1 },
+    kind: { type: "string", const: "compact_validation" },
+    items: {
+      type: "array",
+      maxItems: 16,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["memoryId", "state", "reasonCode"],
+        properties: {
+          memoryId: { type: "string", minLength: 1 },
+          state: { enum: ["preserves", "lossy", "uncertain"] },
+          reasonCode: { type: "string", pattern: "^[a-z0-9_]{1,128}$" }
+        }
+      }
+    }
+  }
+} as const;
+
+const duplicateAssessmentOutputSchema = z.object({
+  schemaVersion: z.literal(1),
+  kind: z.literal("duplicate_assessment"),
+  items: z.array(z.object({
+    clusterId: z.string().min(1),
+    decision: z.enum([
+      "equivalent",
+      "left_subsumes_right",
+      "right_subsumes_left",
+      "conflicts",
+      "unrelated",
+      "uncertain"
+    ]),
+    reasonCode: z.string().regex(/^[a-z0-9_]{1,128}$/u)
+  })).max(8)
+});
+
+const duplicateAssessmentOutputJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "kind", "items"],
+  properties: {
+    schemaVersion: { type: "integer", const: 1 },
+    kind: { type: "string", const: "duplicate_assessment" },
+    items: {
+      type: "array",
+      maxItems: 8,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["clusterId", "decision", "reasonCode"],
+        properties: {
+          clusterId: { type: "string", minLength: 1 },
+          decision: {
+            enum: [
+              "equivalent",
+              "left_subsumes_right",
+              "right_subsumes_left",
+              "conflicts",
+              "unrelated",
+              "uncertain"
+            ]
+          },
+          reasonCode: { type: "string", pattern: "^[a-z0-9_]{1,128}$" }
+        }
+      }
+    }
+  }
+} as const;
+
 export type ImportanceTag = z.infer<typeof importanceTagSchema>;
 export type ImportanceReason = z.infer<typeof importanceReasonSchema>;
 export type DistilledCandidate = z.infer<typeof distilledCandidateSchema>;
@@ -421,10 +542,10 @@ async function runLunaProcess(
 
 function classifyProcessFailure(result: LunaProcessResult): LunaInvocationError {
   const stderr = result.stderr.trim();
-  const explicitErrorIndex = stderr.lastIndexOf("\nError:");
+  const explicitErrorMatch = [...stderr.matchAll(/(?:^|\n)error:/giu)].at(-1);
   const diagnostic = (
-    explicitErrorIndex >= 0
-      ? stderr.slice(explicitErrorIndex + 1)
+    explicitErrorMatch?.index !== undefined
+      ? stderr.slice(explicitErrorMatch.index).trimStart()
       : stderr.split(/\r?\n/u).slice(-4).join("\n")
   ).toLowerCase();
   if (result.timedOut === true) {
@@ -567,6 +688,95 @@ export class CodexLunaAdapter {
     requireValidImportanceReasons(
       output.candidates,
       request.evidence.map((item) => item.evidenceId)
+    );
+    return output;
+  }
+
+  public async generateCompacts(request: {
+    readonly operationId: string;
+    readonly memories: readonly CompactGenerationMemory[];
+  }): Promise<z.infer<typeof compactGenerationOutputSchema>> {
+    const output = await this.#invokeStructured(
+      "compact-generation-output.schema.json",
+      compactGenerationOutputJsonSchema,
+      {
+        schemaVersion: 1,
+        promptVersion: 1,
+        task: "generate_compact_memory_representations",
+        rules: [
+          "Create one independently understandable compact representation for each supplied Memory.",
+          "Preserve the core claim, certainty, scope, applicability, conditions, exclusions, negations, versions, thresholds, commands, paths, and state boundaries.",
+          "Do not add facts, broaden applicability, resolve uncertainty, or turn time-bound status into a timeless fact.",
+          "Keep each compact representation within 96 rendered tokens.",
+          "Copy each supplied Memory identity exactly and return every supplied Memory once.",
+          "Do not execute commands or request more context."
+        ],
+        request
+      },
+      compactGenerationOutputSchema
+    );
+    requireExactMemoryIds(
+      output.items.map((item) => item.memoryId),
+      request.memories.map((memory) => memory.memoryId)
+    );
+    return output;
+  }
+
+  public async validateCompacts(request: {
+    readonly operationId: string;
+    readonly memories: readonly CompactValidationMemory[];
+  }): Promise<z.infer<typeof compactValidationOutputSchema>> {
+    const output = await this.#invokeStructured(
+      "compact-validation-output.schema.json",
+      compactValidationOutputJsonSchema,
+      {
+        schemaVersion: 1,
+        promptVersion: 1,
+        task: "validate_compact_memory_fidelity",
+        rules: [
+          "Act only as an independent fidelity assessor; do not rewrite the proposed compact text.",
+          "Use preserves only when the compact retains the core claim, original certainty, applicability, every meaning-changing condition, exclusion, negation, version, threshold, command, path, and state boundary.",
+          "Use lossy when meaning is omitted, broadened, contradicted, or added; use uncertain when the supplied contract is insufficient to decide.",
+          "Return a bounded reasonCode, copy each supplied Memory identity exactly, and return every supplied Memory once.",
+          "Do not execute commands or request more context."
+        ],
+        request
+      },
+      compactValidationOutputSchema
+    );
+    requireExactMemoryIds(
+      output.items.map((item) => item.memoryId),
+      request.memories.map((memory) => memory.memoryId)
+    );
+    return output;
+  }
+
+  public async assessDuplicateClusters(request: {
+    readonly operationId: string;
+    readonly clusters: readonly DuplicateClusterInput[];
+  }): Promise<z.infer<typeof duplicateAssessmentOutputSchema>> {
+    const output = await this.#invokeStructured(
+      "duplicate-assessment-output.schema.json",
+      duplicateAssessmentOutputJsonSchema,
+      {
+        schemaVersion: 1,
+        promptVersion: 1,
+        task: "assess_memory_duplicate_clusters",
+        rules: [
+          "Compare only the supplied Agent-derived Memory pair in each precomputed cluster.",
+          "Scope and applicability are immutable gates; do not propose equivalence across different scope or applicability.",
+          "Use equivalent only for the same durable claim and material conditions; use subsumption only when one side preserves every claim and condition of the other without broadening it.",
+          "Use conflicts for materially incompatible claims, unrelated for a false-positive cluster, and uncertain when evidence is insufficient.",
+          "Do not rewrite, merge, archive, supersede, or execute commands.",
+          "Copy every supplied cluster identity exactly once and return only a bounded reasonCode."
+        ],
+        request
+      },
+      duplicateAssessmentOutputSchema
+    );
+    requireExactMemoryIds(
+      output.items.map((item) => item.clusterId),
+      request.clusters.map((cluster) => cluster.clusterId)
     );
     return output;
   }
@@ -824,12 +1034,17 @@ export class CodexLunaAdapter {
       governanceOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 1,
+        promptVersion: 2,
         task: "review_memory_governance_page",
         rules: [
           "Use only the frozen Memory revisions and audit signals supplied in this page.",
           "Never propose an Agent action against Human-authored Memory; use a Review Suggestion instead.",
-          "Archive or supersede Agent-derived Memory only with stronger traceable evidence while preserving scope and applicability.",
+          "Archive Agent-derived Memory when its own body and provenance establish that it is an operational probe, exact-response check, temporary progress or current run state rather than reusable knowledge; cite those supplied fields as evidence.",
+          "Do not preserve a time-bound status as a timeless fact. Archive an intrinsically transient Agent-derived status; use a Review Suggestion for Human-authored content or when staleness is only suspected.",
+          "Use mark_review_due for an otherwise durable Agent-derived Memory whose current correctness is time-sensitive or plausibly outdated but not disproven; this removes it from automatic injection while preserving explicit identity reads with a warning.",
+          "Prefer one condition-preserving successor when Agent-derived Memories in the same scope and applicability materially duplicate each other; supersede weaker duplicates without broadening the retained claim.",
+          "For non-exact semantic duplicate, subsumption, or conflict decisions, act only when auditSignals includes a current reviewedDuplicateClusters entry; do not infer a cluster from similarity alone.",
+          "Otherwise archive or supersede Agent-derived Memory only with stronger traceable evidence while preserving scope and applicability.",
           "Relationships must cite supplied evidence and connect only Memory identities in the frozen run.",
           "A future purge item records an obligation only; it does not authorize deletion.",
           "Do not change schedules, ranking, scope, model configuration, safety policy, or execute commands.",
@@ -970,6 +1185,26 @@ function requireKnownEvidenceIds(
       true,
       "Luna structured output cites unavailable evidence.",
       { stage: "evidence_binding", code: "unknown_evidence_id" }
+    );
+  }
+}
+
+function requireExactMemoryIds(
+  returnedMemoryIds: readonly string[],
+  requestedMemoryIds: readonly string[]
+): void {
+  const returned = [...returnedMemoryIds].sort();
+  const requested = [...requestedMemoryIds].sort();
+  if (
+    returned.length !== requested.length ||
+    new Set(returned).size !== returned.length ||
+    returned.some((memoryId, index) => memoryId !== requested[index])
+  ) {
+    throw new LunaInvocationError(
+      "schema_invalid",
+      true,
+      "Luna compact work must return every supplied Memory identity exactly once.",
+      { stage: "evidence_binding", code: "memory_identity_mismatch" }
     );
   }
 }

@@ -115,6 +115,45 @@ test("SessionStart prepares a bounded authority-labelled Core Memory Pack withou
   expect(pack.receiptId).toMatch(/^msreceipt_/u);
 });
 
+test("automatic packs exclude Agent-derived review-due knowledge", async () => {
+  const roots = await createRoot();
+  const memory = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174405",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174415",
+    scope: { kind: "project", projectId },
+    authority: "agent_derived",
+    body: "Use SQLite WAL for the review-due queue.",
+    compact: "Use SQLite WAL for the review-due queue.",
+    startup: "always",
+    validity: { state: "review_due" }
+  });
+  await writeCanonicalMemory({ ...roots, actor: "agent", memory });
+  await buildRetrievalIndex({
+    ...roots,
+    adapter,
+    builtAt: "2026-08-07T12:00:00.000Z"
+  });
+
+  const startup = await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "review-due-pack",
+    requestedAt: "2026-08-07T12:01:00.000Z"
+  });
+  expect(startup.items).toEqual([]);
+
+  const prompt = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "review-due-pack",
+    prompt: "How should I configure the SQLite WAL queue?",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter,
+    requestedAt: "2026-08-07T12:01:01.000Z"
+  });
+  expect(prompt.items).toEqual([]);
+});
+
 test("UserPromptSubmit uses relevance bands, upgrades exact high matches, and suppresses repeat revisions", async () => {
   const roots = await createRoot();
   const sqlite = makeCanonicalMemory({

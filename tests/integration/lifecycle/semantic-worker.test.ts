@@ -108,6 +108,7 @@ test("a durable semantic-assessment operation feeds the deterministic Promotion 
         schemaVersion: 1,
         kind: "semantic_assessment",
         state: "supported",
+        durabilityDisposition: "durable",
         evidenceIds: request.evidence.map((item) => item.evidenceId)
       });
     }
@@ -280,11 +281,94 @@ test("a generic intact PostToolUse result requires Luna support before promotion
         schemaVersion: 1,
         kind: "semantic_assessment",
         state: "supported",
+        durabilityDisposition: "durable",
         evidenceIds: [eventId]
       })
     }
   })).resolves.toMatchObject({ state: "completed", evaluationState: "promoted" });
   await expect(listRecallEligibleMemoryIds(runtimeRoot)).resolves.toHaveLength(1);
+});
+
+test("a supported task-local PostToolUse result is rejected before durable promotion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-task-local-tool-evidence-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  const eventId = "msevent-task-local-tool-result";
+  const occurredAt = "2026-08-07T14:10:00.000Z";
+  const payload = {
+    tool_name: "memstore_operational_probe",
+    tool_input: { probe: true },
+    tool_response: { status: "ok" }
+  };
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId,
+      deduplicationKey: "semantic:task-local-tool-result",
+      agent: "codex",
+      eventKind: "PostToolUse",
+      occurredAt,
+      projectId,
+      sessionId: "task-local-tool-session",
+      turnId: "task-local-tool-turn",
+      payload
+    }
+  });
+  const created = await createAgentCandidate({
+    runtimeRoot,
+    scope: { kind: "project", projectId },
+    candidate: {
+      statement: "The operational probe returned status ok five times.",
+      primaryCategory: "workflow_environment_toolchain",
+      categoryTags: ["workflow_environment_toolchain"],
+      applicabilitySummary: "This completed probe run",
+      conditions: [],
+      exclusions: [],
+      preservedNegations: [],
+      certainty: "asserted",
+      importanceTags: []
+    },
+    evidence: [{
+      evidenceId: eventId,
+      evidenceClass: "command_outcome",
+      sourceIdentity: "codex:task-local-tool-session:task-local-tool-turn",
+      projectId,
+      occurredAt,
+      integrity: "intact",
+      sourceTruncated: false,
+      memoryEcho: false,
+      evidenceContentIdentity: createHash("sha256")
+        .update(JSON.stringify(payload))
+        .digest("hex")
+    }],
+    createdAt: "2026-08-07T14:10:01.000Z"
+  });
+  if (created.state !== "candidate") throw new Error("Expected Candidate creation.");
+
+  await expect(prepareNextCandidateEvaluation({
+    runtimeRoot,
+    vaultRoot,
+    now: "2026-08-07T14:10:02.000Z"
+  })).resolves.toMatchObject({ state: "assessment_queued" });
+  await expect(runNextCandidateAssessment({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "task-local-tool-semantic-worker",
+    now: "2026-08-07T14:10:03.000Z",
+    adapter: {
+      assessCandidateSemantics: () => Promise.resolve({
+        schemaVersion: 1,
+        kind: "semantic_assessment",
+        state: "supported",
+        durabilityDisposition: "task_local",
+        evidenceIds: [eventId]
+      })
+    }
+  })).resolves.toMatchObject({ state: "completed", evaluationState: "rejected" });
+  await expect(listRecallEligibleMemoryIds(runtimeRoot)).resolves.toEqual([]);
 });
 
 test("the generic-tool evidence migration reopens historical insufficient Candidates", async () => {

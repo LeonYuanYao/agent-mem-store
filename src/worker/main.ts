@@ -26,6 +26,7 @@ import {
   type HumanConflictAssessmentAdapter
 } from "./human-conflicts.js";
 import {
+  distillationBatchReady,
   prepareNextDistillationBatch,
   prepareNextSessionConsolidation,
   runNextLunaWork,
@@ -33,12 +34,47 @@ import {
 } from "./distillation.js";
 import { captureAbandonedSessionEnd } from "./session-catchup.js";
 import { runNextCandidateMaintenance } from "./candidate-maintenance.js";
+import {
+  advanceCompactQualityDiscovery,
+  runNextMemoryQualityStep,
+  type MemoryQualityAdapter
+} from "../quality/pipeline.js";
+import {
+  advanceDuplicateDiscovery,
+  runNextDuplicateAssessment,
+  type DuplicateAssessmentAdapter
+} from "../quality/duplicates.js";
 
 export interface WorkerAdapters {
   readonly luna?: LunaWorkerAdapter & CandidateAssessmentAdapter & HumanConflictAssessmentAdapter;
+  readonly quality?: MemoryQualityAdapter & DuplicateAssessmentAdapter;
   readonly governance?: GovernanceAdapter;
   readonly notifier?: NotifierPort;
   readonly embedding?: EmbeddingAdapter;
+}
+
+async function foregroundMemoryWorkExists(runtimeRoot: string, now: string): Promise<boolean> {
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    const activeOperation = database.prepare(
+      `SELECT
+         EXISTS(SELECT 1 FROM luna_operations
+           WHERE state IN ('pending', 'processing')
+              OR (state = 'retrying' AND next_retry_at <= ?))
+         OR EXISTS(SELECT 1 FROM governance_runs
+           WHERE state IN ('pending', 'processing')
+              OR (state = 'retrying' AND next_retry_at <= ?)) AS present`
+    ).get(now, now)?.present === 1;
+    if (activeOperation) return true;
+  } finally {
+    database.close();
+  }
+  return distillationBatchReady({
+    runtimeRoot,
+    maximumEvents: 64,
+    preparedAt: now,
+    minimumEventAgeMilliseconds: 30_000
+  });
 }
 
 function reviewDigestKey(now: string, timeZone: string): string {
@@ -235,7 +271,8 @@ export async function runWorkerOnce(request: {
       vaultRoot: request.vaultRoot,
       now,
       workerId: request.workerId,
-      adapter: request.adapters.governance
+      adapter: request.adapters.governance,
+      foregroundTurnCompleted: true
     });
     if (governance.state !== "idle") activities.push(`governance:${governance.state}`);
     if (!["idle", "busy", "blocked", "yielded"].includes(governance.state)) {
@@ -250,6 +287,52 @@ export async function runWorkerOnce(request: {
     if (maintenance.state !== "empty") {
       activities.push("candidate-maintenance:completed");
       shouldRefreshReview = true;
+    }
+  }
+  if (
+    request.adapters?.quality !== undefined &&
+    !(await foregroundMemoryWorkExists(request.runtimeRoot, now))
+  ) {
+    try {
+      const qualityDiscovery = await advanceCompactQualityDiscovery({
+        runtimeRoot: request.runtimeRoot,
+        vaultRoot: request.vaultRoot,
+        now
+      });
+      if (qualityDiscovery.state !== "idle") {
+        activities.push(`memory-quality-discovery:${qualityDiscovery.state}`);
+      }
+      const quality = await runNextMemoryQualityStep({
+        runtimeRoot: request.runtimeRoot,
+        vaultRoot: request.vaultRoot,
+        workerId: request.workerId,
+        now,
+        adapter: request.adapters.quality
+      });
+      if (quality.state !== "empty") {
+        activities.push(`memory-quality:${quality.state}`);
+      }
+      if (quality.state === "empty") {
+        const discovery = await advanceDuplicateDiscovery({
+          runtimeRoot: request.runtimeRoot,
+          now
+        });
+        if (!["idle", "index_unavailable"].includes(discovery.state)) {
+          activities.push(`memory-duplicate-discovery:${discovery.state}`);
+        }
+        const duplicates = await runNextDuplicateAssessment({
+          runtimeRoot: request.runtimeRoot,
+          vaultRoot: request.vaultRoot,
+          workerId: request.workerId,
+          now,
+          adapter: request.adapters.quality
+        });
+        if (duplicates.state !== "empty") {
+          activities.push(`memory-duplicates:${duplicates.state}`);
+        }
+      }
+    } catch {
+      activities.push("memory-quality:failed");
     }
   }
   if (shouldRefreshReview) {
