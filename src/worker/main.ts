@@ -10,6 +10,7 @@ import {
 } from "../capture/index.js";
 import type { NotifierPort } from "../adapters/macos/notifier.js";
 import { dispatchNextReminder } from "../review/reminders.js";
+import { prepareNextModelHealthReminder } from "../review/reminders.js";
 import { prepareReviewReminder } from "../review/reminders.js";
 import { generateReviewInbox } from "../review/inbox.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
@@ -355,6 +356,14 @@ export async function runWorkerOnce(request: {
     if (reminder.state !== "empty") activities.push(`reminder:${reminder.state}`);
   }
   if (request.adapters?.notifier !== undefined) {
+    const modelHealthReminder = await prepareNextModelHealthReminder({
+      runtimeRoot: request.runtimeRoot,
+      vaultRoot: request.vaultRoot,
+      preparedAt: now
+    });
+    if (modelHealthReminder.state !== "empty") {
+      activities.push(`model-health-reminder:${modelHealthReminder.state}`);
+    }
     const notification = await dispatchNextReminder({
       runtimeRoot: request.runtimeRoot,
       now,

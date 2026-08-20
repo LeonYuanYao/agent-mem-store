@@ -12,6 +12,7 @@ import {
   snoozeReminder
 } from "../../../src/review/reminders.js";
 import { RecordingNotifier } from "../../../src/adapters/macos/notifier.js";
+import { runWorkerOnce } from "../../../src/worker/main.js";
 
 const roots: string[] = [];
 
@@ -83,4 +84,56 @@ test("an empty Inbox creates no reminder obligation", async () => {
     dueAt: "2026-08-10T11:00:00.000Z",
     createdAt: "2026-08-08T02:02:00.000Z"
   })).resolves.toEqual({ state: "empty" });
+});
+
+test("the Worker durably delivers one coalesced model-health recovery notification", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-model-health-reminder-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "My Memory Vault");
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare(
+      `INSERT INTO model_health_incidents(
+         incident_id, state, reason_category, started_at, last_failure_at,
+         ended_at, notification_pending
+       ) VALUES (?, 'recovered', 'schema_invalid', ?, ?, ?, 1)`
+    ).run(
+      "msmodelincident_recovered",
+      "2026-08-08T01:00:00.000Z",
+      "2026-08-08T01:05:00.000Z",
+      "2026-08-08T01:10:00.000Z"
+    );
+  } finally {
+    database.close();
+  }
+  const notifier = new RecordingNotifier();
+
+  await expect(runWorkerOnce({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "model-health-reminder-worker",
+    now: "2026-08-08T01:11:00.000Z",
+    workerStartedAt: "2026-08-08T01:11:00.000Z",
+    adapters: { notifier }
+  })).resolves.toMatchObject({
+    state: "worked",
+    activities: ["model-health-reminder:pending", "reminder:delivered"]
+  });
+  expect(notifier.deliveries).toHaveLength(1);
+  expect(notifier.deliveries[0]).toMatchObject({
+    title: "MemStore Luna recovered",
+    body: "Luna recovered from schema_invalid; queued memory work will continue.",
+    openUri: "obsidian://open?vault=My%20Memory%20Vault&file=_MemStore%2FReview%20Inbox.md"
+  });
+
+  await expect(runWorkerOnce({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "model-health-reminder-worker",
+    now: "2026-08-08T01:12:00.000Z",
+    workerStartedAt: "2026-08-08T01:11:00.000Z",
+    adapters: { notifier }
+  })).resolves.toEqual({ state: "idle" });
+  expect(notifier.deliveries).toHaveLength(1);
 });

@@ -194,6 +194,11 @@ const migrations: readonly Migration[] = [
     version: 37,
     name: "clear_terminal_quality_errors",
     path: new URL("../../migrations/0037-clear-terminal-quality-errors.sql", import.meta.url)
+  },
+  {
+    version: 38,
+    name: "model_health_reminder_content",
+    path: new URL("../../migrations/0038-model-health-reminder-content.sql", import.meta.url)
   }
 ];
 
