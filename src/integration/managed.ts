@@ -329,7 +329,22 @@ function requireInstallableBefore(path: string, before: PathIdentity): void {
 
 async function plannedCliTarget(request: ManagedRequest): Promise<PlannedTarget> {
   const path = join(resolve(request.homeRoot), ".local", "bin", "memstore");
-  const source = `#!/bin/sh\nexec ${shellQuote(resolve(request.nodeExecutable))} ${shellQuote(join(resolve(request.repositoryRoot), "dist", "cli", "main.js"))} "$@"\n`;
+  const source = [
+    "#!/bin/sh",
+    "if [ -z \"${MEMSTORE_RUNTIME_ROOT:-}\" ]; then",
+    `  export MEMSTORE_RUNTIME_ROOT=${shellQuote(resolve(request.runtimeRoot))}`,
+    "fi",
+    "if [ -z \"${MEMSTORE_VAULT_ROOT:-}\" ]; then",
+    `  export MEMSTORE_VAULT_ROOT=${shellQuote(resolve(request.vaultRoot))}`,
+    "fi",
+    `exec ${shellQuote(resolve(request.nodeExecutable))} ${shellQuote(join(
+      resolve(request.repositoryRoot),
+      "dist",
+      "cli",
+      "main.js"
+    ))} "$@"`,
+    ""
+  ].join("\n");
   return {
     label: "memstore_cli",
     path,
@@ -630,19 +645,43 @@ export async function repairManagedIntegration(request: ManagedRequest): Promise
   if (manifest.state !== "installed") throw new Error("Managed integration is not installed.");
   if (manifest.requestIdentity !== requestIdentity(request)) throw new Error("Managed integration request diverged from its ownership manifest.");
   const repairable: PlannedTarget[] = [];
+  const nextTargets: (PlannedTarget & { readonly backupPath?: string })[] = [];
+  let recipeUpdated = false;
   for (const target of manifest.targets) {
+    const desired = target.label === "memstore_cli"
+      ? {
+          ...(await plannedCliTarget(request)),
+          before: target.before,
+          ...(target.backupPath === undefined ? {} : { backupPath: target.backupPath })
+        }
+      : target;
     const current = await identity(target.path);
-    if (sameIdentity(current, target.expectedPost)) continue;
+    if (sameIdentity(current, target.expectedPost)) {
+      if (!sameIdentity(target.expectedPost, desired.expectedPost)) {
+        repairable.push(desired);
+        recipeUpdated = true;
+      }
+      nextTargets.push(desired);
+      continue;
+    }
     if (sameIdentity(current, target.before)) {
-      repairable.push(target);
+      repairable.push(desired);
+      if (!sameIdentity(target.expectedPost, desired.expectedPost)) recipeUpdated = true;
+      nextTargets.push(desired);
       continue;
     }
     throw new Error(`${target.label} diverged; repair cannot distinguish the change from user-authored state.`);
   }
   for (const target of repairable) await applyTarget(target);
-  await preflightTargets(manifest.targets, "expectedPost");
+  await preflightTargets(nextTargets, "expectedPost");
+  if (recipeUpdated) {
+    await writeManifest(request.runtimeRoot, {
+      ...manifest,
+      targets: nextTargets
+    });
+  }
   return {
-    state: repairable.length === 0 ? "healthy" : "repaired",
+    state: repairable.length === 0 && !recipeUpdated ? "healthy" : "repaired",
     installationId: manifest.installationId
   };
 }
@@ -656,7 +695,9 @@ export async function previewManagedIntegrationUpgrade(
     throw new Error("Managed integration request diverged from its ownership manifest.");
   }
   const observedDivergedTargetLabels = await divergedTargetLabels(manifest.targets);
-  if (manifest.targets.some((target) => target.label === "memstore_cli")) {
+  const existingCli = manifest.targets.find((target) => target.label === "memstore_cli");
+  const cli = await plannedCliTarget(request);
+  if (existingCli !== undefined && sameIdentity(existingCli.expectedPost, cli.expectedPost)) {
     return {
       schemaVersion: 1,
       state: "upgrade_preview",
@@ -668,8 +709,13 @@ export async function previewManagedIntegrationUpgrade(
       explicitNoEffects: ["Installation already owns the MemStore CLI"]
     };
   }
-  const cli = await plannedCliTarget(request);
-  requireInstallableBefore(cli.path, cli.before);
+  if (existingCli === undefined) {
+    requireInstallableBefore(cli.path, cli.before);
+  } else if (!sameIdentity(cli.before, existingCli.expectedPost)) {
+    throw new Error(
+      "memstore_cli diverged; upgrade cannot distinguish the change from user-authored state."
+    );
+  }
   return {
     schemaVersion: 1,
     state: "upgrade_preview",
@@ -711,9 +757,23 @@ export async function applyManagedIntegrationUpgrade(
   }
   await preflightTargets(preview.targets, "expectedPost");
   if (preview.targets.length > 0) {
+    const replacementLabels = new Set(preview.targets.map((target) => target.label));
+    const upgradedTargets = preview.targets.map((target) => {
+      const previous = manifest.targets.find((candidate) => candidate.label === target.label);
+      return previous === undefined
+        ? target
+        : {
+            ...target,
+            before: previous.before,
+            ...(previous.backupPath === undefined ? {} : { backupPath: previous.backupPath })
+          };
+    });
     await writeManifest(request.runtimeRoot, {
       ...manifest,
-      targets: [...manifest.targets, ...preview.targets]
+      targets: [
+        ...manifest.targets.filter((target) => !replacementLabels.has(target.label)),
+        ...upgradedTargets
+      ]
     });
   }
   return {

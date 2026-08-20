@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstat, mkdtemp, mkdir, readFile, readlink, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,7 +37,17 @@ async function fixture() {
   await mkdir(join(repositoryRoot, "skills", "memstore-repair"), { recursive: true });
   await writeFile(
     join(repositoryRoot, "dist", "cli", "main.js"),
-    "process.stdout.write(JSON.stringify(process.argv.slice(2)));\n"
+    [
+      "if (process.argv[2] === 'probe-config') {",
+      "  process.stdout.write(JSON.stringify({",
+      "    runtimeRoot: process.env.MEMSTORE_RUNTIME_ROOT,",
+      "    vaultRoot: process.env.MEMSTORE_VAULT_ROOT",
+      "  }));",
+      "} else {",
+      "  process.stdout.write(JSON.stringify(process.argv.slice(2)));",
+      "}",
+      ""
+    ].join("\n")
   );
   const notifierSource = join(root, "artifacts", "MemStore Notifier.app");
   await mkdir(join(notifierSource, "Contents", "MacOS"), { recursive: true });
@@ -73,6 +84,33 @@ async function fixture() {
     configSource,
     hooks
   };
+}
+
+async function replaceManagedCliWithLegacyRecipe(data: Awaited<ReturnType<typeof fixture>>): Promise<void> {
+  const cliPath = join(data.homeRoot, ".local", "bin", "memstore");
+  const legacySource = `#!/bin/sh\nexec '${data.nodeExecutable}' '${join(
+    data.repositoryRoot,
+    "dist",
+    "cli",
+    "main.js"
+  )}' "$@"\n`;
+  await writeFile(cliPath, legacySource, { mode: 0o700 });
+  const manifestPath = join(data.runtimeRoot, "install", "ownership-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    targets: Array<{
+      label: string;
+      expectedPost: { state: string; sha256?: string };
+      expectedSource?: string;
+    }>;
+  };
+  const cliTarget = manifest.targets.find((target) => target.label === "memstore_cli");
+  if (cliTarget === undefined) throw new Error("Fixture has no managed CLI target.");
+  cliTarget.expectedPost = {
+    state: "file",
+    sha256: createHash("sha256").update(legacySource).digest("hex")
+  };
+  cliTarget.expectedSource = legacySource;
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 test("preview is mutation-free and install, repair, and uninstall preserve unrelated state", async () => {
@@ -121,6 +159,27 @@ test("preview is mutation-free and install, repair, and uninstall preserve unrel
   const cliPath = join(data.homeRoot, ".local", "bin", "memstore");
   await expect(execFileAsync(cliPath, ["probe"], { encoding: "utf8" }))
     .resolves.toMatchObject({ stdout: "[\"probe\"]" });
+  await expect(execFileAsync(cliPath, ["probe-config"], {
+    encoding: "utf8",
+    env: {}
+  })).resolves.toMatchObject({
+    stdout: JSON.stringify({
+      runtimeRoot: data.runtimeRoot,
+      vaultRoot: data.vaultRoot
+    })
+  });
+  await expect(execFileAsync(cliPath, ["probe-config"], {
+    encoding: "utf8",
+    env: {
+      MEMSTORE_RUNTIME_ROOT: "/explicit/runtime",
+      MEMSTORE_VAULT_ROOT: "/explicit/vault"
+    }
+  })).resolves.toMatchObject({
+    stdout: JSON.stringify({
+      runtimeRoot: "/explicit/runtime",
+      vaultRoot: "/explicit/vault"
+    })
+  });
   const launchAgent = await readFile(
     join(data.homeRoot, "Library", "LaunchAgents", "com.leonyuanyaoyao.memstore.worker.plist"),
     "utf8"
@@ -203,4 +262,74 @@ test("upgrade safely adds the CLI to a legacy managed installation", async () =>
     targets: Array<{ label: string }>;
   };
   expect(upgraded.targets.filter((target) => target.label === "memstore_cli")).toHaveLength(1);
+});
+
+test("repair upgrades an owned legacy CLI recipe with machine-local defaults", async () => {
+  const data = await fixture();
+  const request = {
+    ...data,
+    lunaCodexHome: join(data.homeRoot, ".codex"),
+    codexExecutable: "/opt/homebrew/bin/codex",
+    embeddingModelDirectory: join(data.runtimeRoot, "models", "e5-base-q8"),
+    installedAt: "2026-08-08T12:00:00.000Z"
+  };
+  await applyManagedIntegration(request, await previewManagedIntegration(request));
+  await replaceManagedCliWithLegacyRecipe(data);
+
+  await expect(repairManagedIntegration(request)).resolves.toMatchObject({ state: "repaired" });
+  const cliPath = join(data.homeRoot, ".local", "bin", "memstore");
+  await expect(execFileAsync(cliPath, ["probe-config"], {
+    encoding: "utf8",
+    env: {}
+  })).resolves.toMatchObject({
+    stdout: JSON.stringify({
+      runtimeRoot: data.runtimeRoot,
+      vaultRoot: data.vaultRoot
+    })
+  });
+  await expect(repairManagedIntegration(request)).resolves.toMatchObject({ state: "healthy" });
+});
+
+test("upgrade previews and replaces an owned legacy CLI recipe", async () => {
+  const data = await fixture();
+  const request = {
+    ...data,
+    lunaCodexHome: join(data.homeRoot, ".codex"),
+    codexExecutable: "/opt/homebrew/bin/codex",
+    embeddingModelDirectory: join(data.runtimeRoot, "models", "e5-base-q8"),
+    installedAt: "2026-08-08T12:00:00.000Z"
+  };
+  await applyManagedIntegration(request, await previewManagedIntegration(request));
+  await replaceManagedCliWithLegacyRecipe(data);
+  const cliPath = join(data.homeRoot, ".local", "bin", "memstore");
+
+  const preview = await previewManagedIntegrationUpgrade(request);
+  expect(preview).toMatchObject({
+    state: "upgrade_preview",
+    dryRun: true,
+    observedDivergedTargetLabels: []
+  });
+  expect(preview.targets.map((target) => target.label)).toEqual(["memstore_cli"]);
+  await expect(execFileAsync(cliPath, ["probe-config"], {
+    encoding: "utf8",
+    env: {}
+  })).resolves.toMatchObject({ stdout: "{}" });
+
+  await expect(applyManagedIntegrationUpgrade(request, preview)).resolves.toMatchObject({
+    state: "upgraded"
+  });
+  await expect(execFileAsync(cliPath, ["probe-config"], {
+    encoding: "utf8",
+    env: {}
+  })).resolves.toMatchObject({
+    stdout: JSON.stringify({
+      runtimeRoot: data.runtimeRoot,
+      vaultRoot: data.vaultRoot
+    })
+  });
+  const manifest = JSON.parse(await readFile(
+    join(data.runtimeRoot, "install", "ownership-manifest.json"),
+    "utf8"
+  )) as { targets: Array<{ label: string }> };
+  expect(manifest.targets.filter((target) => target.label === "memstore_cli")).toHaveLength(1);
 });
