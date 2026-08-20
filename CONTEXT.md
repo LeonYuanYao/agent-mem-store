@@ -288,6 +288,10 @@ _Avoid_: Memory Vault、第二份权威知识、不可重建状态
 随 Durable Memory 变更而提前准备的简短、可归因回忆文本。每轮检索直接选用它，不临时调用 Luna 重新摘要。
 _Avoid_: 完整 Memory 正文、每轮生成式摘要
 
+**Compact Quality Recovery（紧凑表示质量恢复）**:
+Compact generation 与 fidelity validation 只让 Luna 回传 `m1`、`m2` 等短 alias，由本地恢复真实 Memory identity。确定性门禁只检查非空、token 上限、敏感性和 revision/content identity；条件、例外与否定在改写后是否仍被保留由独立 Luna fidelity 阶段判断，而不是要求逐字 substring。重复 schema-invalid 会逐步缩小 Batch，显式 `quality retry` 才开启新 retry epoch。
+_Avoid_: 让模型抄写 UUID、逐字 anchor 等同语义保留、相同大 Batch 无限重试
+
 **Retrieval Query（检索查询）**:
 由当前用户 Prompt、项目身份以及有界结构化会话信号组成的本地查询。结构化信号可以包含最近文件、symbol、错误、命令和已注入 Memory identity，但不包含完整对话。
 _Avoid_: Source Session 副本、每轮 Luna 会话摘要

@@ -28,13 +28,13 @@ test("compact generation and fidelity validation use separate constrained Luna c
     {
       schemaVersion: 1,
       kind: "compact_generation",
-      items: [{ memoryId: "msmem_1", compactText: "Run typecheck before release." }]
+      items: [{ memoryId: "m1", compactText: "Run typecheck before release." }]
     },
     {
       schemaVersion: 1,
       kind: "compact_validation",
       items: [{
-        memoryId: "msmem_1",
+        memoryId: "m1",
         state: "preserves",
         reasonCode: "all_material_facts_preserved"
       }]
@@ -77,6 +77,219 @@ test("compact generation and fidelity validation use separate constrained Luna c
   expect(prompts).toHaveLength(2);
   expect(prompts[0]).toMatchObject({ task: "generate_compact_memory_representations" });
   expect(prompts[1]).toMatchObject({ task: "validate_compact_memory_fidelity" });
+});
+
+test("compact generation restores exact Memory identities from short aliases", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-compact-alias-"));
+  temporaryDirectories.push(root);
+  const originalIds = [
+    "msmem_8e24a0de-56fa-4ddb-9432-1e3d6274c828",
+    "msmem_8e280294-a7dd-45fe-b16c-4f29de16ef2f"
+  ];
+  let prompt: {
+    request?: { memories?: Array<{ memoryId?: unknown }> };
+  } = {};
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      prompt = JSON.parse(request.standardInput) as typeof prompt;
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "compact_generation",
+          items: [
+            { memoryId: "m1", compactText: "First compact." },
+            { memoryId: "m2", compactText: "Second compact." }
+          ]
+        }),
+        stderr: ""
+      });
+    }
+  });
+  const memories = originalIds.map((memoryId, index) => ({
+    memoryId,
+    revisionId: `msrev_123e4567-e89b-42d3-a456-42661417408${String(index)}`,
+    body: `${index === 0 ? "First" : "Second"} durable claim.`,
+    applicability: { summary: "Current project", conditions: [] },
+    semanticContract: {
+      schemaVersion: 1 as const,
+      claims: [`${index === 0 ? "First" : "Second"} durable claim.`],
+      conditions: [],
+      exclusions: [],
+      preservedNegations: []
+    }
+  }));
+
+  await expect(adapter.generateCompacts({
+    operationId: "generation-alias-1",
+    memories
+  })).resolves.toMatchObject({
+    items: [
+      { memoryId: originalIds[0] },
+      { memoryId: originalIds[1] }
+    ]
+  });
+  expect(prompt.request?.memories?.map((memory) => memory.memoryId)).toEqual(["m1", "m2"]);
+});
+
+test("compact generation repairs only drafts that exceed the measured token budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-compact-repair-"));
+  temporaryDirectories.push(root);
+  const prompts: Array<{
+    task?: unknown;
+    request?: { memories?: Array<{ memoryId?: unknown; renderedTokenCount?: unknown }> };
+  }> = [];
+  const outputs = [
+    {
+      schemaVersion: 1,
+      kind: "compact_generation",
+      items: [
+        { memoryId: "m1", compactText: Array.from({ length: 120 }, () => "detail").join(" ") },
+        { memoryId: "m2", compactText: "Already compact." }
+      ]
+    },
+    {
+      schemaVersion: 1,
+      kind: "compact_generation",
+      items: [{ memoryId: "m1", compactText: "Repaired compact." }]
+    }
+  ];
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      prompts.push(JSON.parse(request.standardInput) as typeof prompts[number]);
+      const output = outputs.shift();
+      if (output === undefined) throw new Error("Unexpected Luna call.");
+      return Promise.resolve({ exitCode: 0, stdout: JSON.stringify(output), stderr: "" });
+    }
+  });
+  const memories = ["First", "Second"].map((label, index) => ({
+    memoryId: `msmem_${String(index + 1)}`,
+    revisionId: `msrev_${String(index + 1)}`,
+    body: `${label} durable claim.`,
+    applicability: { summary: "Current project", conditions: [] },
+    semanticContract: {
+      schemaVersion: 1 as const,
+      claims: [`${label} durable claim.`],
+      conditions: [],
+      exclusions: [],
+      preservedNegations: []
+    }
+  }));
+
+  await expect(adapter.generateCompacts({
+    operationId: "generation-repair-1",
+    memories
+  })).resolves.toMatchObject({
+    items: [
+      { memoryId: "msmem_1", compactText: "Repaired compact." },
+      { memoryId: "msmem_2", compactText: "Already compact." }
+    ]
+  });
+  expect(prompts.map((prompt) => prompt.task)).toEqual([
+    "generate_compact_memory_representations",
+    "repair_overlong_compact_memory_representations"
+  ]);
+  expect(prompts[1]?.request?.memories).toHaveLength(1);
+  expect(prompts[1]?.request?.memories?.[0]).toMatchObject({
+    memoryId: "m1"
+  });
+  expect(typeof prompts[1]?.request?.memories?.[0]?.renderedTokenCount).toBe("number");
+});
+
+test("compact generation returns the best repaired draft when lossless compression cannot meet the hard limit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-compact-uncompressible-"));
+  temporaryDirectories.push(root);
+  const overlong = Array.from({ length: 120 }, () => "detail").join(" ");
+  let callCount = 0;
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => {
+      callCount += 1;
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "compact_generation",
+          items: [{ memoryId: "m1", compactText: overlong }]
+        }),
+        stderr: ""
+      });
+    }
+  });
+
+  await expect(adapter.generateCompacts({
+    operationId: "generation-uncompressible-1",
+    memories: [{
+      memoryId: "msmem_1",
+      revisionId: "msrev_1",
+      body: "A dense durable claim.",
+      applicability: { summary: "Current project", conditions: [] },
+      semanticContract: {
+        schemaVersion: 1,
+        claims: ["A dense durable claim."],
+        conditions: [],
+        exclusions: [],
+        preservedNegations: []
+      }
+    }]
+  })).resolves.toMatchObject({
+    items: [{ memoryId: "msmem_1", compactText: overlong }]
+  });
+  expect(callCount).toBe(2);
+});
+
+test("compact validation restores exact Memory identities from short aliases", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-compact-validation-alias-"));
+  temporaryDirectories.push(root);
+  const originalId = "msmem_8e24a0de-56fa-4ddb-9432-1e3d6274c828";
+  let prompt: {
+    request?: { memories?: Array<{ memoryId?: unknown }> };
+  } = {};
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: (request) => {
+      prompt = JSON.parse(request.standardInput) as typeof prompt;
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "compact_validation",
+          items: [{ memoryId: "m1", state: "preserves", reasonCode: "claim_preserved" }]
+        }),
+        stderr: ""
+      });
+    }
+  });
+  const memory = {
+    memoryId: originalId,
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174080",
+    body: "A durable claim.",
+    compactText: "A durable claim.",
+    applicability: { summary: "Current project", conditions: [] },
+    semanticContract: {
+      schemaVersion: 1 as const,
+      claims: ["A durable claim."],
+      conditions: [],
+      exclusions: [],
+      preservedNegations: []
+    }
+  };
+
+  await expect(adapter.validateCompacts({
+    operationId: "validation-alias-1",
+    memories: [memory]
+  })).resolves.toMatchObject({ items: [{ memoryId: originalId, state: "preserves" }] });
+  expect(prompt.request?.memories?.map((item) => item.memoryId)).toEqual(["m1"]);
 });
 
 test("duplicate assessment returns only a bounded decision for supplied cluster identities", async () => {

@@ -3,7 +3,10 @@ import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
-import { LunaInvocationError } from "../luna/index.js";
+import {
+  LunaInvocationError,
+  type LunaSafeDiagnostic
+} from "../luna/index.js";
 import { recordLunaWorkFailure, recordLunaWorkSuccess } from "../luna/operations.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import {
@@ -16,7 +19,28 @@ import {
 const tokenizer = getEncoding("o200k_base");
 const batchSize = 16;
 const leaseMilliseconds = 10 * 60 * 1_000;
-const maximumAttempts = 6;
+const maximumEpochAttempts = 7;
+const lunaSafeDiagnosticSchema = z.object({
+  stage: z.enum([
+    "invocation",
+    "output_decode",
+    "output_schema",
+    "evidence_binding",
+    "importance_validation",
+    "local_processing"
+  ]),
+  code: z.string().min(1),
+  path: z.string().min(1).optional()
+});
+
+function parseLunaSafeDiagnostic(value: unknown): LunaSafeDiagnostic {
+  const parsed = lunaSafeDiagnosticSchema.parse(value);
+  return {
+    stage: parsed.stage,
+    code: parsed.code,
+    ...(parsed.path === undefined ? {} : { path: parsed.path })
+  };
+}
 
 export interface CompactGenerationMemory {
   readonly memoryId: string;
@@ -65,6 +89,7 @@ interface QualityItem {
     | "processing_generation"
     | "processing_validation";
   readonly attemptCount: number;
+  readonly epochAttemptCount: number;
   readonly proposedCompact?: string;
 }
 
@@ -78,24 +103,25 @@ function generationInput(memory: CanonicalMemory): CompactGenerationMemory {
   };
 }
 
-function compactLocallyValid(memory: CanonicalMemory, compactText: string): {
+function compactLocallyValid(compactText: string): {
   readonly valid: boolean;
   readonly renderedTokenCount: number;
+  readonly failureCode?: "compact_empty" | "compact_over_token_limit" | "compact_sensitive";
 } {
   const normalized = compactText.trim();
   const renderedTokenCount = tokenizer.encode(normalized).length;
-  const requiredAnchors = [
-    ...memory.semanticContract.conditions,
-    ...memory.semanticContract.exclusions,
-    ...memory.semanticContract.preservedNegations
-  ].filter((value) => value.trim().length > 0);
+  const sensitivity = classifyLocalSensitivity(normalized);
+  const failureCode = normalized.length === 0
+    ? "compact_empty"
+    : renderedTokenCount > 96
+      ? "compact_over_token_limit"
+      : sensitivity.state !== "normal"
+        ? "compact_sensitive"
+        : undefined;
   return {
-    valid:
-      normalized.length > 0 &&
-      renderedTokenCount <= 96 &&
-      classifyLocalSensitivity(normalized).state === "normal" &&
-      requiredAnchors.every((anchor) => normalized.includes(anchor)),
-    renderedTokenCount
+    valid: failureCode === undefined,
+    renderedTokenCount,
+    ...(failureCode === undefined ? {} : { failureCode })
   };
 }
 
@@ -233,6 +259,101 @@ export async function scheduleCompactQuality(request: {
   };
 }
 
+export async function retryRepairableMemoryQuality(request: {
+  readonly runtimeRoot: string;
+  readonly retriedAt: string;
+  readonly preview: boolean;
+}): Promise<{
+  readonly state: "preview" | "retried";
+  readonly dryRun: boolean;
+  readonly eligibleCount: number;
+  readonly eligibleCounts: {
+    readonly blockedSchemaInvalid: number;
+    readonly localGateRejected: number;
+  };
+  readonly restartCounts: {
+    readonly generation: number;
+    readonly validation: number;
+  };
+  readonly changedCount: number;
+}> {
+  const retriedAt = z.iso.datetime().parse(request.retriedAt);
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    const rows = database.prepare(
+      `SELECT item_id, state, proposed_compact FROM memory_quality_items
+       WHERE (state = 'blocked' AND last_error_category = 'schema_invalid')
+          OR (state = 'rejected' AND validation_reason_code = 'local_gate_failed')
+       ORDER BY created_at, item_id`
+    ).all();
+    const blockedSchemaInvalid = rows.filter((row) => row.state === "blocked").length;
+    const localGateRejected = rows.length - blockedSchemaInvalid;
+    const eligibleCount = blockedSchemaInvalid + localGateRejected;
+    const validationItemIds = rows.flatMap((row) =>
+      row.state === "rejected" &&
+      typeof row.proposed_compact === "string" &&
+      compactLocallyValid(row.proposed_compact).valid
+        ? [z.string().parse(row.item_id)]
+        : []
+    );
+    const validationItemIdSet = new Set(validationItemIds);
+    const generationItemIds = rows
+      .map((row) => z.string().parse(row.item_id))
+      .filter((itemId) => !validationItemIdSet.has(itemId));
+    let changedCount = 0;
+    if (!request.preview && eligibleCount > 0) {
+      const restartGeneration = database.prepare(
+        `UPDATE memory_quality_items SET
+           state = 'pending_generation', proposed_compact = NULL,
+           rendered_token_count = NULL, generator_identity = NULL,
+           validation_state = NULL, validation_reason_code = NULL,
+           next_retry_at = NULL, last_error_category = NULL,
+           last_error_diagnostic_json = NULL, lease_token = NULL,
+           lease_until = NULL, completed_at = NULL,
+           retry_epoch = retry_epoch + 1, epoch_attempt_count = 0,
+           updated_at = ?
+         WHERE item_id = ?`
+      );
+      const restartValidation = database.prepare(
+        `UPDATE memory_quality_items SET
+           state = 'pending_validation', validation_state = NULL,
+           validation_reason_code = NULL, next_retry_at = NULL,
+           last_error_category = NULL, last_error_diagnostic_json = NULL,
+           lease_token = NULL, lease_until = NULL, completed_at = NULL,
+           retry_epoch = retry_epoch + 1, epoch_attempt_count = 0,
+           updated_at = ?
+         WHERE item_id = ?`
+      );
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        for (const itemId of generationItemIds) {
+          changedCount += Number(restartGeneration.run(retriedAt, itemId).changes);
+        }
+        for (const itemId of validationItemIds) {
+          changedCount += Number(restartValidation.run(retriedAt, itemId).changes);
+        }
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    return {
+      state: request.preview ? "preview" : "retried",
+      dryRun: request.preview,
+      eligibleCount,
+      eligibleCounts: { blockedSchemaInvalid, localGateRejected },
+      restartCounts: {
+        generation: generationItemIds.length,
+        validation: validationItemIds.length
+      },
+      changedCount
+    };
+  } finally {
+    database.close();
+  }
+}
+
 export async function advanceCompactQualityDiscovery(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
@@ -301,6 +422,7 @@ function parseQualityItem(row: Record<string, unknown>): QualityItem {
     sourceContentIdentity: z.string().parse(row.source_content_identity),
     state: z.enum(["processing_generation", "processing_validation"]).parse(row.state),
     attemptCount: z.number().int().positive().parse(row.attempt_count),
+    epochAttemptCount: z.number().int().positive().parse(row.epoch_attempt_count),
     ...(typeof row.proposed_compact === "string" ? { proposedCompact: row.proposed_compact } : {})
   };
 }
@@ -316,11 +438,12 @@ async function claimBatch(request: {
   try {
     database.exec("BEGIN IMMEDIATE");
     const first = database.prepare(
-      `SELECT state FROM memory_quality_items
+      `SELECT state, last_error_category, epoch_attempt_count FROM memory_quality_items
        WHERE state IN ('pending_generation', 'pending_validation')
           OR (state IN ('retrying_generation', 'retrying_validation') AND next_retry_at <= ?)
           OR (state IN ('processing_generation', 'processing_validation') AND lease_until < ?)
-       ORDER BY CASE WHEN state LIKE '%generation' THEN 0 ELSE 1 END, created_at LIMIT 1`
+       ORDER BY CASE WHEN state LIKE '%generation' THEN 0 ELSE 1 END,
+         epoch_attempt_count DESC, created_at, item_id LIMIT 1`
     ).get(request.now, request.now);
     if (first === undefined) {
       database.exec("COMMIT");
@@ -331,22 +454,33 @@ async function claimBatch(request: {
     const retryingState = generation ? "retrying_generation" : "retrying_validation";
     const previousProcessingState = generation ? "processing_generation" : "processing_validation";
     const processingState = generation ? "processing_generation" : "processing_validation";
+    const structuralRetry = first.last_error_category === "schema_invalid" &&
+      first.state !== pendingState;
+    const claimLimit = structuralRetry
+      ? Math.max(
+          1,
+          Math.floor(
+            batchSize / 2 ** z.number().int().nonnegative().parse(first.epoch_attempt_count)
+          )
+        )
+      : batchSize;
     const rows = database.prepare(
       `SELECT * FROM memory_quality_items
        WHERE state = ?
           OR (state = ? AND next_retry_at <= ?)
           OR (state = ? AND lease_until < ?)
-       ORDER BY created_at LIMIT ?`
+       ORDER BY epoch_attempt_count DESC, created_at, item_id LIMIT ?`
     ).all(
       pendingState,
       retryingState,
       request.now,
       previousProcessingState,
       request.now,
-      batchSize
+      claimLimit
     );
     const update = database.prepare(
       `UPDATE memory_quality_items SET state = ?, attempt_count = attempt_count + 1,
+         epoch_attempt_count = epoch_attempt_count + 1,
          lease_token = ?, lease_until = ?, updated_at = ? WHERE item_id = ?`
     );
     for (const row of rows) {
@@ -364,7 +498,8 @@ async function claimBatch(request: {
       items: rows.map((row) => parseQualityItem({
         ...row,
         state: processingState,
-        attempt_count: Number(row.attempt_count) + 1
+        attempt_count: Number(row.attempt_count) + 1,
+        epoch_attempt_count: Number(row.epoch_attempt_count) + 1
       }))
     };
   } catch (error) {
@@ -380,7 +515,8 @@ async function markStale(runtimeRoot: string, itemIds: readonly string[], now: s
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     const update = database.prepare(
-      "UPDATE memory_quality_items SET state = 'stale', completed_at = ?, updated_at = ? WHERE item_id = ?"
+      `UPDATE memory_quality_items SET state = 'stale', completed_at = ?, updated_at = ?,
+         last_error_category = NULL, last_error_diagnostic_json = NULL WHERE item_id = ?`
     );
     database.exec("BEGIN IMMEDIATE");
     for (const itemId of itemIds) update.run(now, now, itemId);
@@ -399,7 +535,7 @@ async function failBatch(request: {
   readonly failedAt: string;
   readonly error: LunaInvocationError;
 }): Promise<"retrying" | "blocked"> {
-  const maximumAttempt = Math.max(...request.items.map((item) => item.attemptCount));
+  const maximumAttempt = Math.max(...request.items.map((item) => item.epochAttemptCount));
   const health = await recordLunaWorkFailure({
     runtimeRoot: request.runtimeRoot,
     workId: request.items[0]?.itemId ?? "memory-quality",
@@ -407,12 +543,13 @@ async function failBatch(request: {
     failedAt: request.failedAt,
     error: request.error
   });
-  const blocked = !request.error.retryable || maximumAttempt >= maximumAttempts;
+  const blocked = !request.error.retryable || maximumAttempt >= maximumEpochAttempts;
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     const update = database.prepare(
       `UPDATE memory_quality_items SET state = ?, next_retry_at = ?,
-         last_error_category = ?, lease_token = NULL, lease_until = NULL, updated_at = ?
+         last_error_category = ?, last_error_diagnostic_json = ?,
+         lease_token = NULL, lease_until = NULL, updated_at = ?
        WHERE item_id = ?`
     );
     database.exec("BEGIN IMMEDIATE");
@@ -424,6 +561,9 @@ async function failBatch(request: {
         blocked ? "blocked" : retryState,
         blocked ? null : health.nextRetryAt,
         request.error.category,
+        request.error.diagnostic === undefined
+          ? null
+          : JSON.stringify(request.error.diagnostic),
         request.failedAt,
         item.itemId
       );
@@ -451,7 +591,7 @@ function nextRepresentations(
     compact: {
       text: compactText,
       validated: true,
-      generatorIdentity: "gpt-5.6-luna:compact-generation-v1+fidelity-v1",
+      generatorIdentity: "gpt-5.6-luna:compact-generation-v3+fidelity-v2",
       sourceRevisionId: revisionId,
       renderedTokenCount: tokenCount
     },
@@ -505,20 +645,30 @@ export async function runNextMemoryQualityStep(request: {
         const update = database.prepare(
           `UPDATE memory_quality_items SET state = ?, proposed_compact = ?,
              rendered_token_count = ?, generator_identity = ?, validation_state = NULL,
-             validation_reason_code = ?, lease_token = NULL, lease_until = NULL, updated_at = ?
+             validation_reason_code = ?, last_error_category = NULL,
+             last_error_diagnostic_json = NULL, lease_token = NULL,
+             lease_until = NULL, completed_at = ?, updated_at = ?
            WHERE item_id = ? AND state = 'processing_generation'`
         );
         database.exec("BEGIN IMMEDIATE");
         for (const entry of current) {
           const generated = byMemory.get(entry.memory.memoryId);
           const compactText = generated?.compactText.trim() ?? "";
-          const local = compactLocallyValid(entry.memory, compactText);
+          const local = compactLocallyValid(compactText);
+          const rejectionReason = local.failureCode === "compact_over_token_limit"
+            ? "compact_over_token_limit_after_repair"
+            : local.failureCode === "compact_empty"
+              ? "compact_empty_after_generation"
+              : local.failureCode === "compact_sensitive"
+                ? "compact_sensitive_output"
+                : "compact_local_contract_failed";
           update.run(
             local.valid ? "pending_validation" : "rejected",
             compactText || null,
             local.renderedTokenCount,
-            "gpt-5.6-luna:compact-generation-v1",
-            local.valid ? null : "local_gate_failed",
+            "gpt-5.6-luna:compact-generation-v3",
+            local.valid ? null : rejectionReason,
+            local.valid ? null : now,
             now,
             entry.item.itemId
           );
@@ -556,6 +706,7 @@ export async function runNextMemoryQualityStep(request: {
           database.prepare(
             `UPDATE memory_quality_items SET state = 'rejected', validation_state = ?,
                validation_reason_code = ?, completed_at = ?, updated_at = ?,
+               last_error_category = NULL, last_error_diagnostic_json = NULL,
                lease_token = NULL, lease_until = NULL WHERE item_id = ?`
           ).run(
             validation?.state ?? "uncertain",
@@ -571,7 +722,7 @@ export async function runNextMemoryQualityStep(request: {
         continue;
       }
       const compactText = z.string().min(1).parse(entry.item.proposedCompact);
-      const local = compactLocallyValid(entry.memory, compactText);
+      const local = compactLocallyValid(compactText);
       if (!local.valid) {
         await markStale(request.runtimeRoot, [entry.item.itemId], now);
         staleCount += 1;
@@ -590,9 +741,9 @@ export async function runNextMemoryQualityStep(request: {
             predecessorRevisionId: entry.memory.revisionId,
             revisedAt: now,
             representations: nextRepresentations(entry.memory, revisionId, compactText, local.renderedTokenCount),
-            provenance: entry.memory.provenance.includes("quality:luna-compact-backfill-v1")
+            provenance: entry.memory.provenance.includes("quality:luna-compact-backfill-v3")
               ? entry.memory.provenance
-              : [...entry.memory.provenance, "quality:luna-compact-backfill-v1"]
+              : [...entry.memory.provenance, "quality:luna-compact-backfill-v3"]
           }
         });
       } catch (error) {
@@ -608,6 +759,7 @@ export async function runNextMemoryQualityStep(request: {
         database.prepare(
           `UPDATE memory_quality_items SET state = 'completed', validation_state = 'preserves',
              validation_reason_code = ?, completed_at = ?, updated_at = ?,
+             last_error_category = NULL, last_error_diagnostic_json = NULL,
              lease_token = NULL, lease_until = NULL WHERE item_id = ?`
         ).run(validation.reasonCode, now, now, entry.item.itemId);
       } finally {
@@ -637,9 +789,21 @@ export async function inspectMemoryQualityPipeline(request: {
   readonly totalCount: number;
   readonly pendingCount: number;
   readonly completedCount: number;
+  readonly pendingGenerationCount: number;
+  readonly pendingValidationCount: number;
   readonly rejectedCount: number;
   readonly blockedCount: number;
   readonly staleCount: number;
+  readonly failureDiagnostics: readonly {
+    readonly state: string;
+    readonly category: string;
+    readonly diagnostic?: LunaSafeDiagnostic;
+    readonly count: number;
+  }[];
+  readonly rejectionReasons: readonly {
+    readonly reasonCode: string;
+    readonly count: number;
+  }[];
   readonly schedule: {
     readonly enabled: boolean;
     readonly nextScanAt?: string;
@@ -661,16 +825,54 @@ export async function inspectMemoryQualityPipeline(request: {
     const scheduleRow = database.prepare(
       "SELECT * FROM memory_quality_schedule WHERE singleton = 1"
     ).get();
+    const diagnosticRows = database.prepare(
+      `SELECT state, last_error_category, last_error_diagnostic_json, COUNT(*) AS count
+       FROM memory_quality_items WHERE last_error_category IS NOT NULL
+         AND state IN (
+           'processing_generation', 'retrying_generation',
+           'processing_validation', 'retrying_validation', 'blocked'
+         )
+       GROUP BY state, last_error_category, last_error_diagnostic_json
+       ORDER BY state, last_error_category, last_error_diagnostic_json`
+    ).all();
+    const rejectionRows = database.prepare(
+      `SELECT validation_reason_code, COUNT(*) AS count
+       FROM memory_quality_items
+       WHERE state = 'rejected' AND validation_reason_code IS NOT NULL
+       GROUP BY validation_reason_code ORDER BY validation_reason_code`
+    ).all();
     return {
       totalCount: count(...counts.keys()),
       pendingCount: count(
         "pending_generation", "processing_generation", "retrying_generation",
         "pending_validation", "processing_validation", "retrying_validation"
       ),
+      pendingGenerationCount: count(
+        "pending_generation", "processing_generation", "retrying_generation"
+      ),
+      pendingValidationCount: count(
+        "pending_validation", "processing_validation", "retrying_validation"
+      ),
       completedCount: count("completed"),
       rejectedCount: count("rejected"),
       blockedCount: count("blocked"),
       staleCount: count("stale"),
+      failureDiagnostics: diagnosticRows.map((row) => ({
+        state: z.string().parse(row.state),
+        category: z.string().parse(row.last_error_category),
+        ...(typeof row.last_error_diagnostic_json === "string"
+          ? {
+              diagnostic: parseLunaSafeDiagnostic(
+                JSON.parse(row.last_error_diagnostic_json) as unknown
+              )
+            }
+          : {}),
+        count: z.number().int().nonnegative().parse(row.count)
+      })),
+      rejectionReasons: rejectionRows.map((row) => ({
+        reasonCode: z.string().parse(row.validation_reason_code),
+        count: z.number().int().nonnegative().parse(row.count)
+      })),
       schedule: {
         enabled: scheduleRow?.enabled === 1,
         ...(typeof scheduleRow?.next_scan_at === "string"

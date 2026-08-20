@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 
 import { captureEvent, inspectCaptureEventState } from "../../../src/capture/index.js";
+import { LunaInvocationError } from "../../../src/luna/index.js";
 import {
   enqueueCompactBackfill,
   inspectMemoryQualityPipeline,
@@ -109,6 +110,261 @@ test("compact backfill publishes only after a separate fidelity assessment", asy
     completedCount: 1,
     pendingCount: 0
   });
+});
+
+test("semantic anchor paraphrases reach independent compact fidelity validation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-quality-semantic-anchor-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const memoryId = "msmem_123e4567-e89b-42d3-a456-426614174083";
+  const base = makeCanonicalMemory({
+    memoryId,
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174083",
+    authority: "agent_derived",
+    body: "Use the safe synchronization procedure only when the repository has uncommitted changes.",
+    validatedCompact: false
+  });
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "agent",
+    memory: {
+      ...base,
+      semanticContract: {
+        ...base.semanticContract,
+        conditions: ["Only when the repository has uncommitted changes."]
+      }
+    }
+  });
+  const calls: string[] = [];
+  const adapter: MemoryQualityAdapter = {
+    generateCompacts: (request) => {
+      calls.push("generate");
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "compact_generation",
+        items: request.memories.map((memory) => ({
+          memoryId: memory.memoryId,
+          compactText: "Use the safe synchronization procedure only in a dirty working tree."
+        }))
+      });
+    },
+    validateCompacts: (request) => {
+      calls.push("validate");
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "compact_validation",
+        items: request.memories.map((memory) => ({
+          memoryId: memory.memoryId,
+          state: "preserves" as const,
+          reasonCode: "condition_semantically_preserved"
+        }))
+      });
+    }
+  };
+  await enqueueCompactBackfill({
+    runtimeRoot,
+    vaultRoot,
+    requestedAt: "2026-08-20T08:00:00.000Z",
+    preview: false
+  });
+
+  await expect(runNextMemoryQualityStep({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "quality-worker",
+    now: "2026-08-20T08:00:01.000Z",
+    adapter
+  })).resolves.toMatchObject({ state: "generated", itemCount: 1 });
+  await expect(runNextMemoryQualityStep({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "quality-worker",
+    now: "2026-08-20T08:00:02.000Z",
+    adapter
+  })).resolves.toMatchObject({ state: "published", itemCount: 1 });
+  expect(calls).toEqual(["generate", "validate"]);
+});
+
+test("an overlong generated compact is explicitly rejected after the adapter repair opportunity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-quality-overlong-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "agent",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174085",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174085",
+      authority: "agent_derived",
+      body: "Preserve dense conditions without publishing an overlong compact.",
+      validatedCompact: false
+    })
+  });
+  await enqueueCompactBackfill({
+    runtimeRoot,
+    vaultRoot,
+    requestedAt: "2026-08-20T08:30:00.000Z",
+    preview: false
+  });
+  const adapter: MemoryQualityAdapter = {
+    generateCompacts: (request) => Promise.resolve({
+      schemaVersion: 1,
+      kind: "compact_generation",
+      items: request.memories.map((memory) => ({
+        memoryId: memory.memoryId,
+        compactText: Array.from({ length: 120 }, () => "detail").join(" ")
+      }))
+    }),
+    validateCompacts: () => Promise.reject(new Error("Validation is not expected."))
+  };
+
+  await expect(runNextMemoryQualityStep({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "quality-worker",
+    now: "2026-08-20T08:30:01.000Z",
+    adapter
+  })).resolves.toMatchObject({ state: "rejected", itemCount: 1 });
+  await expect(inspectMemoryQualityPipeline({ runtimeRoot })).resolves.toMatchObject({
+    pendingCount: 0,
+    rejectedCount: 1,
+    rejectionReasons: [{
+      reasonCode: "compact_over_token_limit_after_repair",
+      count: 1
+    }]
+  });
+});
+
+test("quality status exposes bounded Luna failure diagnostics", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-quality-safe-diagnostic-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "agent",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174084",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174084",
+      authority: "agent_derived",
+      body: "Persist bounded quality diagnostics without provider output.",
+      validatedCompact: false
+    })
+  });
+  await enqueueCompactBackfill({
+    runtimeRoot,
+    vaultRoot,
+    requestedAt: "2026-08-20T09:00:00.000Z",
+    preview: false
+  });
+  const adapter: MemoryQualityAdapter = {
+    generateCompacts: () => Promise.reject(new LunaInvocationError(
+      "schema_invalid",
+      true,
+      "The returned Memory identity is not available.",
+      { stage: "evidence_binding", code: "unknown_memory_alias", path: "items.0.memoryId" }
+    )),
+    validateCompacts: () => Promise.reject(new Error("Validation is not expected."))
+  };
+
+  await expect(runNextMemoryQualityStep({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "quality-worker",
+    now: "2026-08-20T09:00:01.000Z",
+    adapter
+  })).resolves.toMatchObject({ state: "retrying", itemCount: 1 });
+  await expect(inspectMemoryQualityPipeline({ runtimeRoot })).resolves.toMatchObject({
+    failureDiagnostics: [{
+      state: "retrying_generation",
+      category: "schema_invalid",
+      diagnostic: {
+        stage: "evidence_binding",
+        code: "unknown_memory_alias",
+        path: "items.0.memoryId"
+      },
+      count: 1
+    }]
+  });
+});
+
+test("repeated structural failures shrink the claimed compact batch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-quality-structural-shrink-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  for (let index = 0; index < 16; index += 1) {
+    const suffix = String(index + 1).padStart(12, "0");
+    await writeCanonicalMemory({
+      runtimeRoot,
+      vaultRoot,
+      actor: "agent",
+      memory: makeCanonicalMemory({
+        memoryId: `msmem_123e4567-e89b-42d3-a456-${suffix}`,
+        revisionId: `msrev_123e4567-e89b-42d3-a456-${suffix}`,
+        authority: "agent_derived",
+        body: `Durable compact claim ${String(index + 1)}.`,
+        validatedCompact: false
+      })
+    });
+  }
+  await enqueueCompactBackfill({
+    runtimeRoot,
+    vaultRoot,
+    requestedAt: "2026-08-20T10:00:00.000Z",
+    preview: false
+  });
+  const generationBatchSizes: number[] = [];
+  const adapter: MemoryQualityAdapter = {
+    generateCompacts: (request) => {
+      generationBatchSizes.push(request.memories.length);
+      if (request.memories.length > 4) {
+        return Promise.reject(new LunaInvocationError(
+          "schema_invalid",
+          true,
+          "The compact output has an invalid structure.",
+          { stage: "output_schema", code: "invalid_type", path: "items" }
+        ));
+      }
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "compact_generation",
+        items: request.memories.map((memory) => ({
+          memoryId: memory.memoryId,
+          compactText: memory.body
+        }))
+      });
+    },
+    validateCompacts: () => Promise.reject(new Error("Validation is not expected."))
+  };
+
+  await expect(runNextMemoryQualityStep({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "quality-worker",
+    now: "2026-08-20T10:00:01.000Z",
+    adapter
+  })).resolves.toMatchObject({ state: "retrying", itemCount: 16 });
+  await expect(runNextMemoryQualityStep({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "quality-worker",
+    now: "2026-08-21T10:00:01.000Z",
+    adapter
+  })).resolves.toMatchObject({ state: "retrying", itemCount: 8 });
+  await expect(runNextMemoryQualityStep({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "quality-worker",
+    now: "2026-08-22T10:00:01.000Z",
+    adapter
+  })).resolves.toMatchObject({ state: "generated", itemCount: 4 });
+  expect(generationBatchSizes).toEqual([16, 8, 4]);
 });
 
 test("a recent incomplete Turn does not starve a due quality scan", async () => {

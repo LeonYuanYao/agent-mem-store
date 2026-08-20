@@ -30,6 +30,7 @@ import {
 import {
   enqueueCompactBackfill,
   inspectMemoryQualityPipeline,
+  retryRepairableMemoryQuality,
   scheduleCompactQuality
 } from "../quality/pipeline.js";
 import {
@@ -642,6 +643,17 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
     return {
       command: "quality.status",
       result: await inspectMemoryQualityPipeline({ runtimeRoot: location.runtimeRoot }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "quality" && parsed.positionals[1] === "retry") {
+    return {
+      command: "quality.retry",
+      result: await retryRepairableMemoryQuality({
+        runtimeRoot: location.runtimeRoot,
+        retriedAt: now,
+        preview: parsed.values.preview
+      }),
       json: parsed.values.json
     };
   }

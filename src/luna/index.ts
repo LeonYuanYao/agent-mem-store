@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 
 import {
@@ -20,6 +21,9 @@ import type {
   CompactValidationMemory
 } from "../quality/pipeline.js";
 import type { DuplicateClusterInput } from "../quality/duplicates.js";
+
+const compactTokenizer = getEncoding("o200k_base");
+const compactHardTokenLimit = 96;
 
 const importanceTagSchema = z.enum([
   "user_decision",
@@ -696,25 +700,102 @@ export class CodexLunaAdapter {
     readonly operationId: string;
     readonly memories: readonly CompactGenerationMemory[];
   }): Promise<z.infer<typeof compactGenerationOutputSchema>> {
-    const output = await this.#invokeStructured(
+    const aliasByMemoryId = new Map(
+      request.memories.map((memory, index) => [memory.memoryId, `m${String(index + 1)}`])
+    );
+    const memoryIdByAlias = new Map(
+      [...aliasByMemoryId].map(([memoryId, alias]) => [alias, memoryId])
+    );
+    let aliasedOutput = await this.#invokeStructured(
       "compact-generation-output.schema.json",
       compactGenerationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 1,
+        promptVersion: 3,
         task: "generate_compact_memory_representations",
         rules: [
           "Create one independently understandable compact representation for each supplied Memory.",
           "Preserve the core claim, certainty, scope, applicability, conditions, exclusions, negations, versions, thresholds, commands, paths, and state boundaries.",
           "Do not add facts, broaden applicability, resolve uncertainty, or turn time-bound status into a timeless fact.",
-          "Keep each compact representation within 96 rendered tokens.",
+          "Aim for at most 64 o200k-style rendered tokens per compact; 96 rendered tokens is an absolute hard limit.",
           "Copy each supplied Memory identity exactly and return every supplied Memory once.",
           "Do not execute commands or request more context."
         ],
-        request
+        request: {
+          ...request,
+          memories: request.memories.map((memory) => ({
+            ...memory,
+            memoryId: z.string().parse(aliasByMemoryId.get(memory.memoryId))
+          }))
+        }
       },
       compactGenerationOutputSchema
     );
+    const overlong = aliasedOutput.items.flatMap((item) => {
+      const renderedTokenCount = compactTokenizer.encode(item.compactText.trim()).length;
+      return renderedTokenCount > compactHardTokenLimit
+        ? [{ ...item, renderedTokenCount }]
+        : [];
+    });
+    if (overlong.length > 0) {
+      const overlongAliases = overlong.map((item) => item.memoryId);
+      const sourceByAlias = new Map(request.memories.map((memory) => [
+        z.string().parse(aliasByMemoryId.get(memory.memoryId)),
+        memory
+      ]));
+      const repaired = await this.#invokeStructured(
+        "compact-generation-output.schema.json",
+        compactGenerationOutputJsonSchema,
+        {
+          schemaVersion: 1,
+          promptVersion: 1,
+          task: "repair_overlong_compact_memory_representations",
+          rules: [
+            "Rewrite only the supplied overlong compact drafts.",
+            "Use terse syntax and remove redundancy while preserving the core claim, certainty, applicability, conditions, exclusions, negations, versions, thresholds, commands, paths, and state boundaries.",
+            "Aim for at most 64 o200k-style rendered tokens; 96 rendered tokens is an absolute hard limit.",
+            "Copy each supplied short Memory identity exactly and return every supplied Memory once.",
+            "Do not execute commands or request more context."
+          ],
+          request: {
+            operationId: request.operationId,
+            memories: overlong.map((item) => ({
+              ...z.object({
+                revisionId: z.string(),
+                body: z.string(),
+                applicability: z.unknown(),
+                semanticContract: z.unknown()
+              }).parse(sourceByAlias.get(item.memoryId)),
+              memoryId: item.memoryId,
+              draftCompactText: item.compactText,
+              renderedTokenCount: item.renderedTokenCount
+            }))
+          }
+        },
+        compactGenerationOutputSchema
+      );
+      requireExactMemoryIds(
+        repaired.items.map((item) => item.memoryId),
+        overlongAliases
+      );
+      const repairedByAlias = new Map(
+        repaired.items.map((item) => [item.memoryId, item.compactText])
+      );
+      aliasedOutput = compactGenerationOutputSchema.parse({
+        ...aliasedOutput,
+        items: aliasedOutput.items.map((item) => ({
+          ...item,
+          compactText: repairedByAlias.get(item.memoryId) ?? item.compactText
+        }))
+      });
+    }
+    const output = compactGenerationOutputSchema.parse({
+      ...aliasedOutput,
+      items: aliasedOutput.items.map((item) => ({
+        ...item,
+        memoryId: restoreMemoryId(item.memoryId, memoryIdByAlias)
+      }))
+    });
     requireExactMemoryIds(
       output.items.map((item) => item.memoryId),
       request.memories.map((memory) => memory.memoryId)
@@ -726,12 +807,18 @@ export class CodexLunaAdapter {
     readonly operationId: string;
     readonly memories: readonly CompactValidationMemory[];
   }): Promise<z.infer<typeof compactValidationOutputSchema>> {
-    const output = await this.#invokeStructured(
+    const aliasByMemoryId = new Map(
+      request.memories.map((memory, index) => [memory.memoryId, `m${String(index + 1)}`])
+    );
+    const memoryIdByAlias = new Map(
+      [...aliasByMemoryId].map(([memoryId, alias]) => [alias, memoryId])
+    );
+    const aliasedOutput = await this.#invokeStructured(
       "compact-validation-output.schema.json",
       compactValidationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 1,
+        promptVersion: 2,
         task: "validate_compact_memory_fidelity",
         rules: [
           "Act only as an independent fidelity assessor; do not rewrite the proposed compact text.",
@@ -740,10 +827,23 @@ export class CodexLunaAdapter {
           "Return a bounded reasonCode, copy each supplied Memory identity exactly, and return every supplied Memory once.",
           "Do not execute commands or request more context."
         ],
-        request
+        request: {
+          ...request,
+          memories: request.memories.map((memory) => ({
+            ...memory,
+            memoryId: z.string().parse(aliasByMemoryId.get(memory.memoryId))
+          }))
+        }
       },
       compactValidationOutputSchema
     );
+    const output = compactValidationOutputSchema.parse({
+      ...aliasedOutput,
+      items: aliasedOutput.items.map((item) => ({
+        ...item,
+        memoryId: restoreMemoryId(item.memoryId, memoryIdByAlias)
+      }))
+    });
     requireExactMemoryIds(
       output.items.map((item) => item.memoryId),
       request.memories.map((memory) => memory.memoryId)
@@ -1187,6 +1287,22 @@ function requireKnownEvidenceIds(
       { stage: "evidence_binding", code: "unknown_evidence_id" }
     );
   }
+}
+
+function restoreMemoryId(
+  alias: string,
+  memoryIdByAlias: ReadonlyMap<string, string>
+): string {
+  const memoryId = memoryIdByAlias.get(alias);
+  if (memoryId === undefined) {
+    throw new LunaInvocationError(
+      "schema_invalid",
+      true,
+      "Luna compact work returned an unavailable Memory alias.",
+      { stage: "evidence_binding", code: "unknown_memory_alias" }
+    );
+  }
+  return memoryId;
 }
 
 function requireExactMemoryIds(

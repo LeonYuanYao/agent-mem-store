@@ -184,6 +184,16 @@ const migrations: readonly Migration[] = [
     version: 35,
     name: "governance_retry_epochs",
     path: new URL("../../migrations/0035-governance-retry-epochs.sql", import.meta.url)
+  },
+  {
+    version: 36,
+    name: "memory_quality_retry_diagnostics",
+    path: new URL("../../migrations/0036-memory-quality-retry-diagnostics.sql", import.meta.url)
+  },
+  {
+    version: 37,
+    name: "clear_terminal_quality_errors",
+    path: new URL("../../migrations/0037-clear-terminal-quality-errors.sql", import.meta.url)
   }
 ];
 
