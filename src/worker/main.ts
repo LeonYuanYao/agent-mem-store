@@ -4,6 +4,10 @@ import { Temporal } from "@js-temporal/polyfill";
 import type { GovernanceAdapter } from "../governance/worker.js";
 import { runNextGovernanceStep } from "../governance/worker.js";
 import { scheduleDueGovernance } from "../governance/scheduling.js";
+import {
+  recordCaptureHealthIncident,
+  recoverCaptureHealthIncident
+} from "../capture/index.js";
 import type { NotifierPort } from "../adapters/macos/notifier.js";
 import { dispatchNextReminder } from "../review/reminders.js";
 import { prepareReviewReminder } from "../review/reminders.js";
@@ -376,17 +380,59 @@ export async function runWorker(request: {
     request.intervalMilliseconds ?? 1_000
   );
   let iterations = 0;
+  let consecutiveIterationFailure = false;
+  let initialIncidentRecoveryPending = true;
   while (request.signal?.aborted !== true) {
-    await runWorkerOnce({
-      runtimeRoot: request.runtimeRoot,
-      vaultRoot: request.vaultRoot,
-      workerId: request.workerId,
-      now: new Date().toISOString(),
-      workerStartedAt: request.startedAt,
-      ...(request.adapters === undefined ? {} : { adapters: request.adapters })
-    });
+    const iterationAt = new Date().toISOString();
+    try {
+      await runWorkerOnce({
+        runtimeRoot: request.runtimeRoot,
+        vaultRoot: request.vaultRoot,
+        workerId: request.workerId,
+        now: iterationAt,
+        workerStartedAt: request.startedAt,
+        ...(request.adapters === undefined ? {} : { adapters: request.adapters })
+      });
+      if (initialIncidentRecoveryPending || consecutiveIterationFailure) {
+        await recoverCaptureHealthIncident({
+          runtimeRoot: request.runtimeRoot,
+          category: "worker_loop",
+          recoveredAt: new Date().toISOString()
+        });
+        initialIncidentRecoveryPending = false;
+        consecutiveIterationFailure = false;
+      }
+    } catch (error) {
+      if (!consecutiveIterationFailure) {
+        try {
+          await recordCaptureHealthIncident({
+            runtimeRoot: request.runtimeRoot,
+            category: "worker_loop",
+            errorCode: workerLoopErrorCode(error),
+            occurredAt: new Date().toISOString()
+          });
+        } catch {
+          process.stderr.write("memstore worker: iteration failed; health incident unavailable\n");
+        }
+      }
+      consecutiveIterationFailure = true;
+    }
     iterations += 1;
     await new Promise<void>((resolveWait) => setTimeout(resolveWait, intervalMilliseconds));
   }
   return { state: "stopped", iterations };
+}
+
+function workerLoopErrorCode(error: unknown): string {
+  const suppliedCode = typeof error === "object" && error !== null && "code" in error
+    ? error.code
+    : undefined;
+  const source = typeof suppliedCode === "string"
+    ? suppliedCode
+    : error instanceof Error && error.name !== "Error"
+      ? error.name
+      : "iteration_failed";
+  const normalized = source.toLowerCase().replace(/[^a-z0-9]+/gu, "_")
+    .replace(/^_+|_+$/gu, "");
+  return `worker_${normalized.length === 0 ? "iteration_failed" : normalized}`.slice(0, 64);
 }

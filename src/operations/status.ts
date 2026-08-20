@@ -90,6 +90,12 @@ export async function inspectStatus(request: {
     const worker = database.prepare(
       "SELECT capture_paused, worker_paused, reason, updated_at FROM worker_control WHERE singleton = 1"
     ).get();
+    const workerIncident = database.prepare(
+      `SELECT started_at, occurrence_count, last_error_code
+       FROM capture_health_incidents
+       WHERE category = 'worker_loop' AND ended_at IS NULL
+       ORDER BY started_at DESC LIMIT 1`
+    ).get();
     const reminderCount = database.prepare(
       `SELECT COUNT(*) AS count FROM reminder_obligations
        WHERE state IN ('pending', 'delivering', 'failed', 'fallback', 'snoozed')`
@@ -166,12 +172,22 @@ export async function inspectStatus(request: {
         capture_paused: false,
         worker_paused: false,
         reason: null,
-        updated_at: null
+        updated_at: null,
+        health_incident: workerIncident === undefined ? null : {
+          started_at: workerIncident.started_at,
+          occurrence_count: workerIncident.occurrence_count,
+          last_error_code: workerIncident.last_error_code
+        }
       } : {
         capture_paused: worker.capture_paused === 1,
         worker_paused: worker.worker_paused === 1,
         reason: typeof worker.reason === "string" ? worker.reason : null,
-        updated_at: worker.updated_at
+        updated_at: worker.updated_at,
+        health_incident: workerIncident === undefined ? null : {
+          started_at: workerIncident.started_at,
+          occurrence_count: workerIncident.occurrence_count,
+          last_error_code: workerIncident.last_error_code
+        }
       },
       review: {
         pending_reminder_count: z.number().int().nonnegative().parse(reminderCount?.count),

@@ -654,7 +654,7 @@ export interface CaptureEventStateView {
 
 export interface RecordCaptureHealthIncidentRequest {
   readonly runtimeRoot: string;
-  readonly category: "hook_capture" | "capture_processing";
+  readonly category: "hook_capture" | "capture_processing" | "worker_loop";
   readonly errorCode: string;
   readonly occurredAt: string;
 }
@@ -778,6 +778,23 @@ export async function recordCaptureHealthIncident(
       database.exec("ROLLBACK");
       throw error;
     }
+  } finally {
+    database.close();
+  }
+}
+
+export async function recoverCaptureHealthIncident(request: {
+  readonly runtimeRoot: string;
+  readonly category: RecordCaptureHealthIncidentRequest["category"];
+  readonly recoveredAt: string;
+}): Promise<void> {
+  const recoveredAt = z.iso.datetime().parse(request.recoveredAt);
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    database.prepare(
+      `UPDATE capture_health_incidents SET ended_at = ?
+       WHERE category = ? AND ended_at IS NULL`
+    ).run(recoveredAt, request.category);
   } finally {
     database.close();
   }
