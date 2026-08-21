@@ -7,6 +7,7 @@ import { initializeMemStore } from "../../../src/operations/initialize.js";
 import { rememberExtract } from "../../../src/operations/remember.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { runNextLunaWork } from "../../../src/worker/distillation.js";
+import { makeLongTermCandidateDurability } from "../../helpers/candidate-durability.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -68,6 +69,7 @@ test("explicit Global extraction durably authorizes Luna Candidates and preserve
               evidenceIds: [evidenceId]
             }],
             sensitivity: "normal",
+            durability: makeLongTermCandidateDurability(),
             evidenceIds: [evidenceId]
           }]
         });

@@ -10,6 +10,13 @@ function evidenceClass(eventKind: CaptureEvent["eventKind"]): LunaEvidence["evid
   return "other";
 }
 
+function referencesCodexNativeMemory(command: unknown): boolean {
+  if (typeof command !== "string") return false;
+  const normalized = command.normalize("NFKC").replaceAll("\\", "/")
+    .toLocaleLowerCase("en-US");
+  return /(?:\.codex|\$\{?codex_home\}?)\/memories\/memory\.md/u.test(normalized);
+}
+
 export function mapCapturedEventToLunaEvidence(request: {
   readonly event: CaptureEvent;
   readonly sourceIdentity?: string;
@@ -28,7 +35,8 @@ export function mapCapturedEventToLunaEvidence(request: {
     sourceTruncated: request.sourceTruncated,
     memoryEcho:
       typeof fields.injectionReceiptId === "string" ||
-      (Array.isArray(fields.injectedMemoryIds) && fields.injectedMemoryIds.length > 0),
+      (Array.isArray(fields.injectedMemoryIds) && fields.injectedMemoryIds.length > 0) ||
+      referencesCodexNativeMemory(fields.command),
     occurredAt: request.event.occurredAt,
     ...(request.event.projectId === undefined ? {} : { projectId: request.event.projectId }),
     ...(request.evidenceContentIdentity === undefined

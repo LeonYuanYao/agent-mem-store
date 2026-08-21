@@ -185,6 +185,67 @@ function readinessSnapshotRetention(database: DatabaseSync): Record<string, numb
   };
 }
 
+function readinessCandidateDurability(
+  database: DatabaseSync,
+  startedAt: string
+): Record<string, unknown> {
+  const durabilitySchema = z.looseObject({
+    durability: z.object({
+      disposition: z.enum(["long_term", "project_phase", "session_only"])
+    }).optional()
+  });
+  const counts = {
+    longTerm: 0,
+    projectPhase: 0,
+    sessionOnly: 0,
+    legacyUnclassified: 0
+  };
+  const candidates = database.prepare(
+    `SELECT candidate_id, candidate_json
+     FROM memory_candidates
+     WHERE created_at >= ?
+     ORDER BY candidate_id`
+  ).all(startedAt);
+  for (const candidate of candidates) {
+    let disposition: "long_term" | "project_phase" | "session_only" | undefined;
+    if (typeof candidate.candidate_json === "string") {
+      const parsed = durabilitySchema.safeParse(JSON.parse(candidate.candidate_json));
+      disposition = parsed.success ? parsed.data.durability?.disposition : undefined;
+    }
+    if (disposition === "long_term") counts.longTerm += 1;
+    else if (disposition === "project_phase") counts.projectPhase += 1;
+    else if (disposition === "session_only") counts.sessionOnly += 1;
+    else counts.legacyUnclassified += 1;
+  }
+  const held = database.prepare(
+    `SELECT DISTINCT candidate.candidate_id, decision.reason
+     FROM memory_candidates AS candidate
+     JOIN governance_decisions AS decision
+       ON decision.candidate_id = candidate.candidate_id
+     WHERE candidate.created_at >= ?
+       AND decision.decided_at >= ?
+       AND decision.reason IN (
+         'durability_project_phase_hold',
+         'durability_session_only_hold'
+       )
+     ORDER BY candidate.candidate_id`
+  ).all(startedAt, startedAt);
+  return {
+    policyVersion: "candidate-durability-v1",
+    classified: counts,
+    promotionComparison: {
+      heldBeforeCanonical: held.length,
+      wouldHavePromotedWithoutDurabilityGate: held.length
+    },
+    heldCandidateSamples: held.slice(0, 10).map((row) => ({
+      candidateId: z.string().parse(row.candidate_id),
+      disposition: row.reason === "durability_project_phase_hold"
+        ? "project_phase"
+        : "session_only"
+    }))
+  };
+}
+
 function readinessLatency(
   database: DatabaseSync,
   startedAt: string
@@ -985,6 +1046,7 @@ export async function inspectOfficialShadowWindow(request: {
               latency: readinessLatency(database, startedAt),
               userPromptStageTimings: readinessUserPromptStageTimings(database, startedAt),
               snapshotRetention: readinessSnapshotRetention(database),
+              candidateDurability: readinessCandidateDurability(database, startedAt),
               knowledgeSamples: readinessKnowledgeSamples(database),
               retrievalSamples: readinessRetrievalSamples(database, startedAt)
             }

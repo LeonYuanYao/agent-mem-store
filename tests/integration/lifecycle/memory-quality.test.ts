@@ -74,6 +74,51 @@ test("quality repair validates only exact lossless compact representations", asy
   expect(after?.memory.provenance).toContain("quality:exact-compact-backfill-v1");
 });
 
+test("quality repair rebuilds an exact compact for Human-authored memory without changing its body", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-human-memory-quality-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const memoryId = "msmem_123e4567-e89b-42d3-a456-426614174073";
+  const body = "Create acme merge requests on review.example.com unless explicitly told otherwise.";
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId,
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174073",
+      body,
+      authority: "human_authored",
+      validatedCompact: false
+    })
+  });
+
+  await expect(repairExactCompactRepresentations({
+    runtimeRoot,
+    vaultRoot,
+    repairedAt: "2026-08-18T22:15:00.000Z",
+    preview: true
+  })).resolves.toMatchObject({
+    state: "preview",
+    eligibleCount: 1,
+    changedCount: 0,
+    memoryIds: [memoryId]
+  });
+  await repairExactCompactRepresentations({
+    runtimeRoot,
+    vaultRoot,
+    repairedAt: "2026-08-18T22:15:00.000Z",
+    preview: false
+  });
+  const repaired = await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId });
+  expect(repaired?.memory).toMatchObject({
+    authority: "human_authored",
+    body,
+    representations: { compact: { text: body, validated: true } }
+  });
+});
+
 test("quality audit reports operational and temporal signals without mutating memory", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-memory-quality-signals-"));
   roots.push(root);

@@ -75,6 +75,36 @@ interface IndexedMemory {
   readonly vectorOrdinal: number;
 }
 
+const indexedMemoryRowSchema = z.object({
+  index_revision_id: z.string(),
+  memory_id: z.string(),
+  revision_id: z.string(),
+  scope_kind: z.enum(["global", "project"]),
+  project_id: z.string().nullable(),
+  authority: z.enum(["human_authored", "agent_derived"]),
+  category: z.string(),
+  base_priority_tier: z.enum(["critical", "strong", "normal"]),
+  session_order_key: z.string().min(1),
+  importance_tags_json: z.string(),
+  startup: z.enum(["auto", "always", "never"]),
+  applicability_summary: z.string(),
+  applicability_conditions_json: z.string(),
+  valid_from: z.string().nullable(),
+  valid_until: z.string().nullable(),
+  validity_state: z.enum(["valid", "review_due"]),
+  identity_label: z.string().nullable(),
+  identity_validated: z.union([z.literal(0), z.literal(1)]),
+  identity_token_count: z.number().int().nonnegative(),
+  compact_text: z.string(),
+  compact_validated: z.union([z.literal(0), z.literal(1)]),
+  compact_token_count: z.number().int().nonnegative(),
+  standard_text: z.string(),
+  standard_validated: z.union([z.literal(0), z.literal(1)]),
+  standard_token_count: z.number().int().nonnegative(),
+  searchable_text: z.string(),
+  vector_ordinal: z.number().int().nonnegative()
+});
+
 export interface ShadowPackItem {
   readonly memoryId: string;
   readonly revisionId: string;
@@ -103,37 +133,38 @@ export interface ShadowPack {
 }
 
 function rowToMemory(row: Record<string, unknown>): IndexedMemory {
+  const parsed = indexedMemoryRowSchema.parse(row);
   return {
-    indexRevisionId: z.string().parse(row.index_revision_id),
-    memoryId: z.string().parse(row.memory_id),
-    revisionId: z.string().parse(row.revision_id),
-    scope: row.scope_kind === "global"
+    indexRevisionId: parsed.index_revision_id,
+    memoryId: parsed.memory_id,
+    revisionId: parsed.revision_id,
+    scope: parsed.scope_kind === "global"
       ? { kind: "global" }
-      : { kind: "project", projectId: z.string().parse(row.project_id) },
-    authority: z.enum(["human_authored", "agent_derived"]).parse(row.authority),
-    category: z.string().parse(row.category),
-    basePriorityTier: z.enum(["critical", "strong", "normal"]).parse(row.base_priority_tier),
-    sessionOrderKey: z.string().min(1).parse(row.session_order_key),
-    importanceTags: z.array(z.string()).parse(JSON.parse(z.string().parse(row.importance_tags_json))),
-    startup: z.enum(["auto", "always", "never"]).parse(row.startup),
-    applicabilitySummary: z.string().parse(row.applicability_summary),
+      : { kind: "project", projectId: z.string().parse(parsed.project_id) },
+    authority: parsed.authority,
+    category: parsed.category,
+    basePriorityTier: parsed.base_priority_tier,
+    sessionOrderKey: parsed.session_order_key,
+    importanceTags: z.array(z.string()).parse(JSON.parse(parsed.importance_tags_json)),
+    startup: parsed.startup,
+    applicabilitySummary: parsed.applicability_summary,
     applicabilityConditions: z.array(z.string()).parse(
-      JSON.parse(z.string().parse(row.applicability_conditions_json))
+      JSON.parse(parsed.applicability_conditions_json)
     ),
-    ...(typeof row.valid_from === "string" ? { validFrom: row.valid_from } : {}),
-    ...(typeof row.valid_until === "string" ? { validUntil: row.valid_until } : {}),
-    validityState: z.enum(["valid", "review_due"]).parse(row.validity_state),
-    ...(typeof row.identity_label === "string" ? { identityLabel: row.identity_label } : {}),
-    identityValidated: row.identity_validated === 1,
-    identityTokenCount: z.number().int().nonnegative().parse(row.identity_token_count),
-    compactText: z.string().parse(row.compact_text),
-    compactValidated: row.compact_validated === 1,
-    compactTokenCount: z.number().int().nonnegative().parse(row.compact_token_count),
-    standardText: z.string().parse(row.standard_text),
-    standardValidated: row.standard_validated === 1,
-    standardTokenCount: z.number().int().nonnegative().parse(row.standard_token_count),
-    searchableText: z.string().parse(row.searchable_text),
-    vectorOrdinal: z.number().int().nonnegative().parse(row.vector_ordinal)
+    ...(parsed.valid_from === null ? {} : { validFrom: parsed.valid_from }),
+    ...(parsed.valid_until === null ? {} : { validUntil: parsed.valid_until }),
+    validityState: parsed.validity_state,
+    ...(parsed.identity_label === null ? {} : { identityLabel: parsed.identity_label }),
+    identityValidated: parsed.identity_validated === 1,
+    identityTokenCount: parsed.identity_token_count,
+    compactText: parsed.compact_text,
+    compactValidated: parsed.compact_validated === 1,
+    compactTokenCount: parsed.compact_token_count,
+    standardText: parsed.standard_text,
+    standardValidated: parsed.standard_validated === 1,
+    standardTokenCount: parsed.standard_token_count,
+    searchableText: parsed.searchable_text,
+    vectorOrdinal: parsed.vector_ordinal
   };
 }
 

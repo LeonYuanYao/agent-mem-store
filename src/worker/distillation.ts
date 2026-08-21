@@ -507,7 +507,8 @@ async function ingestDistilledCandidates(request: {
         certainty: distilled.certainty,
         importanceTags: distilled.importanceTags,
         importanceReasons: distilled.importanceReasons,
-        sensitivity: distilled.sensitivity
+        sensitivity: distilled.sensitivity,
+        durability: distilled.durability
       },
       evidence,
       sourceSessionId: request.sessionId,

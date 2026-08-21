@@ -31,6 +31,15 @@ const candidateStateSchema = z.enum([
 
 export type CandidateState = z.infer<typeof candidateStateSchema>;
 
+export interface CandidateDurability {
+  readonly disposition: "long_term" | "project_phase" | "session_only";
+  readonly futureReuseScenario: string;
+  readonly horizon: "indefinite" | "until_condition" | "days_30" | "session";
+  readonly invalidationTriggers: readonly string[];
+  readonly abstractionLevel: "reusable_rule" | "project_fact" | "task_observation";
+  readonly observableFromWorkspace: boolean;
+}
+
 export interface CandidateContent {
   readonly statement: string;
   readonly primaryCategory: MemoryCategory;
@@ -43,6 +52,7 @@ export interface CandidateContent {
   readonly importanceTags: readonly ImportanceTag[];
   readonly importanceReasons?: readonly ImportanceReason[];
   readonly sensitivity?: "normal" | "private";
+  readonly durability?: CandidateDurability;
 }
 
 export interface CandidateEvidence {
@@ -139,6 +149,12 @@ function candidateFingerprint(
       sensitivity: candidate.sensitivity ?? "normal"
     }))
     .digest("hex");
+}
+
+function durabilityStrictness(disposition: CandidateDurability["disposition"]): number {
+  if (disposition === "session_only") return 2;
+  if (disposition === "project_phase") return 1;
+  return 0;
 }
 
 function hasEligibleEvidenceShape(evidence: CandidateEvidence): boolean {
@@ -558,7 +574,7 @@ export async function createAgentCandidate(request: {
     try {
       const existing = database
         .prepare(
-          `SELECT candidate_id, promotion_generation FROM memory_candidates
+          `SELECT candidate_id, candidate_json, promotion_generation FROM memory_candidates
            WHERE fingerprint = ? AND state != 'expired'`
         )
         .get(fingerprint);
@@ -643,6 +659,31 @@ export async function createAgentCandidate(request: {
             predecessorTombstoneCandidateId,
             request.startup ?? "auto"
           );
+      }
+      if (
+        existing !== undefined &&
+        typeof existing.candidate_json === "string" &&
+        normalizedCandidate.durability !== undefined
+      ) {
+        const existingCandidate = JSON.parse(existing.candidate_json) as CandidateContent;
+        if (
+          existingCandidate.durability !== undefined &&
+          durabilityStrictness(normalizedCandidate.durability.disposition) >
+            durabilityStrictness(existingCandidate.durability.disposition)
+        ) {
+          database.prepare(
+            `UPDATE memory_candidates
+             SET candidate_json = ?, updated_at = ?
+             WHERE candidate_id = ?`
+          ).run(
+            JSON.stringify({
+              ...existingCandidate,
+              durability: normalizedCandidate.durability
+            }),
+            createdAt,
+            candidateId
+          );
+        }
       }
       if (existing !== undefined && globalAuthorization !== undefined) {
         database.prepare(
@@ -1237,6 +1278,19 @@ export async function evaluateCandidate(request: {
     ) {
       return commitNonPromotion(request.runtimeRoot, request.candidateId, "wait", "global_corroboration_missing", evaluatedAt);
     }
+  }
+
+  if (
+    candidate.durability?.disposition === "session_only" ||
+    candidate.durability?.disposition === "project_phase"
+  ) {
+    return commitNonPromotion(
+      request.runtimeRoot,
+      request.candidateId,
+      "wait",
+      `durability_${candidate.durability.disposition}_hold`,
+      evaluatedAt
+    );
   }
 
   const reservationDatabase = await openRuntimeDatabase(request.runtimeRoot);

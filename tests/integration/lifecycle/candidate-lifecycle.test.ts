@@ -221,6 +221,194 @@ test("a Candidate stays outside recall until the deterministic Promotion Gate co
   ]);
 });
 
+test("a newly distilled session-only Candidate stays waiting before canonical promotion", async () => {
+  const roots = await createRoot();
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  const evidence = await captureUserEvidence({
+    runtimeRoot: roots.runtimeRoot,
+    evidenceId: "evidence-session-only",
+    projectId,
+    occurredAt: "2026-08-07T08:04:00.000Z",
+    prompt: "For this task, the local worker is currently running."
+  });
+  const created = requireCandidate(await createAgentCandidate({
+    ...roots,
+    scope: { kind: "project", projectId },
+    candidate: {
+      ...candidate,
+      statement: "The local worker is currently running for this task.",
+      durability: {
+        disposition: "session_only" as const,
+        futureReuseScenario: "No durable reuse; this only describes the current task.",
+        horizon: "session" as const,
+        invalidationTriggers: ["The current session ends."],
+        abstractionLevel: "task_observation" as const,
+        observableFromWorkspace: true
+      }
+    },
+    evidence: [evidence],
+    sourceSessionId: "session-only",
+    createdAt: "2026-08-07T08:04:01.000Z"
+  }));
+
+  await expect(evaluateCandidate({
+    ...roots,
+    candidateId: created.candidateId,
+    evaluatedAt: "2026-08-07T08:04:02.000Z"
+  })).resolves.toMatchObject({
+    state: "wait",
+    reason: "durability_session_only_hold"
+  });
+  await expect(listRecallEligibleMemoryIds(roots.runtimeRoot)).resolves.toEqual([]);
+});
+
+test("a newly distilled project-phase Candidate stays waiting for a future TTL policy", async () => {
+  const roots = await createRoot();
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  const evidence = await captureUserEvidence({
+    runtimeRoot: roots.runtimeRoot,
+    evidenceId: "evidence-project-phase",
+    projectId,
+    occurredAt: "2026-08-07T08:04:10.000Z",
+    prompt: "During the current migration phase, use the compatibility adapter."
+  });
+  const created = requireCandidate(await createAgentCandidate({
+    ...roots,
+    scope: { kind: "project", projectId },
+    candidate: {
+      ...candidate,
+      statement: "Use the compatibility adapter during the current migration phase.",
+      durability: {
+        disposition: "project_phase" as const,
+        futureReuseScenario: "Apply the adapter while this migration remains active.",
+        horizon: "until_condition" as const,
+        invalidationTriggers: ["The migration is completed."],
+        abstractionLevel: "project_fact" as const,
+        observableFromWorkspace: false
+      }
+    },
+    evidence: [evidence],
+    sourceSessionId: "project-phase",
+    createdAt: "2026-08-07T08:04:11.000Z"
+  }));
+
+  await expect(evaluateCandidate({
+    ...roots,
+    candidateId: created.candidateId,
+    evaluatedAt: "2026-08-07T08:04:12.000Z"
+  })).resolves.toMatchObject({
+    state: "wait",
+    reason: "durability_project_phase_hold"
+  });
+});
+
+test("a newly distilled long-term Candidate continues through the existing Promotion Gate", async () => {
+  const roots = await createRoot();
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  const evidence = await captureUserEvidence({
+    runtimeRoot: roots.runtimeRoot,
+    evidenceId: "evidence-long-term",
+    projectId,
+    occurredAt: "2026-08-07T08:04:20.000Z",
+    prompt: "Always run the repository typecheck before claiming completion."
+  });
+  const created = requireCandidate(await createAgentCandidate({
+    ...roots,
+    scope: { kind: "project", projectId },
+    candidate: {
+      ...candidate,
+      durability: {
+        disposition: "long_term" as const,
+        futureReuseScenario: "Verify a future change before reporting completion.",
+        horizon: "indefinite" as const,
+        invalidationTriggers: ["The repository replaces its typecheck command."],
+        abstractionLevel: "reusable_rule" as const,
+        observableFromWorkspace: false
+      }
+    },
+    evidence: [evidence],
+    sourceSessionId: "long-term",
+    createdAt: "2026-08-07T08:04:21.000Z"
+  }));
+
+  await expect(evaluateCandidate({
+    ...roots,
+    candidateId: created.candidateId,
+    evaluatedAt: "2026-08-07T08:04:22.000Z"
+  })).resolves.toMatchObject({ state: "promoted" });
+});
+
+test("merging newly distilled Candidates preserves the stricter durability classification", async () => {
+  const roots = await createRoot();
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  const firstEvidence = await captureUserEvidence({
+    runtimeRoot: roots.runtimeRoot,
+    evidenceId: "evidence-merged-long-term",
+    projectId,
+    occurredAt: "2026-08-07T08:04:30.000Z"
+  });
+  const created = requireCandidate(await createAgentCandidate({
+    ...roots,
+    scope: { kind: "project", projectId },
+    candidate: {
+      ...candidate,
+      durability: {
+        disposition: "long_term" as const,
+        futureReuseScenario: "Use this rule in a future session.",
+        horizon: "indefinite" as const,
+        invalidationTriggers: [],
+        abstractionLevel: "reusable_rule" as const,
+        observableFromWorkspace: false
+      }
+    },
+    evidence: [firstEvidence],
+    createdAt: "2026-08-07T08:04:31.000Z"
+  }));
+  const secondEvidence = await captureUserEvidence({
+    runtimeRoot: roots.runtimeRoot,
+    evidenceId: "evidence-merged-session-only",
+    projectId,
+    occurredAt: "2026-08-07T08:04:32.000Z"
+  });
+  await expect(createAgentCandidate({
+    ...roots,
+    scope: { kind: "project", projectId },
+    candidate: {
+      ...candidate,
+      durability: {
+        disposition: "session_only" as const,
+        futureReuseScenario: "No durable reuse; this only describes the current task.",
+        horizon: "session" as const,
+        invalidationTriggers: ["The current session ends."],
+        abstractionLevel: "task_observation" as const,
+        observableFromWorkspace: true
+      }
+    },
+    evidence: [secondEvidence],
+    createdAt: "2026-08-07T08:04:33.000Z"
+  })).resolves.toMatchObject({
+    state: "merged",
+    candidateId: created.candidateId
+  });
+  const assessmentOperationId = await runDurableAssessment({
+    ...roots,
+    candidateId: created.candidateId,
+    state: "supported",
+    evidenceIds: [firstEvidence.evidenceId, secondEvidence.evidenceId],
+    now: "2026-08-07T08:04:33.500Z"
+  });
+
+  await expect(evaluateCandidate({
+    ...roots,
+    candidateId: created.candidateId,
+    semanticAssessmentOperationId: assessmentOperationId,
+    evaluatedAt: "2026-08-07T08:04:34.000Z"
+  })).resolves.toMatchObject({
+    state: "wait",
+    reason: "durability_session_only_hold"
+  });
+});
+
 test("a task-local explicit-user instruction cannot use lightweight promotion", async () => {
   const roots = await createRoot();
   const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";

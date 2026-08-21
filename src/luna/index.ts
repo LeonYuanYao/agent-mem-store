@@ -51,6 +51,15 @@ const importanceReasonSchema = z.object({
   evidenceIds: z.array(z.string().min(1)).min(1).max(16)
 });
 
+const candidateDurabilitySchema = z.object({
+  disposition: z.enum(["long_term", "project_phase", "session_only"]),
+  futureReuseScenario: z.string().min(1).max(2048),
+  horizon: z.enum(["indefinite", "until_condition", "days_30", "session"]),
+  invalidationTriggers: z.array(z.string().min(1).max(512)).max(16),
+  abstractionLevel: z.enum(["reusable_rule", "project_fact", "task_observation"]),
+  observableFromWorkspace: z.boolean()
+});
+
 const distilledCandidateSchema = z.object({
   statement: z.string().min(1).max(16_384),
   primaryCategory: memoryCategorySchema,
@@ -62,6 +71,7 @@ const distilledCandidateSchema = z.object({
   certainty: z.enum(["asserted", "inferred", "speculative"]),
   sensitivity: z.enum(["normal", "private"]),
   evidenceIds: z.array(z.string().min(1)).min(1).max(64),
+  durability: candidateDurabilitySchema,
   importanceReasons: z.array(importanceReasonSchema).max(8)
 }).superRefine((candidate, context) => {
   if (new Set(candidate.categoryTags).size !== candidate.categoryTags.length) {
@@ -107,6 +117,7 @@ const distillationOutputJsonSchema = {
           "certainty",
           "sensitivity",
           "evidenceIds",
+          "durability",
           "importanceReasons"
         ],
         properties: {
@@ -145,6 +156,43 @@ const distillationOutputJsonSchema = {
             minItems: 1,
             maxItems: 64,
             items: { type: "string", minLength: 1 }
+          },
+          durability: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "disposition",
+              "futureReuseScenario",
+              "horizon",
+              "invalidationTriggers",
+              "abstractionLevel",
+              "observableFromWorkspace"
+            ],
+            properties: {
+              disposition: {
+                type: "string",
+                enum: ["long_term", "project_phase", "session_only"]
+              },
+              futureReuseScenario: {
+                type: "string",
+                minLength: 1,
+                maxLength: 2048
+              },
+              horizon: {
+                type: "string",
+                enum: ["indefinite", "until_condition", "days_30", "session"]
+              },
+              invalidationTriggers: {
+                type: "array",
+                maxItems: 16,
+                items: { type: "string", minLength: 1, maxLength: 512 }
+              },
+              abstractionLevel: {
+                type: "string",
+                enum: ["reusable_rule", "project_fact", "task_observation"]
+              },
+              observableFromWorkspace: { type: "boolean" }
+            }
           },
           importanceReasons: {
             type: "array",
@@ -634,7 +682,7 @@ export class CodexLunaAdapter {
       distillationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 2,
+        promptVersion: 4,
         task: "distill_memory_candidates",
         rules: [
           "Use only supplied evidence.",
@@ -642,6 +690,10 @@ export class CodexLunaAdapter {
           "Return no Candidate for operational probes or exact-response checks.",
           "Return no Candidate for task-local instructions, temporary progress or state, or unverified future plans.",
           "If evidence says content must not be retained, return no Candidate derived from that content.",
+          "Classify every Candidate as long_term, project_phase, or session_only and explain one concrete future reuse scenario.",
+          "Use long_term for knowledge expected to remain useful beyond the current task, including project-specific knowledge reused across future sessions; use session_only for task observations or current state.",
+          "Project-specific knowledge is long_term when it is expected to remain useful across future sessions; use project_phase only when evidence explicitly binds it to a finite migration, feature, incident, experiment, or release phase. A possible future invalidation condition alone does not make knowledge project_phase.",
+          "A fact that can be rediscovered directly from the current workspace is session_only unless the Candidate expresses a stable reusable rule or a costly non-obvious project fact.",
           memoryCategoryPromptInstruction,
           "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Cite evidenceIds for every candidate.",
@@ -983,12 +1035,14 @@ export class CodexLunaAdapter {
       consolidationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 2,
+        promptVersion: 4,
         task: "consolidate_session_candidates",
         rules: [
           "Use only structured Batch results and their evidence identities.",
           "Omit operational probes, exact-response checks, task-local instructions, temporary progress or state, and unverified future plans.",
           "If a structured candidate says content must not be retained, omit it from the consolidation result.",
+          "Preserve the strictest supplied durability classification and return a complete durability assessment for every consolidated Candidate; never upgrade project_phase or session_only to long_term without explicit supplied evidence.",
+          "Project-specific knowledge is long_term when it is expected to remain useful across future sessions; use project_phase only when evidence explicitly binds it to a finite migration, feature, incident, experiment, or release phase. A possible future invalidation condition alone does not make knowledge project_phase.",
           "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Do not infer from raw transcripts or execute commands.",
           "Preserve material conditions, exclusions, certainty, and negations.",

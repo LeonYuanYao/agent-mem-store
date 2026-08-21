@@ -52,9 +52,10 @@ function qualityCodes(memory: CanonicalMemory): MemoryQualityIssueCode[] {
   return codes;
 }
 
-async function pageAgentMemories(request: {
+async function pageActiveMemories(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
+  readonly authority?: CanonicalMemory["authority"];
   readonly cursor?: string;
   readonly limit: number;
 }): Promise<{ readonly memories: readonly CanonicalMemory[]; readonly nextCursor?: string }> {
@@ -63,9 +64,15 @@ async function pageAgentMemories(request: {
   try {
     rows = database.prepare(
       `SELECT memory_id FROM memory_catalog
-       WHERE authority = 'agent_derived' AND lifecycle = 'active' AND memory_id > ?
+       WHERE lifecycle = 'active' AND memory_id > ?
+         AND (? IS NULL OR authority = ?)
        ORDER BY memory_id LIMIT ?`
-    ).all(request.cursor ?? "", request.limit + 1);
+    ).all(
+      request.cursor ?? "",
+      request.authority ?? null,
+      request.authority ?? null,
+      request.limit + 1
+    );
   } finally {
     database.close();
   }
@@ -97,8 +104,9 @@ export async function auditMemoryQuality(request: {
   readonly issues: readonly MemoryQualityIssue[];
   readonly nextCursor?: string;
 }> {
-  const page = await pageAgentMemories({
+  const page = await pageActiveMemories({
     ...request,
+    authority: "agent_derived",
     limit: z.number().int().min(1).max(1000).parse(request.limit ?? 200)
   });
   const issues = page.memories.flatMap((memory) => {
@@ -171,7 +179,7 @@ export async function repairExactCompactRepresentations(request: {
   readonly nextCursor?: string;
 }> {
   const repairedAt = z.iso.datetime().parse(request.repairedAt);
-  const page = await pageAgentMemories({
+  const page = await pageActiveMemories({
     runtimeRoot: request.runtimeRoot,
     vaultRoot: request.vaultRoot,
     ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
@@ -192,7 +200,7 @@ export async function repairExactCompactRepresentations(request: {
       await writeCanonicalMemory({
         runtimeRoot: request.runtimeRoot,
         vaultRoot: request.vaultRoot,
-        actor: "agent",
+        actor: memory.authority === "human_authored" ? "human" : "agent",
         expectedContentIdentity: memory.contentIdentity,
         memory: {
           ...memory,
@@ -236,9 +244,10 @@ export async function archiveOperationalMemories(request: {
   readonly nextCursor?: string;
 }> {
   const archivedAt = z.iso.datetime().parse(request.archivedAt);
-  const page = await pageAgentMemories({
+  const page = await pageActiveMemories({
     runtimeRoot: request.runtimeRoot,
     vaultRoot: request.vaultRoot,
+    authority: "agent_derived",
     ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
     limit: z.number().int().min(1).max(1000).parse(request.limit ?? 200)
   });

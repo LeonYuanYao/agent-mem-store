@@ -8,6 +8,7 @@ import {
   type LunaProcessRequest,
   type LunaProcessResult
 } from "../../src/luna/index.js";
+import { makeLongTermCandidateDurability } from "../helpers/candidate-durability.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -401,6 +402,14 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
               certainty: "asserted",
               sensitivity: "normal",
               evidenceIds: ["msevent_123"],
+              durability: {
+                disposition: "long_term",
+                futureReuseScenario: "Resolve Project Memory consistently in a future session.",
+                horizon: "indefinite",
+                invalidationTriggers: [],
+                abstractionLevel: "reusable_rule",
+                observableFromWorkspace: false
+              },
               importanceTags: ["architecture_invariant"],
               importanceReasons: [{
                 tag: "architecture_invariant",
@@ -432,6 +441,14 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
 
   expect(result.candidates).toHaveLength(1);
   expect(result.candidates[0]?.statement).toContain("stable Project identities");
+  expect(result.candidates[0]?.durability).toEqual({
+    disposition: "long_term",
+    futureReuseScenario: "Resolve Project Memory consistently in a future session.",
+    horizon: "indefinite",
+    invalidationTriggers: [],
+    abstractionLevel: "reusable_rule",
+    observableFromWorkspace: false
+  });
   expect(requests).toHaveLength(1);
   const request = requests[0];
   if (request === undefined) throw new Error("Expected Luna process request.");
@@ -455,6 +472,7 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
       "-"
     ])
   );
+  expect(request.standardInput).toContain("Classify every Candidate as long_term, project_phase, or session_only");
   expect(request.environment.CODEX_HOME).toBe(join(root, "codex-home"));
   expect(request.environment.HOME).toBeUndefined();
   expect(request.environment.AWS_SECRET_ACCESS_KEY).toBeUndefined();
@@ -535,6 +553,7 @@ test("Luna rejects a primary category outside the controlled memory taxonomy", a
           certainty: "asserted",
           sensitivity: "normal",
           evidenceIds: ["evidence-1"],
+          durability: makeLongTermCandidateDurability(),
           importanceReasons: []
         }]
       }),
@@ -579,6 +598,7 @@ test("the adapter deterministically normalizes Luna primary category to category
           certainty: "asserted",
           sensitivity: "normal",
           evidenceIds: ["evidence-1"],
+          durability: makeLongTermCandidateDurability(),
           importanceReasons: []
         }]
       }),
@@ -642,11 +662,12 @@ test("distillation instructs Luna to omit non-durable operational content", asyn
     }]
   });
 
-  expect(structuredRequest?.promptVersion).toBe(2);
+  expect(structuredRequest?.promptVersion).toBe(4);
   expect(structuredRequest?.rules).toEqual(expect.arrayContaining([
     "Return no Candidate for operational probes or exact-response checks.",
     "Return no Candidate for task-local instructions, temporary progress or state, or unverified future plans.",
-    "If evidence says content must not be retained, return no Candidate derived from that content."
+    "If evidence says content must not be retained, return no Candidate derived from that content.",
+    "Project-specific knowledge is long_term when it is expected to remain useful across future sessions; use project_phase only when evidence explicitly binds it to a finite migration, feature, incident, experiment, or release phase. A possible future invalidation condition alone does not make knowledge project_phase."
   ]));
 });
 
@@ -728,6 +749,7 @@ test("the distillation output schema avoids unsupported uniqueItems while local 
             certainty: "asserted",
             sensitivity: "normal",
             evidenceIds: ["evidence-1"],
+            durability: makeLongTermCandidateDurability(),
             importanceReasons: []
           }]
         }),
@@ -782,6 +804,7 @@ test("importance reasons are the Luna wire source of truth and deterministically
             certainty: "asserted",
             sensitivity: "normal",
             evidenceIds: ["evidence-1"],
+            durability: makeLongTermCandidateDurability(),
             importanceReasons: [{
               tag: "architecture_invariant",
               reason: "This boundary applies to every installation.",
@@ -981,7 +1004,7 @@ test("consolidation and semantic assessment use distinct versioned structured ta
   });
 
   expect(requests).toHaveLength(3);
-  expect(requests[0]?.standardInput).toContain('"promptVersion":2');
+  expect(requests[0]?.standardInput).toContain('"promptVersion":4');
   expect(requests[0]?.standardInput).toContain('"task":"consolidate_session_candidates"');
   expect(requests[0]?.timeoutMilliseconds).toBe(300_000);
   expect(requests[1]?.standardInput).toContain('"promptVersion":3');
@@ -1025,6 +1048,7 @@ test("consolidation uses short evidence aliases and restores exact source identi
             certainty: "asserted",
             sensitivity: "normal",
             evidenceIds: [alias],
+            durability: makeLongTermCandidateDurability(),
             importanceReasons: [{ tag: "constraint", reason: "Preserved constraint.", evidenceIds: [alias] }]
           }]
         }),
@@ -1050,6 +1074,7 @@ test("consolidation uses short evidence aliases and restores exact source identi
         certainty: "asserted",
         sensitivity: "normal",
         evidenceIds: [originalEvidenceId],
+        durability: makeLongTermCandidateDurability(),
         importanceTags: ["constraint"],
         importanceReasons: [{
           tag: "constraint",
@@ -1106,6 +1131,7 @@ test("large consolidation stays below the Codex input limit and preserves exact 
             certainty: "asserted",
             sensitivity: "normal",
             evidenceIds: [evidenceAlias],
+            durability: makeLongTermCandidateDurability(),
             importanceReasons: []
           }]
         }),
@@ -1135,6 +1161,7 @@ test("large consolidation stays below the Codex input limit and preserves exact 
         certainty: "asserted",
         sensitivity: "normal",
         evidenceIds: [evidenceId],
+        durability: makeLongTermCandidateDurability(),
         importanceTags: [],
         importanceReasons: []
       }]
@@ -1178,6 +1205,7 @@ test("distillation uses short evidence aliases and reports safe schema diagnosti
             certainty: "asserted",
             sensitivity: "normal",
             evidenceIds: [alias],
+            durability: makeLongTermCandidateDurability(),
             importanceReasons: [{
               tag: "architecture_invariant",
               reason: "This is a stable project boundary.",
@@ -1331,6 +1359,7 @@ test("duplicate Luna importance reasons for the same tag are rejected", async ()
           certainty: "asserted",
           sensitivity: "normal",
           evidenceIds: ["evidence-1"],
+          durability: makeLongTermCandidateDurability(),
           importanceReasons: [{
             tag: "architecture_invariant",
             reason: "This boundary applies across the system.",

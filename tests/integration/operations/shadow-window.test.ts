@@ -232,6 +232,55 @@ test("an official Shadow window requires a completed real-Hook probe and records
            timing_json = '{"epochLoadMs":10,"scopeLoadMs":20,"embeddingMs":300,"vectorScanMs":40,"rankingAndRelationshipMs":50,"receiptWriteMs":180,"totalMs":600}'
        WHERE caller_kind = 'user_prompt'`
     ).run();
+    const insertCandidate = readinessFixture.prepare(
+      `INSERT INTO memory_candidates(
+         candidate_id, fingerprint, scope_kind, project_id, statement,
+         candidate_json, category, certainty, state, high_value, sensitivity,
+         source_session_id, created_at, last_evidence_at, updated_at
+       ) VALUES (?, ?, 'project', ?, ?, ?, 'workflow_environment_toolchain',
+                 'asserted', 'waiting', 0, 'normal', ?, ?, ?, ?)`
+    );
+    const insertDecision = readinessFixture.prepare(
+      `INSERT INTO governance_decisions(
+         decision_id, candidate_id, decision, reason, decided_at
+       ) VALUES (?, ?, 'wait', ?, ?)`
+    );
+    for (const [suffix, disposition, reason] of [
+      ["session", "session_only", "durability_session_only_hold"],
+      ["phase", "project_phase", "durability_project_phase_hold"]
+    ] as const) {
+      const candidateId = `mscandidate_shadow_durability_${suffix}`;
+      const recordedAt = `2026-08-10T03:00:0${suffix === "session" ? "1" : "2"}.000Z`;
+      insertCandidate.run(
+        candidateId,
+        `shadow-durability-${suffix}`,
+        "msproj_123e4567-e89b-42d3-a456-426614174970",
+        "This body must not appear in the Shadow report.",
+        JSON.stringify({
+          statement: "This body must not appear in the Shadow report.",
+          primaryCategory: "workflow_environment_toolchain",
+          categoryTags: ["workflow_environment_toolchain"],
+          durability: {
+            disposition,
+            futureReuseScenario: "This explanation must not appear in the Shadow report.",
+            horizon: disposition === "session_only" ? "session" : "until_condition",
+            invalidationTriggers: ["This trigger must not appear in the Shadow report."],
+            abstractionLevel: disposition === "session_only" ? "task_observation" : "project_fact",
+            observableFromWorkspace: true
+          }
+        }),
+        `shadow-durability-${suffix}`,
+        recordedAt,
+        recordedAt,
+        recordedAt
+      );
+      insertDecision.run(
+        `msdecision_shadow_durability_${suffix}`,
+        candidateId,
+        reason,
+        recordedAt
+      );
+    }
   } finally {
     readinessFixture.close();
   }
@@ -277,6 +326,29 @@ test("an official Shadow window requires a completed real-Hook probe and records
         prunedSnapshots: 0,
         activeDocuments: 1,
         retainedDocuments: 1
+      },
+      candidateDurability: {
+        policyVersion: "candidate-durability-v1",
+        classified: {
+          longTerm: 0,
+          projectPhase: 1,
+          sessionOnly: 1,
+          legacyUnclassified: 1
+        },
+        promotionComparison: {
+          heldBeforeCanonical: 2,
+          wouldHavePromotedWithoutDurabilityGate: 2
+        },
+        heldCandidateSamples: [
+          {
+            candidateId: "mscandidate_shadow_durability_phase",
+            disposition: "project_phase"
+          },
+          {
+            candidateId: "mscandidate_shadow_durability_session",
+            disposition: "session_only"
+          }
+        ]
       },
       knowledgeSamples: {
         architecture_contract: [

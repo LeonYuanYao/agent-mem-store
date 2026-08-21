@@ -8,6 +8,11 @@ import {
   inspectHumanConflict,
   resolveHumanConflict
 } from "../../../src/candidates/human.js";
+import { buildRetrievalIndex, type EmbeddingAdapter } from "../../../src/retrieval/index.js";
+import {
+  prepareSessionStartShadowPack,
+  prepareUserPromptShadowPack
+} from "../../../src/retrieval/packs.js";
 import { readCanonicalMemory } from "../../../src/vault/index.js";
 
 const roots: string[] = [];
@@ -27,6 +32,17 @@ const projectScope = {
   projectId: "msproj_123e4567-e89b-42d3-a456-426614174001"
 };
 
+const embedding: EmbeddingAdapter = {
+  identity: {
+    adapterVersion: "fixture-v1",
+    modelIdentity: "fixture-embedding",
+    artifactSha256: "c".repeat(64),
+    dimensions: 2,
+    normalization: "l2"
+  },
+  embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+};
+
 test("a Direct Human Assertion preserves the exact body without a Luna rewrite", async () => {
   const roots = await createRoot();
   const body = "Always preserve `--exact` and do NOT broaden this rule.\nSecond line stays.";
@@ -35,6 +51,7 @@ test("a Direct Human Assertion preserves the exact body without a Luna rewrite",
     scope: projectScope,
     body,
     primaryCategory: "preference_constraint",
+    startup: "never",
     assertedAt: "2026-08-07T09:00:00.000Z"
   });
   expect(result).toMatchObject({ state: "created" });
@@ -42,8 +59,41 @@ test("a Direct Human Assertion preserves the exact body without a Luna rewrite",
   const loaded = await readCanonicalMemory({ ...roots, memoryId: result.memoryId });
   expect(loaded?.memory.body).toBe(body);
   expect(loaded?.memory.authority).toBe("human_authored");
+  expect(loaded?.memory.representations.compact).toMatchObject({
+    text: body,
+    validated: true,
+    sourceRevisionId: loaded?.memory.revisionId
+  });
   expect(loaded?.memory.provenance).toContain(`operation:${result.operationId}`);
   expect(await readFile(result.path, "utf8")).toContain(body);
+
+  await buildRetrievalIndex({
+    ...roots,
+    adapter: embedding,
+    builtAt: "2026-08-07T09:00:01.000Z"
+  });
+  await prepareSessionStartShadowPack({
+    ...roots,
+    projectId: projectScope.projectId,
+    sessionId: "human-assertion-session",
+    requestedAt: "2026-08-07T09:00:02.000Z"
+  });
+  const prompt = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId: projectScope.projectId,
+    sessionId: "human-assertion-session",
+    prompt: "Should I broaden the exact rule?",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter: embedding,
+    requestedAt: "2026-08-07T09:00:03.000Z"
+  });
+  expect(prompt.items).toEqual([
+    expect.objectContaining({
+      memoryId: result.memoryId,
+      representationKind: "standard",
+      relevanceBand: "high"
+    })
+  ]);
 });
 
 test("a generic conflicting assertion is isolated until the Human resolves it", async () => {

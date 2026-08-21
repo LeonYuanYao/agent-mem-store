@@ -13,6 +13,7 @@ import {
   type LunaWorkerAdapter
 } from "../../src/worker/distillation.js";
 import { openRuntimeDatabase } from "../../src/runtime/database.js";
+import { makeLongTermCandidateDurability } from "../helpers/candidate-durability.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -88,6 +89,7 @@ test("a long Session is distilled in batches and consolidated from structured re
             certainty: "asserted",
             sensitivity: "normal",
             evidenceIds: [request.evidence[0]?.evidenceId ?? "missing-evidence"],
+            durability: makeLongTermCandidateDurability(),
             importanceTags: ["constraint"],
             importanceReasons: [{
               tag: "constraint",
@@ -125,6 +127,7 @@ test("a long Session is distilled in batches and consolidated from structured re
             certainty: "asserted",
             sensitivity: "normal",
             evidenceIds: [request.batchResults[0]?.evidenceIds[0] ?? "missing-evidence"],
+            durability: makeLongTermCandidateDurability(),
             importanceTags: ["constraint"],
             importanceReasons: [{
               tag: "constraint",
@@ -399,6 +402,7 @@ test("a resumed Session consolidates each newly closed Batch range", async () =>
           certainty: "asserted",
           sensitivity: "normal",
           evidenceIds: [request.evidence[0]?.evidenceId ?? "missing-evidence"],
+          durability: makeLongTermCandidateDurability(),
           importanceTags: [],
           importanceReasons: []
         }]
@@ -420,6 +424,7 @@ test("a resumed Session consolidates each newly closed Batch range", async () =>
           certainty: "asserted",
           sensitivity: "normal",
           evidenceIds: [request.batchResults[0]?.evidenceIds[0] ?? "missing-evidence"],
+          durability: makeLongTermCandidateDurability(),
           importanceTags: [],
           importanceReasons: []
         }]
@@ -550,6 +555,7 @@ test("a directly ingested single-Batch episode is excluded from later consolidat
           certainty: "asserted",
           sensitivity: "normal",
           evidenceIds: [request.evidence[0]?.evidenceId ?? "missing"],
+          durability: makeLongTermCandidateDurability(),
           importanceTags: [],
           importanceReasons: []
         }]
@@ -571,6 +577,7 @@ test("a directly ingested single-Batch episode is excluded from later consolidat
           certainty: "asserted",
           sensitivity: "normal",
           evidenceIds: [request.batchResults[0]?.evidenceIds[0] ?? "missing"],
+          durability: makeLongTermCandidateDurability(),
           importanceTags: [],
           importanceReasons: []
         }]

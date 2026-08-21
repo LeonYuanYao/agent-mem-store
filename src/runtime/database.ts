@@ -214,6 +214,16 @@ const migrations: readonly Migration[] = [
     version: 41,
     name: "active_retrieval_fts",
     path: new URL("../../migrations/0041-active-retrieval-fts.sql", import.meta.url)
+  },
+  {
+    version: 42,
+    name: "automatic_retrieval_receipt_indexes",
+    path: new URL("../../migrations/0042-automatic-retrieval-receipt-indexes.sql", import.meta.url)
+  },
+  {
+    version: 43,
+    name: "capture_session_activity_index",
+    path: new URL("../../migrations/0043-capture-session-activity-index.sql", import.meta.url)
   }
 ];
 

@@ -12,6 +12,7 @@ import {
   runNextLunaWork,
   type LunaWorkerAdapter
 } from "../../src/worker/distillation.js";
+import { makeLongTermCandidateDurability } from "../helpers/candidate-durability.js";
 
 const roots: string[] = [];
 
@@ -91,6 +92,7 @@ test("a transient Luna failure leaves evidence retryable and later produces one 
           certainty: "asserted",
           sensitivity: "normal",
           evidenceIds: request.evidence.map((item) => item.evidenceId),
+          durability: makeLongTermCandidateDurability(),
           importanceTags: [],
           importanceReasons: []
         }]

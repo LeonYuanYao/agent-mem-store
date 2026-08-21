@@ -19,6 +19,7 @@ import { inspectReviewInbox } from "../../src/review/inbox.js";
 import { writeCanonicalMemory } from "../../src/vault/index.js";
 import { runWorkerOnce, type WorkerAdapters } from "../../src/worker/main.js";
 import { makeCanonicalMemory } from "../helpers/canonical-memory.js";
+import { makeLongTermCandidateDurability } from "../helpers/candidate-durability.js";
 
 const roots: string[] = [];
 const projectId = "msproj_123e4567-e89b-42d3-a456-426614174901";
@@ -122,6 +123,7 @@ test("the uninstalled Shadow loop reaches review without injecting or touching g
           certainty: "asserted" as const,
           sensitivity: "normal" as const,
           evidenceIds: [evidenceId],
+          durability: makeLongTermCandidateDurability(),
           importanceTags: [],
           importanceReasons: []
         }]

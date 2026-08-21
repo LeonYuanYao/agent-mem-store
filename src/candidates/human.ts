@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
+import { assessExactCompact } from "../memories/representations.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { memoryCategorySchema, type MemoryCategory } from "../memories/categories.js";
 import {
@@ -61,10 +62,6 @@ export type HumanAssertionResult =
   | { readonly state: "blocked_secret"; readonly operationId: string; readonly category: string }
   | { readonly state: "quarantined"; readonly operationId: string; readonly category: string };
 
-function tokenEstimate(value: string): number {
-  return Math.max(1, Math.ceil(Buffer.byteLength(value, "utf8") / 4));
-}
-
 function createHumanMemory(request: {
   readonly memoryId: string;
   readonly revisionId: string;
@@ -82,6 +79,15 @@ function createHumanMemory(request: {
   };
   readonly predecessorMemoryId?: string;
 }): CanonicalMemory {
+  const compact = assessExactCompact({
+    body: request.body,
+    conditions: [
+      request.applicability?.summary ?? "",
+      ...(request.applicability?.conditions ?? [])
+    ],
+    exclusions: [],
+    preservedNegations: []
+  });
   return {
     schemaVersion: 1,
     memoryId: request.memoryId,
@@ -109,18 +115,18 @@ function createHumanMemory(request: {
     },
     representations: {
       compact: {
-        text: request.body,
-        validated: false,
+        text: compact.text,
+        validated: compact.validated,
         generatorIdentity: "direct-human-assertion",
         sourceRevisionId: request.revisionId,
-        renderedTokenCount: tokenEstimate(request.body)
+        renderedTokenCount: compact.renderedTokenCount
       },
       standard: {
         text: request.body,
         validated: true,
         generatorIdentity: "direct-human-assertion",
         sourceRevisionId: request.revisionId,
-        renderedTokenCount: tokenEstimate(request.body)
+        renderedTokenCount: compact.renderedTokenCount
       }
     },
     provenance: [

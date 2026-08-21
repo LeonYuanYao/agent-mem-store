@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -109,6 +109,213 @@ test("a slow semantic query degrades to lexical-only before the automatic deadli
   expect(performance.now() - started).toBeLessThan(500);
   expect(result.semanticStage).toBe("lexical_only");
   expect(result.items).toHaveLength(1);
+});
+
+test("large historical receipt volume does not consume the semantic deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-pack-receipt-history-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174541",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174551",
+      scope: { kind: "project", projectId },
+      body: "Use SQLite WAL for durable state.",
+      compact: "Use SQLite WAL.",
+      startup: "never"
+    })
+  });
+  const fast: EmbeddingAdapter = {
+    identity,
+    embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: fast,
+    builtAt: "2026-08-07T13:11:00.000Z"
+  });
+  const historical = await prepareSessionStartShadowPack({
+    runtimeRoot,
+    vaultRoot,
+    projectId,
+    sessionId: "historical-receipts",
+    requestedAt: "2026-08-07T13:11:01.000Z"
+  });
+  const database = new DatabaseSync(join(runtimeRoot, "state", "memstore.sqlite"));
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const insert = database.prepare(
+      `INSERT INTO retrieval_receipt_items(
+         receipt_id, memory_id, revision_id, rank_ordinal, relevance_band,
+         representation_kind, rendered_token_count, score, reasons_json,
+         outcome, omission_reason
+       ) VALUES (?, ?, ?, ?, 'weak', 'identity', 0, 0, '[]', 'omitted', 'weak_relevance')`
+    );
+    for (let ordinal = 0; ordinal < 150_000; ordinal += 1) {
+      insert.run(
+        historical.receiptId,
+        `historical-memory-${String(ordinal)}`,
+        "historical-revision",
+        ordinal + 1
+      );
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  } finally {
+    database.close();
+  }
+  await prepareSessionStartShadowPack({
+    runtimeRoot,
+    vaultRoot,
+    projectId,
+    sessionId: "current-receipts",
+    requestedAt: "2026-08-07T13:11:02.000Z"
+  });
+  const bounded: EmbeddingAdapter = {
+    identity,
+    embed: () => new Promise((resolve) => {
+      setTimeout(() => {
+        resolve([[1, 0]]);
+      }, 285);
+    })
+  };
+
+  const result = await prepareUserPromptShadowPack({
+    runtimeRoot,
+    vaultRoot,
+    projectId,
+    sessionId: "current-receipts",
+    prompt: "How should SQLite WAL be configured?",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter: bounded,
+    requestedAt: "2026-08-07T13:11:03.000Z"
+  });
+
+  expect(result.semanticStage).toBe("complete");
+});
+
+test("large Project scope is parsed before the semantic deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-pack-large-scope-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const baseMemoryId = "msmem_123e4567-e89b-42d3-a456-426614174561";
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: baseMemoryId,
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174571",
+      scope: { kind: "project", projectId },
+      body: "Use SQLite WAL for durable state.",
+      compact: "Use SQLite WAL.",
+      startup: "never"
+    })
+  });
+  const fast: EmbeddingAdapter = {
+    identity,
+    embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: fast,
+    builtAt: "2026-08-07T13:11:00.000Z"
+  });
+  const database = new DatabaseSync(join(runtimeRoot, "state", "memstore.sqlite"));
+  const active = database.prepare(
+    `SELECT revision.index_revision_id, revision.directory_path, revision.dimensions
+     FROM active_retrieval_index AS active
+     JOIN retrieval_index_revisions AS revision
+       ON revision.index_revision_id = active.index_revision_id
+     WHERE active.singleton = 1`
+  ).get();
+  if (
+    typeof active?.index_revision_id !== "string" ||
+    typeof active.directory_path !== "string" ||
+    typeof active.dimensions !== "number"
+  ) throw new Error("Expected an active retrieval index fixture.");
+  const insert = database.prepare(
+    `INSERT INTO retrieval_documents(
+       index_revision_id, vector_ordinal, memory_id, revision_id, content_identity,
+       scope_kind, project_id, authority, sensitivity, lifecycle, category,
+       base_priority_tier, session_order_key, importance_tags_json, startup,
+       applicability_summary, applicability_conditions_json, validity_state,
+       valid_from, valid_until, identity_label, identity_validated,
+       identity_token_count, compact_text, compact_validated, compact_token_count,
+       standard_text, standard_validated, standard_token_count, searchable_text,
+       revised_at
+     )
+     SELECT index_revision_id, ?, ?, ?, ?, scope_kind, project_id, authority,
+            sensitivity, lifecycle, category, base_priority_tier, ?,
+            importance_tags_json, startup, applicability_summary,
+            applicability_conditions_json, validity_state, valid_from, valid_until,
+            identity_label, identity_validated, identity_token_count, compact_text,
+            compact_validated, compact_token_count, standard_text,
+            standard_validated, standard_token_count, searchable_text, revised_at
+     FROM retrieval_documents WHERE index_revision_id = ? AND memory_id = ?`
+  );
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    for (let ordinal = 1; ordinal <= 2_000; ordinal += 1) {
+      insert.run(
+        ordinal,
+        `large-scope-memory-${String(ordinal)}`,
+        `large-scope-revision-${String(ordinal)}`,
+        `large-scope-content-${String(ordinal)}`,
+        `large-scope-order-${String(ordinal).padStart(4, "0")}`,
+        active.index_revision_id,
+        baseMemoryId
+      );
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  } finally {
+    database.close();
+  }
+  const vectors = new Float32Array(2_001 * active.dimensions);
+  for (let ordinal = 0; ordinal <= 2_000; ordinal += 1) {
+    vectors[ordinal * active.dimensions] = 1;
+  }
+  await writeFile(join(active.directory_path, "vectors.f32"), Buffer.from(vectors.buffer));
+  await prepareSessionStartShadowPack({
+    runtimeRoot,
+    vaultRoot,
+    projectId,
+    sessionId: "large-scope",
+    requestedAt: "2026-08-07T13:11:01.000Z"
+  });
+  const bounded: EmbeddingAdapter = {
+    identity,
+    embed: () => new Promise((resolve) => {
+      setTimeout(() => {
+        resolve([[1, 0]]);
+      }, 150);
+    })
+  };
+
+  const result = await prepareUserPromptShadowPack({
+    runtimeRoot,
+    vaultRoot,
+    projectId,
+    sessionId: "large-scope",
+    prompt: "How should SQLite WAL be configured?",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter: bounded,
+    requestedAt: "2026-08-07T13:11:02.000Z"
+  });
+
+  expect(result.semanticStage).toBe("complete");
 });
 
 test("automatic SessionStart fails open when Runtime SQLite is temporarily busy", async () => {
