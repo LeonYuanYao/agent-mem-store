@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -7,8 +7,10 @@ import { handleCodexHook } from "../../../src/adapters/codex/hook.js";
 import {
   buildRetrievalIndex,
   inspectActiveRetrievalIndex,
+  pruneRetiredRetrievalSnapshots,
   type EmbeddingAdapter
 } from "../../../src/retrieval/index.js";
+import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { writeCanonicalMemory } from "../../../src/vault/index.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
 
@@ -219,4 +221,64 @@ test("index publication yields between bounded batches while the previous index 
     indexRevisionId: rebuilt.indexRevisionId,
     documentCount: 2
   });
+});
+
+test("retired retrieval snapshots are pruned in bounded batches without deleting audit metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-index-pruning-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const memory = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174351",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174361",
+    body: "Retired snapshots must not accumulate forever."
+  });
+  await writeCanonicalMemory({ runtimeRoot, vaultRoot, actor: "human", memory });
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174352",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174362",
+      body: "Snapshot cleanup must yield between bounded FTS batches."
+    })
+  });
+  const retired = await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter,
+    builtAt: "2026-08-07T11:10:00.000Z"
+  });
+  const active = await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter,
+    builtAt: "2026-08-07T11:11:00.000Z"
+  });
+
+  await expect(pruneRetiredRetrievalSnapshots({
+    runtimeRoot,
+    maximumSnapshots: 1,
+    prunedAt: "2026-08-07T11:12:00.000Z"
+  })).resolves.toEqual({ selectedCount: 1, prunedCount: 1, failedCount: 0 });
+
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM retrieval_documents WHERE index_revision_id = ?"
+    ).get(retired.indexRevisionId)?.count).toBe(0);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM active_fts_memories WHERE index_revision_id = ?"
+    ).get(active.indexRevisionId)?.count).toBe(2);
+    expect(database.prepare(
+      "SELECT snapshot_pruned_at FROM retrieval_index_revisions WHERE index_revision_id = ?"
+    ).get(retired.indexRevisionId)?.snapshot_pruned_at).toBe("2026-08-07T11:12:00.000Z");
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM retrieval_documents WHERE index_revision_id = ?"
+    ).get(active.indexRevisionId)?.count).toBe(2);
+  } finally {
+    database.close();
+  }
+  await expect(access(join(runtimeRoot, "indexes", retired.indexRevisionId))).rejects.toThrow();
 });

@@ -462,6 +462,19 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
         json: parsed.values.json
       };
     }
+    if (action === "report") {
+      return {
+        command: "shadow.report",
+        result: await inspectOfficialShadowWindow({
+          runtimeRoot: location.runtimeRoot,
+          repositoryRoot: resolve(parsed.values.repo ?? process.cwd()),
+          homeRoot: resolve(parsed.values.home ?? homedir()),
+          now,
+          includeReadinessReport: true
+        }),
+        json: parsed.values.json
+      };
+    }
     if (action === "start") {
       if (parsed.values["probe-event"] === undefined) {
         throw new MemStoreCommandError(
@@ -531,7 +544,7 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
     }
     throw new MemStoreCommandError(
       "unknown_command",
-      "Use shadow start, shadow status, shadow migrate-identity, or shadow accept-program-change."
+      "Use shadow start, shadow status, shadow report, shadow migrate-identity, or shadow accept-program-change."
     );
   }
   if (command === "purge") {

@@ -198,6 +198,20 @@ test("UserPromptSubmit uses relevance bands, upgrades exact high matches, and su
     })
   ]);
   expect(first.renderedTokenCount).toBeLessThanOrEqual(1024);
+  const receipt = await inspectRetrievalReceipt(roots.runtimeRoot, first.receiptId);
+  if (receipt?.timings === undefined) throw new Error("Expected structured retrieval timings.");
+  expect(Object.keys(receipt.timings).sort()).toEqual([
+    "embeddingMs",
+    "epochLoadMs",
+    "rankingAndRelationshipMs",
+    "receiptWriteMs",
+    "scopeLoadMs",
+    "totalMs",
+    "vectorScanMs"
+  ]);
+  for (const value of Object.values(receipt.timings)) {
+    expect(value).toBeGreaterThanOrEqual(0);
+  }
 
   const repeated = await prepareUserPromptShadowPack({
     ...roots,

@@ -24,6 +24,28 @@ type PriorityTier = "critical" | "strong" | "normal";
 type RelevanceBand = "high" | "probable" | "weak";
 type RepresentationKind = "compact" | "standard" | "identity";
 
+interface RetrievalStageTimings {
+  readonly epochLoadMs: number;
+  readonly scopeLoadMs: number;
+  readonly embeddingMs: number;
+  readonly vectorScanMs: number;
+  readonly rankingAndRelationshipMs: number;
+  readonly receiptWriteMs: number;
+  readonly totalMs: number;
+}
+
+type RetrievalPreReceiptTimings = Omit<RetrievalStageTimings, "receiptWriteMs" | "totalMs">;
+
+const retrievalStageTimingsSchema = z.object({
+  epochLoadMs: z.number().nonnegative(),
+  scopeLoadMs: z.number().nonnegative(),
+  embeddingMs: z.number().nonnegative(),
+  vectorScanMs: z.number().nonnegative(),
+  rankingAndRelationshipMs: z.number().nonnegative(),
+  receiptWriteMs: z.number().nonnegative(),
+  totalMs: z.number().nonnegative()
+});
+
 interface IndexedMemory {
   readonly indexRevisionId: string;
   readonly memoryId: string;
@@ -428,9 +450,12 @@ async function recordAutomaticReceipt(request: {
   readonly bucketPageCount?: number;
   readonly terminalStopReason?: string;
   readonly latencyMs: number;
+  readonly timingStartedAt?: number;
+  readonly preReceiptTimings?: RetrievalPreReceiptTimings;
   readonly requestedAt: string;
 }): Promise<{ readonly receiptId: string; readonly epochTotal: number }> {
   const receiptId = `msreceipt_${randomUUID()}`;
+  const receiptStarted = performance.now();
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     database.exec("BEGIN IMMEDIATE");
@@ -514,6 +539,18 @@ async function recordAutomaticReceipt(request: {
     database.prepare(
       "UPDATE context_epochs SET automatic_token_total = ? WHERE epoch_id = ? AND state = 'active'"
     ).run(epochTotal, request.epochId);
+    if (request.timingStartedAt !== undefined && request.preReceiptTimings !== undefined) {
+      const receiptWriteMs = Math.max(0, performance.now() - receiptStarted);
+      const totalMs = Math.max(0, performance.now() - request.timingStartedAt);
+      const timings: RetrievalStageTimings = {
+        ...request.preReceiptTimings,
+        receiptWriteMs,
+        totalMs
+      };
+      database.prepare(
+        "UPDATE retrieval_receipts SET latency_ms = ?, timing_json = ? WHERE receipt_id = ?"
+      ).run(totalMs, JSON.stringify(timings), receiptId);
+    }
     database.exec("COMMIT");
     return { receiptId, epochTotal };
   } catch (error) {
@@ -720,16 +757,24 @@ async function semanticScores(request: {
   readonly query: string;
   readonly adapter?: EmbeddingAdapter;
   readonly deadlineAt: number;
-}): Promise<{ readonly stage: "complete" | "lexical_only"; readonly scores: ReadonlyMap<string, number> }> {
+}): Promise<{
+  readonly stage: "complete" | "lexical_only";
+  readonly scores: ReadonlyMap<string, number>;
+  readonly embeddingMs: number;
+  readonly vectorScanMs: number;
+}> {
   if (
     request.adapter === undefined ||
     request.adapter.identity.adapterVersion !== request.active.adapter_version ||
     request.adapter.identity.modelIdentity !== request.active.model_identity ||
     request.adapter.identity.artifactSha256 !== request.active.artifact_sha256 ||
     request.adapter.identity.dimensions !== request.active.dimensions
-  ) return { stage: "lexical_only", scores: new Map() };
+  ) return { stage: "lexical_only", scores: new Map(), embeddingMs: 0, vectorScanMs: 0 };
   const remaining = request.deadlineAt - performance.now();
-  if (remaining <= 0) return { stage: "lexical_only", scores: new Map() };
+  if (remaining <= 0) {
+    return { stage: "lexical_only", scores: new Map(), embeddingMs: 0, vectorScanMs: 0 };
+  }
+  const embeddingStarted = performance.now();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const embedded = await Promise.race([
     (request.adapter.embedQuery ?? request.adapter.embed)([request.query]),
@@ -740,15 +785,23 @@ async function semanticScores(request: {
     })
   ]);
   if (timeout !== undefined) clearTimeout(timeout);
-  if (embedded === undefined) return { stage: "lexical_only", scores: new Map() };
+  const embeddingMs = Math.max(0, performance.now() - embeddingStarted);
+  if (embedded === undefined) {
+    return { stage: "lexical_only", scores: new Map(), embeddingMs, vectorScanMs: 0 };
+  }
   const queryEmbedding = embedded[0];
   const normalized = queryEmbedding === undefined ? undefined : normalizeVector(queryEmbedding);
-  if (normalized === undefined) return { stage: "lexical_only", scores: new Map() };
+  if (normalized === undefined) {
+    return { stage: "lexical_only", scores: new Map(), embeddingMs, vectorScanMs: 0 };
+  }
+  const vectorScanStarted = performance.now();
   const bytes = await readFile(`${String(request.active.directory_path)}/vectors.f32`);
   const values = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
   const dimensions = z.number().int().positive().parse(request.active.dimensions);
   return {
     stage: "complete",
+    embeddingMs,
+    vectorScanMs: Math.max(0, performance.now() - vectorScanStarted),
     scores: new Map(request.memories.map((memory) => {
       const start = memory.vectorOrdinal * dimensions;
       return [memory.memoryId, dot(normalized, Array.from(values.subarray(start, start + dimensions)))] as const;
@@ -811,11 +864,15 @@ async function prepareUserPromptShadowPackCore(
   const started = performance.now();
   const requestedAt = z.iso.datetime().parse(request.requestedAt);
   const normalizedPrompt = request.prompt.trim().replace(/\s+/gu, " ");
+  const epochLoadStarted = performance.now();
   const epoch = await loadEpoch(request.runtimeRoot, request.sessionId);
+  const epochLoadMs = Math.max(0, performance.now() - epochLoadStarted);
   let loaded: Awaited<ReturnType<typeof loadActiveScope>>;
+  const scopeLoadStarted = performance.now();
   try {
     loaded = await loadActiveScope({ ...request, requestedAt });
   } catch {
+    const scopeLoadMs = Math.max(0, performance.now() - scopeLoadStarted);
     const receipt = await recordAutomaticReceipt({
       runtimeRoot: request.runtimeRoot,
       callerKind: "user_prompt",
@@ -829,6 +886,14 @@ async function prepareUserPromptShadowPackCore(
       semanticStage: "not_applicable",
       emptyReason: "index_unavailable",
       latencyMs: Math.max(0, performance.now() - started),
+      timingStartedAt: started,
+      preReceiptTimings: {
+        epochLoadMs,
+        scopeLoadMs,
+        embeddingMs: 0,
+        vectorScanMs: 0,
+        rankingAndRelationshipMs: 0
+      },
       requestedAt
     });
     return {
@@ -844,6 +909,7 @@ async function prepareUserPromptShadowPackCore(
       semanticStage: "not_applicable"
     };
   }
+  const scopeLoadMs = Math.max(0, performance.now() - scopeLoadStarted);
   const { active, memories } = loaded;
   const softTarget = z.number().int().positive().parse(request.policy?.epochSoftTarget ?? 8192);
   const hardLimit = z.number().int().positive().parse(request.policy?.epochHardLimit ?? 12288);
@@ -851,7 +917,12 @@ async function prepareUserPromptShadowPackCore(
   const query = [normalizedPrompt, ...request.signals.files, ...request.signals.symbols,
     ...request.signals.errors, ...request.signals.commands].join("\n");
   const semantic = isContinuationOnly(normalizedPrompt)
-    ? { stage: "lexical_only" as const, scores: new Map<string, number>() }
+    ? {
+        stage: "lexical_only" as const,
+        scores: new Map<string, number>(),
+        embeddingMs: 0,
+        vectorScanMs: 0
+      }
     : await semanticScores({
         active,
         memories,
@@ -859,6 +930,7 @@ async function prepareUserPromptShadowPackCore(
         deadlineAt: started + AUTOMATIC_SEMANTIC_DEADLINE_MS,
         ...(request.adapter === undefined ? {} : { adapter: request.adapter })
       });
+  const rankingAndRelationshipStarted = performance.now();
   const terms = queryTerms(normalizedPrompt);
   const lexical = memories.map((memory) => ({ memory, coverage: lexicalCoverage(terms, memory.searchableText) }))
     .filter((item) => item.coverage > 0)
@@ -1044,6 +1116,14 @@ async function prepareUserPromptShadowPackCore(
     softTargetRestricted: postSoft,
     hardLimitBlocked: epoch.tokenTotal >= hardLimit,
     latencyMs: Math.max(0, performance.now() - started),
+    timingStartedAt: started,
+    preReceiptTimings: {
+      epochLoadMs,
+      scopeLoadMs,
+      embeddingMs: semantic.embeddingMs,
+      vectorScanMs: semantic.vectorScanMs,
+      rankingAndRelationshipMs: Math.max(0, performance.now() - rankingAndRelationshipStarted)
+    },
     requestedAt
   });
   return {
@@ -1113,6 +1193,7 @@ export async function inspectRetrievalReceipt(
   readonly terminalStopReason?: string;
   readonly omittedItemCount: number;
   readonly omissionDetailsTruncated: boolean;
+  readonly timings?: RetrievalStageTimings;
   readonly selectedMemoryIds: readonly string[];
   readonly omittedMemoryIds: readonly string[];
 } | undefined> {
@@ -1122,7 +1203,7 @@ export async function inspectRetrievalReceipt(
       `SELECT receipt_id, budget_tier, rendered_token_count,
               automatic_epoch_total, soft_target_restricted, hard_limit_blocked,
               rows_examined, bucket_page_count, terminal_stop_reason
-              , omitted_item_count, omission_details_truncated
+              , omitted_item_count, omission_details_truncated, timing_json
        FROM retrieval_receipts WHERE receipt_id = ?`
     ).get(receiptId);
     if (receipt === undefined) return undefined;
@@ -1146,6 +1227,12 @@ export async function inspectRetrievalReceipt(
         : {}),
       omittedItemCount: z.number().int().nonnegative().parse(receipt.omitted_item_count),
       omissionDetailsTruncated: receipt.omission_details_truncated === 1,
+      ...(() => {
+        const parsed = retrievalStageTimingsSchema.safeParse(
+          JSON.parse(z.string().parse(receipt.timing_json))
+        );
+        return parsed.success ? { timings: parsed.data } : {};
+      })(),
       selectedMemoryIds: items.flatMap((item) =>
         item.outcome === "selected" ? [z.string().parse(item.memory_id)] : []
       ),

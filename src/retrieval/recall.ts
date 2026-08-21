@@ -283,9 +283,9 @@ export async function recallSearch(request: {
     try {
       const allowed = new Set(documents.map((item) => item.memoryId));
       const matches = lexicalDatabase.prepare(
-        `SELECT memory_id, bm25(fts_memories) AS lexical_score
-         FROM fts_memories
-         WHERE fts_memories MATCH ? AND index_revision_id = ?
+        `SELECT memory_id, bm25(active_fts_memories) AS lexical_score
+         FROM active_fts_memories
+         WHERE active_fts_memories MATCH ? AND index_revision_id = ?
          ORDER BY lexical_score, memory_id`
       ).all(expression, indexRevisionId).filter((row) =>
         allowed.has(z.string().parse(row.memory_id))

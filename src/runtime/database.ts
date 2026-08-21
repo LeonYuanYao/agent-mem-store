@@ -199,6 +199,21 @@ const migrations: readonly Migration[] = [
     version: 38,
     name: "model_health_reminder_content",
     path: new URL("../../migrations/0038-model-health-reminder-content.sql", import.meta.url)
+  },
+  {
+    version: 39,
+    name: "retrieval_stage_timings",
+    path: new URL("../../migrations/0039-retrieval-stage-timings.sql", import.meta.url)
+  },
+  {
+    version: 40,
+    name: "retrieval_snapshot_retention",
+    path: new URL("../../migrations/0040-retrieval-snapshot-retention.sql", import.meta.url)
+  },
+  {
+    version: 41,
+    name: "active_retrieval_fts",
+    path: new URL("../../migrations/0041-active-retrieval-fts.sql", import.meta.url)
   }
 ];
 

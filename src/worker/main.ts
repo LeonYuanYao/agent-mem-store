@@ -16,6 +16,7 @@ import { generateReviewInbox } from "../review/inbox.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import {
   buildRetrievalIndex,
+  pruneRetiredRetrievalSnapshots,
   retrievalIndexNeedsRebuild,
   type EmbeddingAdapter
 } from "../retrieval/index.js";
@@ -157,6 +158,18 @@ export async function runWorkerOnce(request: {
 
   const activities: string[] = [];
   let shouldRefreshReview = false;
+  try {
+    const pruning = await pruneRetiredRetrievalSnapshots({
+      runtimeRoot: request.runtimeRoot,
+      maximumSnapshots: 1,
+      prunedAt: now
+    });
+    if (pruning.selectedCount > 0) {
+      activities.push(`retrieval-pruning:${String(pruning.prunedCount)}/${String(pruning.selectedCount)}`);
+    }
+  } catch {
+    activities.push("retrieval-pruning:failed");
+  }
   const sessionCatchUp = await captureAbandonedSessionEnd({
     runtimeRoot: request.runtimeRoot,
     now,

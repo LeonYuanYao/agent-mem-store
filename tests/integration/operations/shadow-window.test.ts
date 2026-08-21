@@ -18,7 +18,9 @@ import {
 } from "../../../src/retrieval/index.js";
 import { approvedShadowEmbeddingProfile } from "../../../src/retrieval/shadow-profile.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
+import { writeCanonicalMemory } from "../../../src/vault/index.js";
 import { runWorkerOnce } from "../../../src/worker/main.js";
+import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
 
 const roots: string[] = [];
 
@@ -152,6 +154,65 @@ test("an official Shadow window requires a completed real-Hook probe and records
     dryRun: false,
     minimumEndAt: "2026-08-16T03:00:02.000Z"
   });
+  const reviewMemory = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174971",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174972",
+    scope: {
+      kind: "project",
+      projectId: "msproj_123e4567-e89b-42d3-a456-426614174970"
+    },
+    authority: "agent_derived",
+    primaryCategory: "architecture_contract",
+    body: "Keep the runtime database outside the portable Vault.",
+    compact: "Keep runtime state outside the Vault.",
+    standard: "Keep the runtime database outside the portable Obsidian Vault."
+  });
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "agent",
+    memory: reviewMemory
+  });
+  const reviewFixture = await openRuntimeDatabase(runtimeRoot);
+  try {
+    reviewFixture.prepare(
+      `INSERT INTO memory_candidates(
+         candidate_id, fingerprint, scope_kind, project_id, statement,
+         category, certainty, state, high_value, sensitivity,
+         source_session_id, created_at, last_evidence_at, updated_at,
+         promoted_memory_id, promotion_revision_id, promotion_generation
+       ) VALUES (?, ?, 'project', ?, ?, 'architecture_contract', 'asserted',
+                 'promoted', 1, 'normal', ?, ?, ?, ?, ?, ?, 1)`
+    ).run(
+      "mscandidate_123e4567-e89b-42d3-a456-426614174973",
+      "f".repeat(64),
+      "msproj_123e4567-e89b-42d3-a456-426614174970",
+      "Keep the runtime database outside the portable Vault.",
+      "official-shadow-session",
+      "2026-08-09T03:00:02.100Z",
+      "2026-08-09T03:00:02.100Z",
+      "2026-08-09T03:00:02.100Z",
+      reviewMemory.memoryId,
+      reviewMemory.revisionId
+    );
+    reviewFixture.prepare(
+      `INSERT INTO candidate_evidence(
+         candidate_id, evidence_id, evidence_class, source_identity,
+         project_id, occurred_at, integrity, source_truncated, memory_echo,
+         command_text, command_cwd
+       ) VALUES (?, ?, 'tool_result', ?, ?, ?, 'intact', 0, 0, ?, ?)`
+    ).run(
+      "mscandidate_123e4567-e89b-42d3-a456-426614174973",
+      "msevidence_123e4567-e89b-42d3-a456-426614174974",
+      "tool:exec_command",
+      "msproj_123e4567-e89b-42d3-a456-426614174970",
+      "2026-08-09T03:00:02.050Z",
+      "memstore status --json",
+      projectRoot
+    );
+  } finally {
+    reviewFixture.close();
+  }
   await expect(startOfficialShadowWindow({
     ...request,
     startedAt: "2026-08-09T03:00:03.000Z"
@@ -162,6 +223,18 @@ test("an official Shadow window requires a completed real-Hook probe and records
     adapter: approvedEmbedding,
     builtAt: "2026-08-09T03:00:04.000Z"
   });
+  const readinessFixture = await openRuntimeDatabase(runtimeRoot);
+  try {
+    readinessFixture.prepare(
+      `UPDATE retrieval_receipts
+       SET created_at = '2026-08-09T03:00:03.000Z', latency_ms = 600,
+           semantic_stage = 'complete',
+           timing_json = '{"epochLoadMs":10,"scopeLoadMs":20,"embeddingMs":300,"vectorScanMs":40,"rankingAndRelationshipMs":50,"receiptWriteMs":180,"totalMs":600}'
+       WHERE caller_kind = 'user_prompt'`
+    ).run();
+  } finally {
+    readinessFixture.close();
+  }
   await expect(inspectOfficialShadowWindow({
     runtimeRoot,
     repositoryRoot,
@@ -174,6 +247,63 @@ test("an official Shadow window requires a completed real-Hook probe and records
     gate6ReviewEligible: true,
     coverage: {
       completed_evaluations: { baseline: 1, current: 1, delta: 0 }
+    }
+  });
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:02.000Z",
+    includeReadinessReport: true
+  })).resolves.toMatchObject({
+    readinessReport: {
+      latency: {
+        user_prompt: {
+          count: 1,
+          p50Ms: 600,
+          p95Ms: 600,
+          p99Ms: 600,
+          over500MsCount: 1
+        }
+      },
+      userPromptStageTimings: {
+        embeddingMs: { count: 1, p50Ms: 300, p95Ms: 300, p99Ms: 300 },
+        receiptWriteMs: { count: 1, p50Ms: 180, p95Ms: 180, p99Ms: 180 },
+        totalMs: { count: 1, p50Ms: 600, p95Ms: 600, p99Ms: 600 }
+      },
+      snapshotRetention: {
+        totalSnapshots: 2,
+        pendingRetiredSnapshots: 1,
+        prunedSnapshots: 0,
+        activeDocuments: 1,
+        retainedDocuments: 1
+      },
+      knowledgeSamples: {
+        architecture_contract: [
+          expect.objectContaining({
+            memoryId: reviewMemory.memoryId,
+            statement: "Keep the runtime database outside the portable Vault.",
+            compactText: "Keep runtime state outside the Vault.",
+            evidence: [
+              expect.objectContaining({
+                sourceIdentity: "tool:exec_command",
+                commandText: "memstore status --json",
+                memoryEcho: false
+              })
+            ]
+          })
+        ]
+      },
+      retrievalSamples: {
+        complete: [
+          expect.objectContaining({
+            normalizedQuery: "Verify the official Shadow baseline.",
+            selected: [],
+            omitted: []
+          })
+        ],
+        lexical_only: []
+      }
     }
   });
 

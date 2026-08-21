@@ -96,6 +96,256 @@ function codexConfigurationIdentity(
 
 const shadowIdentityScope = "memstore-v2-native-memory-independent" as const;
 
+function percentile(values: readonly number[], quantile: number): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.max(0, Math.ceil(quantile * sorted.length) - 1);
+  return sorted[index];
+}
+
+function numericSummary(values: readonly number[]): Record<string, unknown> {
+  return {
+    count: values.length,
+    ...(values.length === 0
+      ? {}
+      : {
+          p50Ms: percentile(values, 0.5),
+          p95Ms: percentile(values, 0.95),
+          p99Ms: percentile(values, 0.99)
+        })
+  };
+}
+
+function latencySummary(rows: readonly Record<string, unknown>[]): Record<string, unknown> {
+  const values = rows.map((row) => z.number().nonnegative().parse(row.latency_ms));
+  return {
+    ...numericSummary(values),
+    over500MsCount: values.filter((value) => value > 500).length
+  };
+}
+
+const retrievalTimingKeys = [
+  "epochLoadMs",
+  "scopeLoadMs",
+  "embeddingMs",
+  "vectorScanMs",
+  "rankingAndRelationshipMs",
+  "receiptWriteMs",
+  "totalMs"
+] as const;
+
+const retrievalTimingSchema = z.object(Object.fromEntries(
+  retrievalTimingKeys.map((key) => [key, z.number().nonnegative()])
+) as Record<(typeof retrievalTimingKeys)[number], z.ZodNumber>);
+
+function readinessUserPromptStageTimings(
+  database: DatabaseSync,
+  startedAt: string
+): Record<string, Record<string, unknown>> {
+  const timings = database.prepare(
+    `SELECT timing_json FROM retrieval_receipts
+     WHERE created_at >= ? AND caller_kind = 'user_prompt'`
+  ).all(startedAt).flatMap((row) => {
+    try {
+      const parsed = retrievalTimingSchema.safeParse(JSON.parse(z.string().parse(row.timing_json)));
+      return parsed.success ? [parsed.data] : [];
+    } catch {
+      return [];
+    }
+  });
+  return Object.fromEntries(retrievalTimingKeys.map((key) => [
+    key,
+    numericSummary(timings.map((timing) => timing[key]))
+  ]));
+}
+
+function readinessSnapshotRetention(database: DatabaseSync): Record<string, number> {
+  const row = database.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM retrieval_index_revisions) AS total_snapshots,
+       (SELECT COUNT(*) FROM retrieval_index_revisions AS revision
+        WHERE revision.snapshot_pruned_at IS NULL
+          AND revision.index_revision_id != (
+            SELECT index_revision_id FROM active_retrieval_index WHERE singleton = 1
+          )) AS pending_retired_snapshots,
+       (SELECT COUNT(*) FROM retrieval_index_revisions
+        WHERE snapshot_pruned_at IS NOT NULL) AS pruned_snapshots,
+       (SELECT COUNT(*) FROM retrieval_documents
+        WHERE index_revision_id = (
+          SELECT index_revision_id FROM active_retrieval_index WHERE singleton = 1
+        )) AS active_documents,
+       (SELECT COUNT(*) FROM retrieval_documents) AS retained_documents`
+  ).get();
+  return {
+    totalSnapshots: z.number().int().nonnegative().parse(row?.total_snapshots),
+    pendingRetiredSnapshots: z.number().int().nonnegative().parse(row?.pending_retired_snapshots),
+    prunedSnapshots: z.number().int().nonnegative().parse(row?.pruned_snapshots),
+    activeDocuments: z.number().int().nonnegative().parse(row?.active_documents),
+    retainedDocuments: z.number().int().nonnegative().parse(row?.retained_documents)
+  };
+}
+
+function readinessLatency(
+  database: DatabaseSync,
+  startedAt: string
+): Record<"session_start" | "user_prompt", Record<string, unknown>> {
+  const rows = database.prepare(
+    `SELECT caller_kind, latency_ms
+     FROM retrieval_receipts
+     WHERE created_at >= ? AND caller_kind IN ('session_start', 'user_prompt')`
+  ).all(startedAt);
+  return {
+    session_start: latencySummary(rows.filter((row) => row.caller_kind === "session_start")),
+    user_prompt: latencySummary(rows.filter((row) => row.caller_kind === "user_prompt"))
+  };
+}
+
+function evenlySample<T>(values: readonly T[], limit: number): readonly T[] {
+  if (values.length <= limit) return values;
+  const indexes = Array.from({ length: limit }, (_, index) =>
+    Math.round(index * (values.length - 1) / (limit - 1))
+  );
+  return indexes.flatMap((index, position) =>
+    position > 0 && index === indexes[position - 1] ? [] : [values[index] as T]
+  );
+}
+
+function sampledReceiptItems(
+  database: DatabaseSync,
+  receipt: Record<string, unknown>
+): Record<"selected" | "omitted", readonly Record<string, unknown>[]> {
+  const receiptId = z.string().parse(receipt.receipt_id);
+  const items = database.prepare(
+    `SELECT item.memory_id, item.revision_id, item.rank_ordinal,
+            item.relevance_band, item.representation_kind,
+            item.score, item.reasons_json, item.outcome,
+            item.omission_reason, document.identity_label,
+            document.compact_text, document.standard_text
+     FROM retrieval_receipt_items AS item
+     LEFT JOIN active_retrieval_index AS active ON active.singleton = 1
+     LEFT JOIN retrieval_documents AS document
+       ON document.index_revision_id = active.index_revision_id
+      AND document.memory_id = item.memory_id
+     WHERE item.receipt_id = ?
+     ORDER BY item.rank_ordinal, item.memory_id`
+  ).all(receiptId).map((item) => {
+    const representationKind = z.string().parse(item.representation_kind);
+    const memoryText = representationKind === "standard"
+      ? item.standard_text
+      : representationKind === "identity"
+        ? item.identity_label ?? item.compact_text
+        : item.compact_text;
+    return {
+      memoryId: z.string().parse(item.memory_id),
+      revisionId: z.string().parse(item.revision_id),
+      relevanceBand: z.string().parse(item.relevance_band),
+      representationKind,
+      score: z.number().parse(item.score),
+      reasons: z.array(z.string()).parse(JSON.parse(z.string().parse(item.reasons_json))),
+      ...(typeof memoryText === "string" ? { memoryText } : {}),
+      ...(typeof item.omission_reason === "string" ? { omissionReason: item.omission_reason } : {}),
+      outcome: z.enum(["selected", "omitted"]).parse(item.outcome)
+    };
+  });
+  return {
+    selected: items.filter((item) => item.outcome === "selected"),
+    omitted: items.filter((item) => item.outcome === "omitted")
+  };
+}
+
+function readinessRetrievalSamples(
+  database: DatabaseSync,
+  startedAt: string
+): Record<"complete" | "lexical_only", readonly Record<string, unknown>[]> {
+  const rows = database.prepare(
+    `SELECT receipt_id, normalized_query, semantic_stage, latency_ms,
+            created_at, index_revision_id, empty_reason
+     FROM retrieval_receipts
+     WHERE created_at >= ? AND caller_kind = 'user_prompt'
+       AND semantic_stage IN ('complete', 'lexical_only')
+     ORDER BY created_at, receipt_id`
+  ).all(startedAt);
+  const sample = (stage: "complete" | "lexical_only") =>
+    evenlySample(rows.filter((row) => row.semantic_stage === stage), 3).map((receipt) => ({
+      receiptId: z.string().parse(receipt.receipt_id),
+      normalizedQuery: z.string().parse(receipt.normalized_query),
+      semanticStage: stage,
+      latencyMs: z.number().nonnegative().parse(receipt.latency_ms),
+      createdAt: z.string().parse(receipt.created_at),
+      ...(typeof receipt.empty_reason === "string" ? { emptyReason: receipt.empty_reason } : {}),
+      ...sampledReceiptItems(database, receipt)
+    }));
+  return { complete: sample("complete"), lexical_only: sample("lexical_only") };
+}
+
+function reviewText(text: string, limit = 320): string {
+  if (text.length <= limit) return text;
+  const side = Math.floor((limit - 3) / 2);
+  return `${text.slice(0, side)}...${text.slice(-side)}`;
+}
+
+function readinessKnowledgeSamples(
+  database: DatabaseSync
+): Record<string, readonly Record<string, unknown>[]> {
+  const rows = database.prepare(
+    `SELECT candidate.candidate_id, candidate.category, candidate.statement,
+            candidate.certainty, candidate.high_value,
+            candidate.promoted_memory_id, candidate.promotion_revision_id,
+            document.compact_text, document.standard_text
+     FROM memory_candidates AS candidate
+     JOIN memory_catalog AS catalog
+       ON catalog.memory_id = candidate.promoted_memory_id
+     LEFT JOIN active_retrieval_index AS active ON active.singleton = 1
+     LEFT JOIN retrieval_documents AS document
+       ON document.index_revision_id = active.index_revision_id
+      AND document.memory_id = candidate.promoted_memory_id
+     WHERE candidate.promoted_memory_id IS NOT NULL
+       AND catalog.lifecycle = 'active'
+       AND catalog.authority = 'agent_derived'
+     ORDER BY candidate.category, candidate.candidate_id`
+  ).all();
+  const categories = [...new Set(rows.map((row) => z.string().parse(row.category)))];
+  return Object.fromEntries(categories.map((category) => [
+    category,
+    evenlySample(rows.filter((row) => row.category === category), 3).map((row) => {
+      const candidateId = z.string().parse(row.candidate_id);
+      const evidenceRows = database.prepare(
+        `SELECT evidence_id, evidence_class, source_identity, occurred_at,
+                integrity, source_truncated, memory_echo, file_path,
+                command_text, command_cwd
+         FROM candidate_evidence
+         WHERE candidate_id = ?
+         ORDER BY occurred_at, evidence_id`
+      ).all(candidateId);
+      const evidence = evenlySample(evidenceRows, 3).map((item) => ({
+        evidenceId: z.string().parse(item.evidence_id),
+        evidenceClass: z.string().parse(item.evidence_class),
+        sourceIdentity: z.string().parse(item.source_identity),
+        occurredAt: z.string().parse(item.occurred_at),
+        integrity: z.string().parse(item.integrity),
+        sourceTruncated: item.source_truncated === 1,
+        memoryEcho: item.memory_echo === 1,
+        ...(typeof item.file_path === "string" ? { filePath: reviewText(item.file_path) } : {}),
+        ...(typeof item.command_text === "string"
+          ? { commandText: reviewText(item.command_text) }
+          : {}),
+        ...(typeof item.command_cwd === "string" ? { commandCwd: reviewText(item.command_cwd) } : {})
+      }));
+      return {
+        candidateId,
+        memoryId: z.string().parse(row.promoted_memory_id),
+        revisionId: z.string().parse(row.promotion_revision_id),
+        statement: reviewText(z.string().parse(row.statement)),
+        certainty: z.string().parse(row.certainty),
+        highValue: row.high_value === 1,
+        ...(typeof row.compact_text === "string" ? { compactText: reviewText(row.compact_text) } : {}),
+        ...(typeof row.standard_text === "string" ? { standardText: reviewText(row.standard_text) } : {}),
+        evidence
+      };
+    })
+  ]));
+}
+
 function memstoreConfigurationIdentity(identity: ReturnType<typeof codexConfigurationIdentity>): {
   readonly memstoreMcp: unknown;
   readonly managedHookStates: unknown;
@@ -620,6 +870,7 @@ export async function inspectOfficialShadowWindow(request: {
   readonly repositoryRoot: string;
   readonly homeRoot: string;
   readonly now: string;
+  readonly includeReadinessReport?: boolean;
 }): Promise<Record<string, unknown> | undefined> {
   const now = z.iso.datetime().parse(request.now);
   const database = await openRuntimeDatabase(request.runtimeRoot);
@@ -728,6 +979,17 @@ export async function inspectOfficialShadowWindow(request: {
       gate6ReviewEligible: effectiveState === "active" && now >= minimumEndAt,
       nativeMemory: configIdentity.nativeMemory,
       continuityAdjustments: baseline.continuityAdjustments ?? [],
+      ...(request.includeReadinessReport === true
+        ? {
+            readinessReport: {
+              latency: readinessLatency(database, startedAt),
+              userPromptStageTimings: readinessUserPromptStageTimings(database, startedAt),
+              snapshotRetention: readinessSnapshotRetention(database),
+              knowledgeSamples: readinessKnowledgeSamples(database),
+              retrievalSamples: readinessRetrievalSamples(database, startedAt)
+            }
+          }
+        : {}),
       coverage: Object.fromEntries(Object.entries(current).map(([key, value]) => [
         key,
         { baseline: baseline.counts[key] ?? 0, current: value, delta: value - (baseline.counts[key] ?? 0) }

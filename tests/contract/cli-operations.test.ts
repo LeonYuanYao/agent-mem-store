@@ -95,7 +95,20 @@ test("Shadow status is reachable through the public CLI", async () => {
     ok: true,
     command: "shadow.status"
   });
-});
+  await expect(cli([
+    "shadow",
+    "report",
+    "--runtime",
+    runtimeRoot,
+    "--vault",
+    vaultRoot,
+    "--json"
+  ])).resolves.toMatchObject({
+    schema_version: 1,
+    ok: true,
+    command: "shadow.report"
+  });
+}, 15_000);
 
 test("quality pipeline preview and status are reachable through the public CLI", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-cli-quality-status-"));

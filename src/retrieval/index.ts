@@ -372,9 +372,6 @@ async function buildRetrievalIndexImpl(request: {
            standard_validated, standard_token_count, searchable_text, revised_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
-      const insertFts = database.prepare(
-        "INSERT INTO fts_memories(index_revision_id, memory_id, searchable_text) VALUES (?, ?, ?)"
-      );
       let publishedDocumentCount = 0;
       for (
         let batchStart = 0;
@@ -421,7 +418,6 @@ async function buildRetrievalIndexImpl(request: {
               document.text,
               memory.revisedAt
             );
-            insertFts.run(indexRevisionId, memory.memoryId, document.text);
           }
           database.exec("COMMIT");
         } catch (error) {
@@ -442,6 +438,12 @@ async function buildRetrievalIndexImpl(request: {
         if (completed.changes !== 1) {
           throw new Error("Retrieval index revision could not be completed.");
         }
+        database.prepare("DELETE FROM active_fts_memories").run();
+        database.prepare(
+          `INSERT INTO active_fts_memories(index_revision_id, memory_id, searchable_text)
+           SELECT index_revision_id, memory_id, searchable_text
+           FROM retrieval_documents WHERE index_revision_id = ?`
+        ).run(indexRevisionId);
         database.prepare(
           `INSERT INTO active_retrieval_index(singleton, index_revision_id)
            VALUES (1, ?)
@@ -503,6 +505,76 @@ export async function retrievalIndexNeedsRebuild(request: {
        ORDER BY memory_id`
     ).all();
     return active.catalog_sha256 !== catalogSha256(catalogRows);
+  } finally {
+    database.close();
+  }
+}
+
+export async function pruneRetiredRetrievalSnapshots(request: {
+  readonly runtimeRoot: string;
+  readonly maximumSnapshots?: number;
+  readonly prunedAt: string;
+}): Promise<{
+  readonly selectedCount: number;
+  readonly prunedCount: number;
+  readonly failedCount: number;
+}> {
+  const maximumSnapshots = z.number().int().min(1).max(32).parse(request.maximumSnapshots ?? 8);
+  const prunedAt = z.iso.datetime().parse(request.prunedAt);
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  let selected: readonly Record<string, unknown>[];
+  try {
+    selected = database.prepare(
+      `SELECT revision.index_revision_id, revision.directory_path
+       FROM retrieval_index_revisions AS revision
+       WHERE revision.snapshot_pruned_at IS NULL
+         AND revision.index_revision_id != (
+           SELECT index_revision_id FROM active_retrieval_index WHERE singleton = 1
+         )
+       ORDER BY revision.built_at, revision.index_revision_id
+       LIMIT ?`
+    ).all(maximumSnapshots);
+    let prunedCount = 0;
+    let failedCount = 0;
+    const indexRevisionIds = selected.map((row) => z.string().parse(row.index_revision_id));
+    if (indexRevisionIds.length === 0) {
+      return { selectedCount: 0, prunedCount: 0, failedCount: 0 };
+    }
+    const revisionPlaceholders = indexRevisionIds.map(() => "?").join(", ");
+    try {
+      database.exec("BEGIN IMMEDIATE");
+      database.prepare(
+        `DELETE FROM retrieval_documents WHERE index_revision_id IN (${revisionPlaceholders})`
+      ).run(...indexRevisionIds);
+      database.exec("COMMIT");
+    } catch {
+      database.exec("ROLLBACK");
+      return {
+        selectedCount: selected.length,
+        prunedCount: 0,
+        failedCount: selected.length
+      };
+    }
+    for (const row of selected) {
+      const indexRevisionId = z.string().parse(row.index_revision_id);
+      const directoryPath = z.string().parse(row.directory_path);
+      try {
+        await rm(directoryPath, { recursive: true, force: true });
+        const marked = database.prepare(
+          `UPDATE retrieval_index_revisions
+           SET snapshot_pruned_at = ?
+           WHERE index_revision_id = ? AND snapshot_pruned_at IS NULL
+             AND index_revision_id != (
+               SELECT index_revision_id FROM active_retrieval_index WHERE singleton = 1
+             )`
+        ).run(prunedAt, indexRevisionId);
+        if (marked.changes === 1) prunedCount += 1;
+        else failedCount += 1;
+      } catch {
+        failedCount += 1;
+      }
+    }
+    return { selectedCount: selected.length, prunedCount, failedCount };
   } finally {
     database.close();
   }
