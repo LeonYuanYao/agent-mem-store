@@ -8,6 +8,7 @@ import {
   recordCaptureHealthIncident,
   recoverCaptureHealthIncident
 } from "../capture/index.js";
+import { importNextEmergencySpoolEvent } from "../capture/emergency-spool.js";
 import type { NotifierPort } from "../adapters/macos/notifier.js";
 import { dispatchNextReminder } from "../review/reminders.js";
 import { prepareNextModelHealthReminder } from "../review/reminders.js";
@@ -158,6 +159,15 @@ export async function runWorkerOnce(request: {
 
   const activities: string[] = [];
   let shouldRefreshReview = false;
+  const emergencySpool = await importNextEmergencySpoolEvent({
+    runtimeRoot: request.runtimeRoot,
+    importedAt: now
+  });
+  if (emergencySpool.state === "imported") {
+    activities.push("emergency-spool:imported");
+  } else if (emergencySpool.state === "quarantined") {
+    activities.push("emergency-spool:quarantined");
+  }
   try {
     const pruning = await pruneRetiredRetrievalSnapshots({
       runtimeRoot: request.runtimeRoot,

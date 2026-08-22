@@ -285,15 +285,27 @@ async function claimClusters(request: {
   const leaseToken = `msdupelease_${randomUUID()}`;
   const leaseUntil = new Date(Date.parse(request.now) + 10 * 60 * 1_000).toISOString();
   const database = await openRuntimeDatabase(request.runtimeRoot);
-  try {
-    database.exec("BEGIN IMMEDIATE");
-    const rows = database.prepare(
-      `SELECT * FROM memory_duplicate_clusters
+  const selectionSql = `SELECT * FROM memory_duplicate_clusters
        WHERE state = 'pending'
           OR (state = 'retrying' AND next_retry_at <= ?)
           OR (state = 'processing' AND lease_until < ?)
-       ORDER BY created_at LIMIT ?`
-    ).all(request.now, request.now, assessmentBatchSize);
+       ORDER BY created_at LIMIT ?`;
+  try {
+    if (
+      database.prepare(selectionSql).get(
+        request.now,
+        request.now,
+        assessmentBatchSize
+      ) === undefined
+    ) {
+      return { leaseToken, clusters: [] };
+    }
+    database.exec("BEGIN IMMEDIATE");
+    const rows = database.prepare(selectionSql).all(
+      request.now,
+      request.now,
+      assessmentBatchSize
+    );
     const update = database.prepare(
       `UPDATE memory_duplicate_clusters SET state = 'processing',
          attempt_count = attempt_count + 1, lease_token = ?, lease_until = ?, updated_at = ?
@@ -321,7 +333,7 @@ async function claimClusters(request: {
       }))
     };
   } catch (error) {
-    database.exec("ROLLBACK");
+    if (database.isTransaction) database.exec("ROLLBACK");
     throw error;
   } finally {
     database.close();

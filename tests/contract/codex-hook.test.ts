@@ -164,7 +164,7 @@ test("a Hook validation failure records a body-free health incident when Runtime
   await expect(listOpenCaptureHealthIncidents(runtimeRoot)).resolves.toEqual([]);
 });
 
-test("a busy Runtime database gets a bounded retry and records a body-free diagnostic", async () => {
+test("a busy Runtime database gets a bounded retry and spools a body-free recovery diagnostic", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-codex-hook-busy-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -199,11 +199,11 @@ test("a busy Runtime database gets a bounded retry and records a body-free diagn
 
     expect(result).toMatchObject({
       continue: true,
-      captured: false,
-      state: "capture_unavailable"
+      captured: true,
+      state: "spooled"
     });
-    expect(elapsedMilliseconds).toBeGreaterThanOrEqual(350);
-    expect(elapsedMilliseconds).toBeLessThan(500);
+    expect(elapsedMilliseconds).toBeGreaterThanOrEqual(75);
+    expect(elapsedMilliseconds).toBeLessThan(250);
   } finally {
     database.exec("ROLLBACK");
     database.close();
@@ -211,6 +211,9 @@ test("a busy Runtime database gets a bounded retry and records a body-free diagn
   const status = await inspectStatus({ runtimeRoot, vaultRoot: join(root, "vault") });
   expect(status.pipelines.capture).toMatchObject({
     sqlite_busy_count: 1,
+    sqlite_busy_recovered_count: 1,
+    sqlite_busy_lost_count: 0,
+    last_sqlite_busy_outcome: "spooled",
     last_sqlite_busy_at: "2026-08-07T04:03:00.000Z",
     last_sqlite_busy_event_kind: "Stop"
   });

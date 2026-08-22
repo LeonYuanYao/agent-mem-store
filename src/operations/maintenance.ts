@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { loadConfiguration } from "../configuration/index.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
+import { inspectEmergencySpool } from "../capture/emergency-spool.js";
 
 export interface DoctorCheck {
   readonly name: string;
@@ -76,6 +77,27 @@ export async function inspectDoctor(request: {
       name: "configuration",
       state: "error",
       detail: error instanceof Error ? error.message : "Configuration inspection failed."
+    });
+  }
+
+  try {
+    const spool = await inspectEmergencySpool(runtimeRoot);
+    const stale = spool.oldestPendingAt !== null &&
+      Date.now() - Date.parse(spool.oldestPendingAt) >= 15 * 60 * 1_000;
+    const nearingCapacity = spool.pendingCount >= Math.floor(
+      spool.maximumPendingCount * 0.8
+    );
+    const warning = spool.quarantineCount > 0 || stale || nearingCapacity;
+    checks.push({
+      name: "emergency_spool",
+      state: warning ? "warning" : "ok",
+      detail: `${String(spool.pendingCount)}/${String(spool.maximumPendingCount)} pending Capture Events; ${String(spool.quarantineCount)} quarantined; oldest pending: ${spool.oldestPendingAt ?? "none"}.`
+    });
+  } catch (error) {
+    checks.push({
+      name: "emergency_spool",
+      state: "error",
+      detail: error instanceof Error ? error.message : "Emergency spool inspection failed."
     });
   }
 

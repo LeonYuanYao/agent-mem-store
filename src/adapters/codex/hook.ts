@@ -3,9 +3,11 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   captureEvent,
+  type CaptureEvent,
   recordHookSqliteBusyDiagnostic,
   recordCaptureHealthIncident
 } from "../../capture/index.js";
+import { spoolCaptureEvent } from "../../capture/emergency-spool.js";
 import { classifyLocalSensitivity } from "../../contracts/sensitivity.js";
 import { resolveProject } from "../../projects/index.js";
 
@@ -44,7 +46,7 @@ export type CodexHookResult =
   | {
       readonly continue: true;
       readonly captured: true;
-      readonly state: "captured" | "duplicate";
+      readonly state: "captured" | "duplicate" | "spooled";
       readonly eventId: string;
     }
   | {
@@ -64,6 +66,7 @@ export type CodexHookResult =
     };
 
 const maximumToolFieldBytes = 16 * 1024;
+const hookSqliteBusyTimeoutMilliseconds = 100;
 
 function boundedStructuredValue(value: unknown): unknown {
   if (value === undefined) {
@@ -180,32 +183,39 @@ export async function handleCodexHook(
 ): Promise<CodexHookResult> {
   let eventKind = "unknown";
   let occurredAt = new Date().toISOString();
+  let emergencyEvent: CaptureEvent | undefined;
+  let emergencyProjectPath: string | undefined;
   try {
     const input = hookInputSchema.parse(request.input);
     eventKind = input.hook_event_name;
     occurredAt = z.iso.datetime().parse(request.receivedAt ?? occurredAt);
     const identity = hookIdentity(input);
+    emergencyProjectPath = input.cwd;
+    emergencyEvent = {
+      schemaVersion: 1,
+      eventId: identity.eventId,
+      deduplicationKey: identity.deduplicationKey,
+      agent: "codex",
+      eventKind: input.hook_event_name,
+      occurredAt,
+      sessionId: input.session_id,
+      ...(input.turn_id === undefined ? {} : { turnId: input.turn_id }),
+      payload: hookPayload(input)
+    };
     const project = await resolveProject({
       path: input.cwd,
       runtimeRoot: request.runtimeRoot,
-      busyTimeoutMilliseconds: 400
+      busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds
     });
+    emergencyEvent = {
+      ...emergencyEvent,
+      ...(project.status === "resolved" ? { projectId: project.projectId } : {})
+    };
     const captured = await captureEvent({
       runtimeRoot: request.runtimeRoot,
       recoverHealthCategory: "hook_capture",
-      busyTimeoutMilliseconds: 400,
-      event: {
-        schemaVersion: 1,
-        eventId: identity.eventId,
-        deduplicationKey: identity.deduplicationKey,
-        agent: "codex",
-        eventKind: input.hook_event_name,
-        occurredAt,
-        ...(project.status === "resolved" ? { projectId: project.projectId } : {}),
-        sessionId: input.session_id,
-        ...(input.turn_id === undefined ? {} : { turnId: input.turn_id }),
-        payload: hookPayload(input)
-      }
+      busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds,
+      event: emergencyEvent
     });
     if (captured.state === "blocked_secret" || captured.state === "quarantined") {
       return {
@@ -227,10 +237,35 @@ export async function handleCodexHook(
     const runtimeIsBusy =
       systemCode === "SQLITE_BUSY" || /database is locked|SQLITE_BUSY/iu.test(message);
     if (runtimeIsBusy) {
+      if (emergencyEvent !== undefined && emergencyProjectPath !== undefined) {
+        try {
+          const spooled = await spoolCaptureEvent({
+            runtimeRoot: request.runtimeRoot,
+            projectPath: emergencyProjectPath,
+            spooledAt: new Date().toISOString(),
+            event: emergencyEvent
+          });
+          await recordHookSqliteBusyDiagnostic({
+            runtimeRoot: request.runtimeRoot,
+            occurredAt,
+            eventKind,
+            outcome: "spooled"
+          }).catch(() => undefined);
+          return {
+            continue: true,
+            captured: true,
+            state: spooled.state,
+            eventId: spooled.eventId
+          };
+        } catch {
+          // The active Agent session remains fail-open when both durable paths fail.
+        }
+      }
       await recordHookSqliteBusyDiagnostic({
         runtimeRoot: request.runtimeRoot,
         occurredAt,
-        eventKind
+        eventKind,
+        outcome: "lost"
       }).catch(() => undefined);
     } else {
       const errorCode = error instanceof z.ZodError

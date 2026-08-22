@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { inspectHookSqliteBusyDiagnostics } from "../capture/index.js";
+import { inspectEmergencySpool } from "../capture/emergency-spool.js";
 
 async function databasePath(runtimeRoot: string): Promise<string> {
   const path = join(runtimeRoot, "state", "memstore.sqlite");
@@ -73,6 +74,7 @@ export async function inspectStatus(request: {
   readonly vaultRoot: string;
 }) {
   const hookSqliteBusy = await inspectHookSqliteBusyDiagnostics(request.runtimeRoot);
+  const emergencySpool = await inspectEmergencySpool(request.runtimeRoot);
   const database = new DatabaseSync(await databasePath(request.runtimeRoot), { readOnly: true });
   try {
     const health = database.prepare("SELECT * FROM luna_health_state WHERE singleton = 1").get();
@@ -211,8 +213,19 @@ export async function inspectStatus(request: {
             ? unbatchedCapture.oldest_at
             : null,
           sqlite_busy_count: hookSqliteBusy.count,
+          sqlite_busy_recovered_count: hookSqliteBusy.recoveredCount,
+          sqlite_busy_lost_count: hookSqliteBusy.lostCount,
           last_sqlite_busy_at: hookSqliteBusy.lastOccurredAt,
-          last_sqlite_busy_event_kind: hookSqliteBusy.lastEventKind
+          last_sqlite_busy_event_kind: hookSqliteBusy.lastEventKind,
+          last_sqlite_busy_outcome: hookSqliteBusy.lastOutcome,
+          emergency_spool: {
+            pending_count: emergencySpool.pendingCount,
+            maximum_pending_count: emergencySpool.maximumPendingCount,
+            capacity_state: emergencySpool.capacityState,
+            oldest_pending_at: emergencySpool.oldestPendingAt,
+            quarantine_count: emergencySpool.quarantineCount,
+            total_bytes: emergencySpool.totalBytes
+          }
         },
         distillation: pipeline("distill_batch"),
         session_consolidation: pipeline("consolidate_session"),

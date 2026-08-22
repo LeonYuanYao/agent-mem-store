@@ -19,13 +19,15 @@ export async function prepareNextModelHealthReminder(request: {
 }): Promise<PreparedReminder> {
   const preparedAt = z.iso.datetime().parse(request.preparedAt);
   const database = await openRuntimeDatabase(request.runtimeRoot);
-  try {
-    database.exec("BEGIN IMMEDIATE");
-    const rows = database.prepare(
-      `SELECT incident_id, state, reason_category, transition_count
+  const pendingIncidentsSql = `SELECT incident_id, state, reason_category, transition_count
        FROM model_health_incidents WHERE notification_pending = 1
-       ORDER BY started_at, incident_id`
-    ).all();
+       ORDER BY started_at, incident_id`;
+  try {
+    if (database.prepare(pendingIncidentsSql).get() === undefined) {
+      return { state: "empty" };
+    }
+    database.exec("BEGIN IMMEDIATE");
+    const rows = database.prepare(pendingIncidentsSql).all();
     if (rows.length === 0) {
       database.exec("COMMIT");
       return { state: "empty" };
@@ -94,7 +96,7 @@ export async function prepareNextModelHealthReminder(request: {
     database.exec("COMMIT");
     return { state: "pending", reminderId, digestKey };
   } catch (error) {
-    database.exec("ROLLBACK");
+    if (database.isTransaction) database.exec("ROLLBACK");
     throw error;
   } finally {
     database.close();
@@ -165,16 +167,18 @@ export async function dispatchNextReminder(request: {
   const now = z.iso.datetime().parse(request.now);
   const database = await openRuntimeDatabase(request.runtimeRoot);
   let row: Record<string, unknown> | undefined;
-  try {
-    database.exec("BEGIN IMMEDIATE");
-    row = database.prepare(
-      `SELECT * FROM reminder_obligations
+  const dueReminderSql = `SELECT * FROM reminder_obligations
        WHERE (
          (state = 'pending' AND due_at <= ?)
          OR (state = 'failed' AND next_retry_at <= ?)
          OR (state = 'snoozed' AND snoozed_until <= ?)
-       ) ORDER BY due_at, created_at LIMIT 1`
-    ).get(now, now, now);
+       ) ORDER BY due_at, created_at LIMIT 1`;
+  try {
+    if (database.prepare(dueReminderSql).get(now, now, now) === undefined) {
+      return { state: "empty" };
+    }
+    database.exec("BEGIN IMMEDIATE");
+    row = database.prepare(dueReminderSql).get(now, now, now);
     if (row === undefined) {
       database.exec("COMMIT");
       return { state: "empty" };
@@ -187,7 +191,7 @@ export async function dispatchNextReminder(request: {
     ).run(now, selectedReminderId);
     database.exec("COMMIT");
   } catch (error) {
-    database.exec("ROLLBACK");
+    if (database.isTransaction) database.exec("ROLLBACK");
     throw error;
   } finally {
     database.close();

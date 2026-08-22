@@ -61,6 +61,10 @@ export async function advanceCandidateReevaluationBackfill(request: {
   );
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
+    const preflight = database.prepare(
+      `SELECT state FROM candidate_reevaluation_backfill WHERE singleton = 1`
+    ).get();
+    if (preflight?.state !== "active") return { state: "empty" };
     database.exec("BEGIN IMMEDIATE");
     try {
       const progress = database.prepare(

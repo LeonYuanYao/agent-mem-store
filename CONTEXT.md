@@ -232,6 +232,10 @@ _Avoid_: 长期记忆、模型摘要
 保存尚待后台处理的 Capture Event 的机器本地、可恢复操作日志。Hook 在确认事件已经原子写入后才视为捕获成功；它不是 Canonical Memory Data，也不是 Memory Vault 的副本。
 _Avoid_: Memory Vault、治理队列、第二份权威知识库
 
+**Emergency Capture Spool（紧急捕获缓冲区）**:
+当正常 SQLite Outbox 因短暂写锁竞争无法在 Hook 时限内接收事件时，保存已完成脱敏与大小限制的 Capture Event 的机器本地、有界恢复区。Worker 会把它幂等导回 Outbox；损坏文件进入隔离区。它只处理异常路径，不是日常队列，也不在 Obsidian Vault 中。
+_Avoid_: 第二个普通 Outbox、无限积压、Canonical Memory、Vault 同步数据
+
 **Distillation Worker（提炼工作进程）**:
 独立于前台 Hook 运行的后台处理器。它幂等消费 Capture Event、合并同一 Turn 或 Session 的输入、调用 Luna，并把结果送入 Memory Candidate 生命周期。
 _Avoid_: Hook、Coding Agent 前台 Turn

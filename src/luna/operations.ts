@@ -185,21 +185,24 @@ export async function claimLunaOperation(
     : `CASE operation_kind ${kinds.map((kind, index) =>
       `WHEN '${kind}' THEN ${String(index)}`
     ).join(" ")} ELSE ${String(kinds.length)} END, `;
+  const selectionSql = `SELECT * FROM luna_operations
+    WHERE (
+      state = 'pending'
+      OR (state = 'retrying' AND next_retry_at <= ?)
+      OR (state = 'processing' AND lease_until < ?)
+    )${kindFilter}
+    ORDER BY ${kindOrder}created_at ASC LIMIT 1`;
+  const selectionArguments = [now, now, ...(kinds ?? [])] as const;
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
+    if (database.prepare(selectionSql).get(...selectionArguments) === undefined) {
+      return { state: "empty" };
+    }
     database.exec("BEGIN IMMEDIATE");
     try {
       const row = database
-        .prepare(
-          `SELECT * FROM luna_operations
-           WHERE (
-             state = 'pending'
-             OR (state = 'retrying' AND next_retry_at <= ?)
-             OR (state = 'processing' AND lease_until < ?)
-           )${kindFilter}
-           ORDER BY ${kindOrder}created_at ASC LIMIT 1`
-        )
-        .get(now, now, ...(kinds ?? []));
+        .prepare(selectionSql)
+        .get(...selectionArguments);
       if (row === undefined) {
         database.exec("COMMIT");
         return { state: "empty" };

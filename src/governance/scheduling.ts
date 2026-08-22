@@ -122,6 +122,34 @@ export async function scheduleDueGovernance(request: {
   const workerStartedAt = z.iso.datetime().parse(request.workerStartedAt);
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
+    const preflightSchedule = database.prepare(
+      "SELECT * FROM governance_schedule WHERE singleton = 1"
+    ).get();
+    if (preflightSchedule === undefined) {
+      throw new Error("Governance schedule is not initialized.");
+    }
+    const timeZone = z.string().min(1).parse(preflightSchedule.time_zone);
+    const cursors = database.prepare(
+      "SELECT cadence, successful_through FROM governance_cursors"
+    ).all();
+    const occurrenceIsDue = cadenceSchema.options.some((cadence) => {
+      const cursor = cursors.find((row) => row.cadence === cadence);
+      if (typeof cursor?.successful_through !== "string") {
+        throw new Error(`Governance ${cadence} cursor is missing.`);
+      }
+      return dueOccurrences(cadence, cursor.successful_through, now, timeZone).length > 0;
+    });
+    const active = database.prepare(
+      `SELECT run_id FROM governance_runs
+       WHERE state IN ('pending', 'processing', 'retrying', 'blocked') LIMIT 1`
+    ).get();
+    if (typeof active?.run_id === "string" && !occurrenceIsDue) {
+      return { state: "active_run", runId: active.run_id };
+    }
+    const pendingObligation = database.prepare(
+      "SELECT 1 AS present FROM governance_obligations WHERE state = 'pending' LIMIT 1"
+    ).get();
+    if (pendingObligation === undefined && !occurrenceIsDue) return { state: "idle" };
     database.exec("BEGIN IMMEDIATE");
     try {
       const schedule = database.prepare(

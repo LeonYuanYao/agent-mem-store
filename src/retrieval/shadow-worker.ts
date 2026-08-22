@@ -16,23 +16,25 @@ type ShadowEvaluationResult =
 
 async function claimNextShadowEvent(runtimeRoot: string, now: string): Promise<string | undefined> {
   const staleBefore = new Date(Date.parse(now) - 5 * 60 * 1000).toISOString();
+  const selectionSql = `SELECT capture.event_id, capture.event_kind
+    FROM capture_events AS capture
+    LEFT JOIN shadow_event_evaluations AS evaluation
+      ON evaluation.event_id = capture.event_id
+    WHERE capture.event_kind IN ('SessionStart', 'UserPromptSubmit')
+      AND (
+        evaluation.event_id IS NULL OR
+        (evaluation.state = 'retrying' AND evaluation.next_retry_at <= ?) OR
+        (evaluation.state = 'processing' AND evaluation.updated_at <= ?)
+      )
+    ORDER BY capture.created_at, capture.event_id
+    LIMIT 1`;
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
+    if (database.prepare(selectionSql).get(now, staleBefore) === undefined) {
+      return undefined;
+    }
     database.exec("BEGIN IMMEDIATE");
-    const row = database.prepare(
-      `SELECT capture.event_id, capture.event_kind
-       FROM capture_events AS capture
-       LEFT JOIN shadow_event_evaluations AS evaluation
-         ON evaluation.event_id = capture.event_id
-       WHERE capture.event_kind IN ('SessionStart', 'UserPromptSubmit')
-         AND (
-           evaluation.event_id IS NULL OR
-           (evaluation.state = 'retrying' AND evaluation.next_retry_at <= ?) OR
-           (evaluation.state = 'processing' AND evaluation.updated_at <= ?)
-         )
-       ORDER BY capture.created_at, capture.event_id
-       LIMIT 1`
-    ).get(now, staleBefore);
+    const row = database.prepare(selectionSql).get(now, staleBefore);
     if (row === undefined) {
       database.exec("COMMIT");
       return undefined;
@@ -51,7 +53,7 @@ async function claimNextShadowEvent(runtimeRoot: string, now: string): Promise<s
     database.exec("COMMIT");
     return eventId;
   } catch (error) {
-    database.exec("ROLLBACK");
+    if (database.isTransaction) database.exec("ROLLBACK");
     throw error;
   } finally {
     database.close();

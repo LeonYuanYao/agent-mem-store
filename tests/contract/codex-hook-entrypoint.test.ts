@@ -85,7 +85,7 @@ test("the installed legacy CLI Hook route also returns within its one-second hos
   expect(JSON.parse(result.stdout)).toEqual({ continue: true });
 });
 
-test("the external Stop Hook fails open within its host deadline while Runtime SQLite is busy", async () => {
+test("the external Stop Hook spools within its host deadline while Runtime SQLite is busy", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-busy-hook-entrypoint-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -132,11 +132,7 @@ test("the external Stop Hook fails open within its host deadline while Runtime S
 
     expect(result.error).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({
-      continue: true,
-      systemMessage:
-        "MemStore could not capture Stop; the session will continue without persisting this event."
-    });
+    expect(JSON.parse(result.stdout)).toEqual({ continue: true });
     expect(result.stdout).not.toContain("must not appear");
   } finally {
     database.exec("ROLLBACK");

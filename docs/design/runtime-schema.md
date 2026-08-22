@@ -4,6 +4,12 @@ The Core Foundation uses one SQLite database at
 `<runtime>/state/memstore.sqlite`, with WAL, foreign keys, a 250 ms busy timeout,
 strict tables, forward-only migrations, and applied-source checksums.
 
+Hook capture uses a shorter 100 ms busy wait and falls back only on writer
+contention to bounded checksummed files under `<runtime>/spool/capture/`. The
+Worker imports these files into the Outbox before normal work. This directory is
+machine-local recovery state, is capped at 256 pending entries, and is not part
+of the database schema or Memory Vault.
+
 Gate 3 table families are:
 
 - `schema_migrations`;

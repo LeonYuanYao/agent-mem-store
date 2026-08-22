@@ -435,16 +435,19 @@ async function claimBatch(request: {
   const database = await openRuntimeDatabase(request.runtimeRoot);
   const leaseToken = `msqualitylease_${randomUUID()}`;
   const leaseUntil = new Date(Date.parse(request.now) + leaseMilliseconds).toISOString();
+  const firstSelectionSql = `SELECT state, last_error_category, epoch_attempt_count
+    FROM memory_quality_items
+    WHERE state IN ('pending_generation', 'pending_validation')
+       OR (state IN ('retrying_generation', 'retrying_validation') AND next_retry_at <= ?)
+       OR (state IN ('processing_generation', 'processing_validation') AND lease_until < ?)
+    ORDER BY CASE WHEN state LIKE '%generation' THEN 0 ELSE 1 END,
+      epoch_attempt_count DESC, created_at, item_id LIMIT 1`;
   try {
+    if (database.prepare(firstSelectionSql).get(request.now, request.now) === undefined) {
+      return { leaseToken, items: [] };
+    }
     database.exec("BEGIN IMMEDIATE");
-    const first = database.prepare(
-      `SELECT state, last_error_category, epoch_attempt_count FROM memory_quality_items
-       WHERE state IN ('pending_generation', 'pending_validation')
-          OR (state IN ('retrying_generation', 'retrying_validation') AND next_retry_at <= ?)
-          OR (state IN ('processing_generation', 'processing_validation') AND lease_until < ?)
-       ORDER BY CASE WHEN state LIKE '%generation' THEN 0 ELSE 1 END,
-         epoch_attempt_count DESC, created_at, item_id LIMIT 1`
-    ).get(request.now, request.now);
+    const first = database.prepare(firstSelectionSql).get(request.now, request.now);
     if (first === undefined) {
       database.exec("COMMIT");
       return { leaseToken, items: [] };
@@ -503,7 +506,7 @@ async function claimBatch(request: {
       }))
     };
   } catch (error) {
-    database.exec("ROLLBACK");
+    if (database.isTransaction) database.exec("ROLLBACK");
     throw error;
   } finally {
     database.close();

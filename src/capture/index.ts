@@ -9,7 +9,7 @@ import {
   type LocalSensitivityFinding
 } from "../contracts/sensitivity.js";
 
-const eventSchema = z.object({
+export const captureEventSchema = z.object({
   schemaVersion: z.literal(1),
   eventId: z.string().min(1),
   deduplicationKey: z.string().min(1),
@@ -28,7 +28,7 @@ const eventSchema = z.object({
   payload: z.unknown()
 });
 
-export type CaptureEvent = z.infer<typeof eventSchema>;
+export type CaptureEvent = z.infer<typeof captureEventSchema>;
 
 export interface CaptureRequest {
   readonly runtimeRoot: string;
@@ -216,32 +216,42 @@ function retainBoundedPayload(serializedPayload: Buffer): {
   throw new Error("Unable to construct a bounded Capture Event payload.");
 }
 
-export async function captureEvent(request: CaptureRequest): Promise<CaptureResult> {
-  const event = eventSchema.parse(request.event);
+export type PreparedCaptureEvent =
+  | {
+      readonly state: "normal";
+      readonly event: CaptureEvent;
+      readonly retainedPayload: Buffer;
+      readonly sourceBytes: number;
+      readonly sourceTruncated: boolean;
+    }
+  | {
+      readonly state: "secret" | "uncertain";
+      readonly event: CaptureEvent;
+      readonly finding: Exclude<LocalSensitivityFinding, { readonly state: "normal" }>;
+    };
+
+export function prepareCaptureEventForPersistence(eventSource: unknown): PreparedCaptureEvent {
+  const event = captureEventSchema.parse(eventSource);
   const serializedPayload = Buffer.from(JSON.stringify(event.payload), "utf8");
   const sensitivity = classifyLocalSensitivity(serializedPayload.toString("utf8"));
-  if (sensitivity.state === "secret") {
-    return recordSensitivityFinding(
-      request.runtimeRoot,
-      event,
-      sensitivity,
-      "blocked_secret",
-      request.busyTimeoutMilliseconds
-    );
+  if (sensitivity.state !== "normal") {
+    return { state: sensitivity.state, event, finding: sensitivity };
   }
-  if (sensitivity.state === "uncertain") {
-    return recordSensitivityFinding(
-      request.runtimeRoot,
-      event,
-      sensitivity,
-      "quarantined",
-      request.busyTimeoutMilliseconds
-    );
-  }
-  const sourceBytes = serializedPayload.byteLength;
   const retained = retainBoundedPayload(serializedPayload);
-  const retainedPayload = retained.payload;
-  const sourceTruncated = retained.truncated;
+  return {
+    state: "normal",
+    event,
+    retainedPayload: retained.payload,
+    sourceBytes: serializedPayload.byteLength,
+    sourceTruncated: retained.truncated
+  };
+}
+
+async function persistPreparedCaptureEvent(
+  request: CaptureRequest,
+  prepared: Extract<PreparedCaptureEvent, { readonly state: "normal" }>
+): Promise<CaptureResult> {
+  const { event, retainedPayload, sourceBytes, sourceTruncated } = prepared;
   const segments = segment(retainedPayload);
   const database = await openRuntimeDatabase(
     request.runtimeRoot,
@@ -333,6 +343,44 @@ export async function captureEvent(request: CaptureRequest): Promise<CaptureResu
   } finally {
     database.close();
   }
+}
+
+export async function captureEvent(request: CaptureRequest): Promise<CaptureResult> {
+  const prepared = prepareCaptureEventForPersistence(request.event);
+  if (prepared.state !== "normal") {
+    return recordSensitivityFinding(
+      request.runtimeRoot,
+      prepared.event,
+      prepared.finding,
+      prepared.state === "secret" ? "blocked_secret" : "quarantined",
+      request.busyTimeoutMilliseconds
+    );
+  }
+  return persistPreparedCaptureEvent(request, prepared);
+}
+
+export async function captureRecoveredEvent(request: CaptureRequest & {
+  readonly originalSourceBytes: number;
+  readonly sourceTruncated: boolean;
+}): Promise<CaptureResult> {
+  const prepared = prepareCaptureEventForPersistence(request.event);
+  if (prepared.state !== "normal") {
+    throw new Error("Recovered Capture Event is no longer safe to persist.");
+  }
+  const originalSourceBytes = z.number().int().nonnegative().parse(
+    request.originalSourceBytes
+  );
+  if (
+    (!request.sourceTruncated && originalSourceBytes !== prepared.sourceBytes) ||
+    (request.sourceTruncated && originalSourceBytes <= prepared.sourceBytes)
+  ) {
+    throw new Error("Recovered Capture Event source metadata is inconsistent.");
+  }
+  return persistPreparedCaptureEvent(request, {
+    ...prepared,
+    sourceBytes: originalSourceBytes,
+    sourceTruncated: request.sourceTruncated
+  });
 }
 
 export interface SensitivityFindingView {
@@ -659,7 +707,7 @@ export interface RecordCaptureHealthIncidentRequest {
   readonly occurredAt: string;
 }
 
-const hookSqliteBusyDiagnosticSchema = z.object({
+const hookSqliteBusyDiagnosticV1Schema = z.object({
   schemaVersion: z.literal(1),
   occurredAt: z.iso.datetime(),
   eventKind: z.enum([
@@ -672,10 +720,23 @@ const hookSqliteBusyDiagnosticSchema = z.object({
   errorCode: z.literal("sqlite_busy")
 });
 
+const hookSqliteBusyDiagnosticV2Schema = hookSqliteBusyDiagnosticV1Schema.extend({
+  schemaVersion: z.literal(2),
+  outcome: z.enum(["spooled", "lost"])
+});
+
+const hookSqliteBusyDiagnosticSchema = z.union([
+  hookSqliteBusyDiagnosticV1Schema,
+  hookSqliteBusyDiagnosticV2Schema
+]);
+
 export interface HookSqliteBusyDiagnosticSummary {
   readonly count: number;
+  readonly recoveredCount: number;
+  readonly lostCount: number;
   readonly lastOccurredAt: string | null;
   readonly lastEventKind: string | null;
+  readonly lastOutcome: "spooled" | "lost" | null;
 }
 
 function hookSqliteBusyDiagnosticPath(runtimeRoot: string): string {
@@ -686,12 +747,14 @@ export async function recordHookSqliteBusyDiagnostic(request: {
   readonly runtimeRoot: string;
   readonly occurredAt: string;
   readonly eventKind: string;
+  readonly outcome: "spooled" | "lost";
 }): Promise<void> {
   const diagnostic = hookSqliteBusyDiagnosticSchema.parse({
-    schemaVersion: 1,
+    schemaVersion: 2,
     occurredAt: request.occurredAt,
     eventKind: request.eventKind,
-    errorCode: "sqlite_busy"
+    errorCode: "sqlite_busy",
+    outcome: request.outcome
   });
   await mkdir(join(request.runtimeRoot, "state"), { recursive: true, mode: 0o700 });
   await appendFile(
@@ -709,7 +772,14 @@ export async function inspectHookSqliteBusyDiagnostics(
     source = await readFile(hookSqliteBusyDiagnosticPath(runtimeRoot), "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { count: 0, lastOccurredAt: null, lastEventKind: null };
+      return {
+        count: 0,
+        recoveredCount: 0,
+        lostCount: 0,
+        lastOccurredAt: null,
+        lastEventKind: null,
+        lastOutcome: null
+      };
     }
     throw error;
   }
@@ -727,8 +797,19 @@ export async function inspectHookSqliteBusyDiagnostics(
   const last = diagnostics.at(-1);
   return {
     count: diagnostics.length,
+    recoveredCount: diagnostics.filter(
+      (diagnostic) => diagnostic.schemaVersion === 2 && diagnostic.outcome === "spooled"
+    ).length,
+    lostCount: diagnostics.filter(
+      (diagnostic) => diagnostic.schemaVersion === 1 || diagnostic.outcome === "lost"
+    ).length,
     lastOccurredAt: last?.occurredAt ?? null,
-    lastEventKind: last?.eventKind ?? null
+    lastEventKind: last?.eventKind ?? null,
+    lastOutcome: last === undefined
+      ? null
+      : last.schemaVersion === 1
+        ? "lost"
+        : last.outcome
   };
 }
 
@@ -925,7 +1006,7 @@ export async function readCapturedEvent(
       ...(event.turn_id === null ? {} : { turnId: event.turn_id }),
       payload: JSON.parse(payloadBuffer.toString("utf8")) as unknown
     };
-    return eventSchema.parse(candidate);
+    return captureEventSchema.parse(candidate);
   } finally {
     database.close();
   }
