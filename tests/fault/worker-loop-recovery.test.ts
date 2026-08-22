@@ -79,6 +79,38 @@ test("the continuous Worker survives one iteration failure", async () => {
   });
 });
 
+test("the continuous Worker backs off after consecutive idle iterations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-worker-idle-backoff-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+
+  const controller = new AbortController();
+  const waits: number[] = [];
+  const fallback = setTimeout(() => {
+    controller.abort();
+  }, 500);
+  try {
+    await expect(runWorker({
+      runtimeRoot,
+      vaultRoot,
+      workerId: "worker-idle-backoff",
+      startedAt: "2026-08-22T00:00:00.000Z",
+      intervalMilliseconds: 100,
+      signal: controller.signal,
+      wait: (milliseconds) => {
+        waits.push(milliseconds);
+        if (waits.length === 4) controller.abort();
+        return Promise.resolve();
+      }
+    })).resolves.toMatchObject({ state: "stopped", iterations: 4 });
+  } finally {
+    clearTimeout(fallback);
+  }
+  expect(waits).toEqual([500, 1_000, 3_000, 3_000]);
+});
+
 test("status exposes an unresolved body-free Worker loop incident", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-worker-loop-status-"));
   roots.push(root);

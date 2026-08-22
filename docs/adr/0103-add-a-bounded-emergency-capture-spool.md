@@ -33,6 +33,14 @@ read-only preflight and recheck inside the write transaction only when eligible
 work exists. This retains transactional correctness while removing routine
 idle writer contention.
 
+The continuous Worker also uses an adaptive idle cadence. A completed work
+iteration or an iteration failure keeps the one-second base interval. The first
+idle or paused iteration waits five seconds, the second waits ten seconds, and
+later consecutive idle iterations wait at most thirty seconds. The wait is
+abortable so managed shutdown remains prompt.
+Capture remains independent and durable, and the existing ledger and catch-up
+rules continue to determine whether delayed background work is still owed.
+
 This decision supersedes the no-spool restriction in ADR 0070 based on observed
 capture loss. The SQLite Outbox remains the sole normal processing queue and
 the emergency spool remains machine-local recoverable operational state.

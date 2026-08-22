@@ -407,17 +407,25 @@ export async function runWorker(request: {
   readonly intervalMilliseconds?: number;
   readonly signal?: AbortSignal;
   readonly adapters?: WorkerAdapters;
+  readonly wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 }): Promise<{ readonly state: "stopped"; readonly iterations: number }> {
   const intervalMilliseconds = z.number().int().min(100).max(60_000).parse(
     request.intervalMilliseconds ?? 1_000
   );
+  const maximumIdleIntervalMilliseconds = Math.max(
+    intervalMilliseconds,
+    Math.min(30_000, intervalMilliseconds * 30)
+  );
+  const wait = request.wait ?? waitForWorkerDelay;
   let iterations = 0;
+  let consecutiveIdleIterations = 0;
   let consecutiveIterationFailure = false;
   let initialIncidentRecoveryPending = true;
   while (request.signal?.aborted !== true) {
     const iterationAt = new Date().toISOString();
+    let delayMilliseconds = intervalMilliseconds;
     try {
-      await runWorkerOnce({
+      const result = await runWorkerOnce({
         runtimeRoot: request.runtimeRoot,
         vaultRoot: request.vaultRoot,
         workerId: request.workerId,
@@ -425,6 +433,20 @@ export async function runWorker(request: {
         workerStartedAt: request.startedAt,
         ...(request.adapters === undefined ? {} : { adapters: request.adapters })
       });
+      if (result.state === "worked") {
+        consecutiveIdleIterations = 0;
+      } else {
+        consecutiveIdleIterations += 1;
+        const idleMultiplier = consecutiveIdleIterations === 1
+          ? 5
+          : consecutiveIdleIterations === 2
+            ? 10
+            : 30;
+        delayMilliseconds = Math.max(
+          intervalMilliseconds,
+          Math.min(maximumIdleIntervalMilliseconds, intervalMilliseconds * idleMultiplier)
+        );
+      }
       if (initialIncidentRecoveryPending || consecutiveIterationFailure) {
         await recoverCaptureHealthIncident({
           runtimeRoot: request.runtimeRoot,
@@ -448,11 +470,28 @@ export async function runWorker(request: {
         }
       }
       consecutiveIterationFailure = true;
+      consecutiveIdleIterations = 0;
     }
     iterations += 1;
-    await new Promise<void>((resolveWait) => setTimeout(resolveWait, intervalMilliseconds));
+    await wait(delayMilliseconds, request.signal);
   }
   return { state: "stopped", iterations };
+}
+
+async function waitForWorkerDelay(
+  milliseconds: number,
+  signal?: AbortSignal
+): Promise<void> {
+  if (signal?.aborted === true) return;
+  await new Promise<void>((resolveWait) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolveWait();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal?.addEventListener("abort", finish, { once: true });
+  });
 }
 
 function workerLoopErrorCode(error: unknown): string {
