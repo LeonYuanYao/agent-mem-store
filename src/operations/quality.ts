@@ -52,6 +52,15 @@ function qualityCodes(memory: CanonicalMemory): MemoryQualityIssueCode[] {
   return codes;
 }
 
+function isTransientRuntimeState(memory: CanonicalMemory): boolean {
+  return runtimeIdentity.test(memory.body) && temporalStatus.test(memory.body);
+}
+
+function isOperationalArchiveEligible(memory: CanonicalMemory): boolean {
+  return qualityCodes(memory).includes("operational_provenance") ||
+    isTransientRuntimeState(memory);
+}
+
 async function pageActiveMemories(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
@@ -251,13 +260,18 @@ export async function archiveOperationalMemories(request: {
     ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
     limit: z.number().int().min(1).max(1000).parse(request.limit ?? 200)
   });
-  const eligible = page.memories.filter((memory) =>
-    qualityCodes(memory).includes("operational_provenance")
-  );
+  const eligible = page.memories.filter(isOperationalArchiveEligible);
   let changedCount = 0;
   if (!request.preview) {
     for (const memory of eligible) {
       const revisionId = `msrev_${randomUUID()}`;
+      const hasOperationalProvenance = qualityCodes(memory).includes("operational_provenance");
+      const reason = hasOperationalProvenance
+        ? "quality:operational-provenance-v1"
+        : "quality:transient-runtime-state-v2";
+      const provenance = hasOperationalProvenance
+        ? "quality:operational-archive-v1"
+        : "quality:transient-runtime-archive-v2";
       await writeCanonicalMemory({
         runtimeRoot: request.runtimeRoot,
         vaultRoot: request.vaultRoot,
@@ -271,12 +285,12 @@ export async function archiveOperationalMemories(request: {
           lifecycle: "archived",
           lifecycleDetails: {
             archivedAt,
-            reason: "quality:operational-provenance-v1"
+            reason
           },
           representations: reboundRepresentations(memory, revisionId),
-          provenance: memory.provenance.includes("quality:operational-archive-v1")
+          provenance: memory.provenance.includes(provenance)
             ? memory.provenance
-            : [...memory.provenance, "quality:operational-archive-v1"]
+            : [...memory.provenance, provenance]
         }
       });
       changedCount += 1;

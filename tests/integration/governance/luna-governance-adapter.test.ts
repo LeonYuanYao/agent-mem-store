@@ -54,11 +54,13 @@ test("the real Luna adapter exposes a versioned authority-safe governance task",
   });
 
   const prompt = requests[0]?.standardInput;
-  expect(prompt).toContain('"promptVersion":2');
+  expect(prompt).toContain('"promptVersion":3');
   expect(prompt).toContain('"task":"review_memory_governance_page"');
   expect(prompt).toContain("Never propose an Agent action against Human-authored Memory");
   expect(prompt).toContain("operational probe, exact-response check, temporary progress");
   expect(prompt).toContain("Prefer one condition-preserving successor");
+  expect(prompt).toContain("Relationship actions do not require a reviewed duplicate cluster");
+  expect(prompt).toContain("supports, extends, or qualifies");
   expect(prompt).toContain("time-bound status as a timeless fact");
   expect(prompt).toContain("does not authorize deletion");
   expect(outputSchema).toMatchObject({

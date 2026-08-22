@@ -254,7 +254,11 @@ function managedHookGroup(request: ManagedRequest, event: Candidate["hookEvents"
   ].join(" ");
   return {
     matcher: "*",
-    hooks: [{ type: "command", command, timeout: event === "SessionEnd" ? 3 : 1 }]
+    hooks: [{
+      type: "command",
+      command,
+      timeout: event === "SessionEnd" ? 3 : event === "PostToolUse" ? 2 : 1
+    }]
   };
 }
 
@@ -268,6 +272,25 @@ function appendManagedHooks(source: string, request: ManagedRequest, candidate: 
       throw new Error(`Managed ${event} Hook already exists without this installation ownership manifest.`);
     }
     hooks[event] = [...existing, managedHookGroup(request, event)];
+  }
+  document.hooks = hooks;
+  return `${JSON.stringify(document, null, 2)}\n`;
+}
+
+function refreshManagedHooks(source: string, request: ManagedRequest, candidate: Candidate): string {
+  const document = z.record(z.string(), z.unknown()).parse(JSON.parse(source));
+  const hooks = z.record(z.string(), z.unknown()).parse(document.hooks);
+  for (const event of candidate.hookEvents) {
+    const existing = z.array(z.unknown()).default([]).parse(hooks[event]);
+    const marker = `memstore:gate5-shadow-v1:${event}:`;
+    const managed = existing.filter((route) => JSON.stringify(route).includes(marker));
+    if (managed.length !== 1) {
+      throw new Error(`Owned ${event} Hook recipe is missing or ambiguous.`);
+    }
+    hooks[event] = [
+      ...existing.filter((route) => !JSON.stringify(route).includes(marker)),
+      managedHookGroup(request, event)
+    ];
   }
   document.hooks = hooks;
   return `${JSON.stringify(document, null, 2)}\n`;
@@ -353,6 +376,22 @@ async function plannedCliTarget(request: ManagedRequest): Promise<PlannedTarget>
     expectedPost: { state: "file", sha256: sha256(source) },
     expectedSource: source,
     writeMode: 0o700
+  };
+}
+
+async function plannedHooksUpgradeTarget(
+  request: ManagedRequest,
+  ownedTarget: PlannedTarget
+): Promise<PlannedTarget> {
+  if (ownedTarget.expectedSource === undefined) {
+    throw new Error("Owned Codex Hooks target has no expected source.");
+  }
+  const { candidate } = await loadCandidate();
+  const source = refreshManagedHooks(ownedTarget.expectedSource, request, candidate);
+  return {
+    ...ownedTarget,
+    expectedPost: { state: "file", sha256: sha256(source) },
+    expectedSource: source
   };
 }
 
@@ -637,28 +676,46 @@ export async function applyManagedIntegration(
   };
 }
 
-export async function repairManagedIntegration(request: ManagedRequest): Promise<{
+export async function repairManagedIntegration(
+  request: ManagedRequest,
+  options: { readonly targetLabels?: readonly string[] } = {}
+): Promise<{
   readonly state: "healthy" | "repaired";
   readonly installationId: string;
 }> {
   const manifest = await readManifest(request.runtimeRoot);
   if (manifest.state !== "installed") throw new Error("Managed integration is not installed.");
   if (manifest.requestIdentity !== requestIdentity(request)) throw new Error("Managed integration request diverged from its ownership manifest.");
+  const selectedLabels = options.targetLabels === undefined
+    ? undefined
+    : new Set(options.targetLabels);
+  if (selectedLabels !== undefined) {
+    const knownLabels = new Set(manifest.targets.map((target) => target.label));
+    for (const label of selectedLabels) {
+      if (!knownLabels.has(label)) throw new Error(`Unknown managed repair target: ${label}.`);
+    }
+  }
   const repairable: PlannedTarget[] = [];
   const nextTargets: (PlannedTarget & { readonly backupPath?: string })[] = [];
   let recipeUpdated = false;
   for (const target of manifest.targets) {
+    if (selectedLabels !== undefined && !selectedLabels.has(target.label)) {
+      nextTargets.push(target);
+      continue;
+    }
     const desired = target.label === "memstore_cli"
       ? {
           ...(await plannedCliTarget(request)),
           before: target.before,
           ...(target.backupPath === undefined ? {} : { backupPath: target.backupPath })
         }
+      : target.label === "codex_hooks"
+        ? await plannedHooksUpgradeTarget(request, target)
       : target;
     const current = await identity(target.path);
     if (sameIdentity(current, target.expectedPost)) {
       if (!sameIdentity(target.expectedPost, desired.expectedPost)) {
-        repairable.push(desired);
+        repairable.push({ ...desired, before: target.expectedPost });
         recipeUpdated = true;
       }
       nextTargets.push(desired);
@@ -673,7 +730,12 @@ export async function repairManagedIntegration(request: ManagedRequest): Promise
     throw new Error(`${target.label} diverged; repair cannot distinguish the change from user-authored state.`);
   }
   for (const target of repairable) await applyTarget(target);
-  await preflightTargets(nextTargets, "expectedPost");
+  await preflightTargets(
+    selectedLabels === undefined
+      ? nextTargets
+      : nextTargets.filter((target) => selectedLabels.has(target.label)),
+    "expectedPost"
+  );
   if (recipeUpdated) {
     await writeManifest(request.runtimeRoot, {
       ...manifest,

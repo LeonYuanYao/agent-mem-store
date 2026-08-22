@@ -16,9 +16,7 @@ import { initializeMemStore } from "../operations/initialize.js";
 import { prepareShadowEmbedding } from "../operations/embedding-install.js";
 import { migrateMemoryCategories } from "../operations/category-migration.js";
 import {
-  acceptOfficialShadowProgramChange,
   inspectOfficialShadowWindow,
-  migrateOfficialShadowIdentity,
   startOfficialShadowWindow
 } from "../operations/shadow-window.js";
 import { inspectDoctor, retryOperation } from "../operations/maintenance.js";
@@ -165,6 +163,7 @@ function parseCommon(arguments_: readonly string[]) {
       "probe-event": { type: "string" },
       window: { type: "string" },
       reason: { type: "string" },
+      target: { type: "string", multiple: true },
       "native-store": { type: "string", multiple: true },
       preview: { type: "boolean", default: false },
       json: { type: "boolean", default: false }
@@ -213,7 +212,13 @@ async function runIntegration(arguments_: readonly string[]): Promise<unknown> {
       ? preview
       : applyManagedIntegrationUpgrade(request, preview);
   }
-  if (action === "repair") return repairManagedIntegration(request);
+  if (action === "repair") {
+    return repairManagedIntegration(request, {
+      ...(parsed.values.target === undefined
+        ? {}
+        : { targetLabels: parsed.values.target })
+    });
+  }
   if (action === "uninstall") {
     if (parsed.values.preview) {
       return previewResult(["owned_codex_hooks", "owned_mcp", "owned_skills", "owned_launch_agent", "owned_notifier"], {
@@ -495,56 +500,9 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
         json: parsed.values.json
       };
     }
-    if (action === "migrate-identity") {
-      if (parsed.values.window === undefined) {
-        throw new MemStoreCommandError(
-          "shadow_window_required",
-          "shadow migrate-identity requires --window with the active official Shadow window id."
-        );
-      }
-      return {
-        command: "shadow.migrate-identity",
-        result: await migrateOfficialShadowIdentity({
-          runtimeRoot: location.runtimeRoot,
-          repositoryRoot: resolve(parsed.values.repo ?? process.cwd()),
-          homeRoot: resolve(parsed.values.home ?? homedir()),
-          windowId: parsed.values.window,
-          migratedAt: now,
-          preview: parsed.values.preview
-        }),
-        json: parsed.values.json
-      };
-    }
-    if (action === "accept-program-change") {
-      if (parsed.values.window === undefined) {
-        throw new MemStoreCommandError(
-          "shadow_window_required",
-          "shadow accept-program-change requires --window with the active official Shadow window id."
-        );
-      }
-      if (parsed.values.reason === undefined) {
-        throw new MemStoreCommandError(
-          "shadow_review_reason_required",
-          "shadow accept-program-change requires --reason describing the reviewed change."
-        );
-      }
-      return {
-        command: "shadow.accept-program-change",
-        result: await acceptOfficialShadowProgramChange({
-          runtimeRoot: location.runtimeRoot,
-          repositoryRoot: resolve(parsed.values.repo ?? process.cwd()),
-          homeRoot: resolve(parsed.values.home ?? homedir()),
-          windowId: parsed.values.window,
-          acceptedAt: now,
-          reason: parsed.values.reason,
-          preview: parsed.values.preview
-        }),
-        json: parsed.values.json
-      };
-    }
     throw new MemStoreCommandError(
       "unknown_command",
-      "Use shadow start, shadow status, shadow report, shadow migrate-identity, or shadow accept-program-change."
+      "Use shadow start, shadow status, or shadow report."
     );
   }
   if (command === "purge") {

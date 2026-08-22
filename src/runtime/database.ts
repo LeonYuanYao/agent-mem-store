@@ -224,6 +224,11 @@ const migrations: readonly Migration[] = [
     version: 43,
     name: "capture_session_activity_index",
     path: new URL("../../migrations/0043-capture-session-activity-index.sql", import.meta.url)
+  },
+  {
+    version: 44,
+    name: "remove_shadow_invalidation",
+    path: new URL("../../migrations/0044-remove-shadow-invalidation.sql", import.meta.url)
   }
 ];
 

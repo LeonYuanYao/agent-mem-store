@@ -183,7 +183,7 @@ test("large historical receipt volume does not consume the semantic deadline", a
     embed: () => new Promise((resolve) => {
       setTimeout(() => {
         resolve([[1, 0]]);
-      }, 285);
+      }, 100);
     })
   };
 

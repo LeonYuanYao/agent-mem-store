@@ -67,7 +67,7 @@ Every meaningful operator mutation has a zero-write `--preview` route and every
 new command can emit the stable JSON envelope. The bounded families are:
 
 - `doctor [--deep]`, `status`;
-- `shadow status|start|migrate-identity|accept-program-change`;
+- `shadow status|start|report`;
 - `operation status|retry <id>`;
 - `worker once|run`;
 - `review generate`, typed Review actions, and `review reminder prepare|dispatch`;

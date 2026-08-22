@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,9 +6,7 @@ import { afterEach, expect, test } from "vitest";
 import { handleCodexHook } from "../../../src/adapters/codex/hook.js";
 import { initializeMemStore } from "../../../src/operations/initialize.js";
 import {
-  acceptOfficialShadowProgramChange,
   inspectOfficialShadowWindow,
-  migrateOfficialShadowIdentity,
   startOfficialShadowWindow
 } from "../../../src/operations/shadow-window.js";
 import {
@@ -23,21 +20,6 @@ import { runWorkerOnce } from "../../../src/worker/main.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
 
 const roots: string[] = [];
-
-function identitySha256(value: unknown): string {
-  function canonicalize(input: unknown): unknown {
-    if (Array.isArray(input)) return input.map(canonicalize);
-    if (input !== null && typeof input === "object") {
-      return Object.fromEntries(
-        Object.entries(input)
-          .sort(([left], [right]) => left.localeCompare(right, "en-US"))
-          .map(([key, child]) => [key, canonicalize(child)])
-      );
-    }
-    return input;
-  }
-  return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
-}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -379,113 +361,6 @@ test("an official Shadow window requires a completed real-Hook probe and records
     }
   });
 
-  const legacyDatabase = await openRuntimeDatabase(runtimeRoot);
-  let legacyWindowId: string;
-  let legacyBaselineSha256: string;
-  try {
-    const row = legacyDatabase.prepare(
-      "SELECT window_id, baseline_json FROM official_shadow_windows WHERE state = 'active'"
-    ).get();
-    legacyWindowId = String(row?.window_id);
-    const baseline = JSON.parse(String(row?.baseline_json)) as Record<string, unknown>;
-    const legacyBaseline = {
-      ...baseline,
-      identityScope: "memstore-v1",
-      configSha256: identitySha256({
-        nativeMemory: { generateMemories: true, useMemories: true },
-        memstoreMcp: {
-          command: "node",
-          args: ["dist/mcp/main.js"],
-          startup_timeout_sec: 30,
-          env: {
-            MEMSTORE_RUNTIME_ROOT: "/fixture/runtime",
-            MEMSTORE_VAULT_ROOT: "/fixture/vault"
-          }
-        },
-        managedHookStates: {}
-      }),
-      nativeMemory: { generateMemories: true, useMemories: true }
-    };
-    const legacySource = JSON.stringify(legacyBaseline);
-    legacyBaselineSha256 = createHash("sha256").update(legacySource).digest("hex");
-    legacyDatabase.prepare(
-      "UPDATE official_shadow_windows SET baseline_json = ?, baseline_sha256 = ? WHERE window_id = ?"
-    ).run(legacySource, legacyBaselineSha256, legacyWindowId);
-  } finally {
-    legacyDatabase.close();
-  }
-  await writeFile(join(homeRoot, ".codex", "config.toml"), [
-    "model = \"fixture\"",
-    "",
-    "[memories]",
-    "generate_memories = false",
-    "use_memories = false",
-    "",
-    "[mcp_servers.memstore]",
-    "command = \"node\"",
-    "args = [\"dist/mcp/main.js\"]",
-    "startup_timeout_sec = 30",
-    "",
-    "[mcp_servers.memstore.env]",
-    "MEMSTORE_RUNTIME_ROOT = \"/fixture/runtime\"",
-    "MEMSTORE_VAULT_ROOT = \"/fixture/vault\"",
-    ""
-  ].join("\n"));
-  await expect(migrateOfficialShadowIdentity({
-    runtimeRoot,
-    repositoryRoot,
-    homeRoot,
-    windowId: legacyWindowId,
-    migratedAt: "2026-08-16T03:00:02.050Z",
-    preview: true
-  })).resolves.toMatchObject({
-    state: "preview",
-    dryRun: true,
-    windowId: legacyWindowId,
-    previousBaselineSha256: legacyBaselineSha256,
-    identityScope: "memstore-v2-native-memory-independent"
-  });
-  const afterPreview = await openRuntimeDatabase(runtimeRoot);
-  try {
-    expect(afterPreview.prepare(
-      "SELECT baseline_sha256 FROM official_shadow_windows WHERE window_id = ?"
-    ).get(legacyWindowId)?.baseline_sha256).toBe(legacyBaselineSha256);
-  } finally {
-    afterPreview.close();
-  }
-  await expect(migrateOfficialShadowIdentity({
-    runtimeRoot,
-    repositoryRoot,
-    homeRoot,
-    windowId: legacyWindowId,
-    migratedAt: "2026-08-16T03:00:02.060Z"
-  })).resolves.toMatchObject({
-    state: "migrated",
-    dryRun: false,
-    windowId: legacyWindowId,
-    identityScope: "memstore-v2-native-memory-independent"
-  });
-  await expect(inspectOfficialShadowWindow({
-    runtimeRoot,
-    repositoryRoot,
-    homeRoot,
-    now: "2026-08-16T03:00:02.070Z"
-  })).resolves.toMatchObject({
-    windowId: legacyWindowId,
-    state: "active",
-    invalidationReasons: [],
-    startedAt: "2026-08-09T03:00:02.000Z",
-    minimumEndAt: "2026-08-16T03:00:02.000Z",
-    nativeMemory: { generateMemories: false, useMemories: false },
-    continuityAdjustments: [{
-      kind: "exclude_native_memory_from_shadow_identity",
-      migratedAt: "2026-08-16T03:00:02.060Z",
-      previousBaselineSha256: legacyBaselineSha256
-    }],
-    coverage: {
-      completed_evaluations: { baseline: 1, current: 1, delta: 0 }
-    }
-  });
   const changedAdapter: EmbeddingAdapter = {
     ...approvedEmbedding,
     identity: {
@@ -499,16 +374,19 @@ test("an official Shadow window requires a completed real-Hook probe and records
     adapter: changedAdapter,
     builtAt: "2026-08-16T03:00:02.100Z"
   });
-  await expect(inspectOfficialShadowWindow({
+  const changedIndexStatus = await inspectOfficialShadowWindow({
     runtimeRoot,
     repositoryRoot,
     homeRoot,
     now: "2026-08-16T03:00:02.200Z"
-  })).resolves.toMatchObject({
-    state: "invalidated",
-    gate6ReviewEligible: false,
-    invalidationReasons: ["retrieval_index_changed"]
   });
+  expect(changedIndexStatus).toMatchObject({
+    state: "active",
+    gate6ReviewEligible: true,
+    observedChanges: ["retrieval_index_changed"]
+  });
+  expect(changedIndexStatus).not.toHaveProperty("invalidationReasons");
+  expect(changedIndexStatus).not.toHaveProperty("continuityAdjustments");
   await buildRetrievalIndex({
     runtimeRoot,
     vaultRoot,
@@ -522,73 +400,20 @@ test("an official Shadow window requires a completed real-Hook probe and records
     homeRoot,
     now: "2026-08-16T03:00:02.500Z"
   })).resolves.toMatchObject({
-    state: "invalidated",
-    gate6ReviewEligible: false,
-    invalidationReasons: ["program_changed"]
-  });
-  await expect(acceptOfficialShadowProgramChange({
-    runtimeRoot,
-    repositoryRoot,
-    homeRoot,
-    windowId: legacyWindowId,
-    acceptedAt: "2026-08-16T03:00:02.510Z",
-    reason: "Reviewed long-session pipeline optimization.",
-    preview: true
-  })).resolves.toMatchObject({
-    state: "preview",
-    dryRun: true,
-    windowId: legacyWindowId
-  });
-  await expect(inspectOfficialShadowWindow({
-    runtimeRoot,
-    repositoryRoot,
-    homeRoot,
-    now: "2026-08-16T03:00:02.520Z"
-  })).resolves.toMatchObject({
-    state: "invalidated",
-    invalidationReasons: ["program_changed"]
-  });
-  await expect(acceptOfficialShadowProgramChange({
-    runtimeRoot,
-    repositoryRoot,
-    homeRoot,
-    windowId: legacyWindowId,
-    acceptedAt: "2026-08-16T03:00:02.530Z",
-    reason: "Reviewed long-session pipeline optimization."
-  })).resolves.toMatchObject({
-    state: "accepted",
-    dryRun: false,
-    windowId: legacyWindowId,
-    reason: "Reviewed long-session pipeline optimization."
-  });
-  await expect(inspectOfficialShadowWindow({
-    runtimeRoot,
-    repositoryRoot,
-    homeRoot,
-    now: "2026-08-16T03:00:02.540Z"
-  })).resolves.toMatchObject({
     state: "active",
-    invalidationReasons: [],
+    gate6ReviewEligible: true,
+    observedChanges: ["program_changed"],
     startedAt: "2026-08-09T03:00:02.000Z",
     minimumEndAt: "2026-08-16T03:00:02.000Z",
-    coverage: {
-      completed_evaluations: { baseline: 1, current: 1, delta: 0 }
-    },
-    continuityAdjustments: [
-      { kind: "exclude_native_memory_from_shadow_identity" },
-      {
-        kind: "accept_reviewed_program_change",
-        acceptedAt: "2026-08-16T03:00:02.530Z",
-        reason: "Reviewed long-session pipeline optimization."
-      }
-    ]
+    coverage: { completed_evaluations: { baseline: 1, current: 1, delta: 0 } }
   });
+  await writeFile(programPath, "export const fixture = true;\n");
   await writeFile(join(homeRoot, ".codex", "config.toml"), [
-    "model = \"unrelated-change\"",
+    "model = \"fixture\"",
     "",
     "[memories]",
-    "generate_memories = true",
-    "use_memories = true",
+    "generate_memories = false",
+    "use_memories = false",
     "",
     "[mcp_servers.memstore]",
     "command = \"node\"",
@@ -608,7 +433,8 @@ test("an official Shadow window requires a completed real-Hook probe and records
   })).resolves.toMatchObject({
     state: "active",
     gate6ReviewEligible: true,
-    invalidationReasons: []
+    observedChanges: [],
+    nativeMemory: { generateMemories: false, useMemories: false }
   });
 
   const hooksPath = join(homeRoot, ".codex", "hooks.json");
@@ -627,11 +453,11 @@ test("an official Shadow window requires a completed real-Hook probe and records
     now: "2026-08-16T03:00:03.100Z"
   })).resolves.toMatchObject({
     state: "active",
-    invalidationReasons: []
+    observedChanges: []
   });
 
   await writeFile(join(homeRoot, ".codex", "config.toml"), [
-    "model = \"unrelated-change\"",
+    "model = \"fixture\"",
     "",
     "[memories]",
     "generate_memories = true",
@@ -653,59 +479,10 @@ test("an official Shadow window requires a completed real-Hook probe and records
     homeRoot,
     now: "2026-08-16T03:00:03.200Z"
   })).resolves.toMatchObject({
-    state: "invalidated",
-    gate6ReviewEligible: false,
-    invalidationReasons: ["codex_config_changed"]
-  });
-  await expect(startOfficialShadowWindow({
-    ...request,
-    startedAt: "2026-08-16T03:00:04.000Z"
-  })).resolves.toMatchObject({
     state: "active",
-    dryRun: false,
-    minimumEndAt: "2026-08-23T03:00:04.000Z"
+    gate6ReviewEligible: true,
+    observedChanges: ["codex_config_changed"]
   });
-  const continuityDatabase = await openRuntimeDatabase(runtimeRoot);
-  try {
-    continuityDatabase.prepare(
-      `UPDATE official_shadow_windows
-       SET started_at = '2026-08-08T03:00:02.000Z'
-       WHERE state = 'active'`
-    ).run();
-  } finally {
-    continuityDatabase.close();
-  }
-  await expect(inspectOfficialShadowWindow({
-    runtimeRoot,
-    repositoryRoot,
-    homeRoot,
-    now: "2026-08-16T03:00:05.000Z"
-  })).resolves.toMatchObject({
-    state: "active",
-    invalidationReasons: [],
-    gate6ReviewEligible: false
-  });
-
-  const currentConfig = await readFile(join(homeRoot, ".codex", "config.toml"), "utf8");
-  await writeFile(join(homeRoot, ".codex", "config.toml"), [
-    currentConfig.trimEnd(),
-    "",
-    `[hooks.state."${hooksPath}:post_tool_use:1:0"]`,
-    "enabled = false",
-    ""
-  ].join("\n"));
-  await expect(inspectOfficialShadowWindow({
-    runtimeRoot,
-    repositoryRoot,
-    homeRoot,
-    now: "2026-08-16T03:00:06.000Z"
-  })).resolves.toMatchObject({
-    state: "invalidated",
-    gate6ReviewEligible: false,
-    invalidationReasons: ["codex_config_changed"]
-  });
-
-  await writeFile(join(homeRoot, ".codex", "config.toml"), currentConfig);
   const hooksWithManagedChange = JSON.parse(await readFile(hooksPath, "utf8")) as {
     hooks: Record<string, Array<{ hooks?: Array<Record<string, unknown>> }>>;
   };
@@ -724,8 +501,12 @@ test("an official Shadow window requires a completed real-Hook probe and records
     homeRoot,
     now: "2026-08-16T03:00:07.000Z"
   })).resolves.toMatchObject({
-    state: "invalidated",
-    gate6ReviewEligible: false,
-    invalidationReasons: ["hooks_changed"]
+    state: "active",
+    gate6ReviewEligible: true,
+    observedChanges: ["codex_config_changed", "hooks_changed"]
   });
+  await expect(startOfficialShadowWindow({
+    ...request,
+    startedAt: "2026-08-16T03:00:08.000Z"
+  })).rejects.toThrow("An official Shadow window is already active.");
 });

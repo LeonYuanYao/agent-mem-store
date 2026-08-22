@@ -1,8 +1,12 @@
 ---
-status: accepted
+status: superseded-by-0104
 ---
 
 # Allow reviewed Shadow program continuity
+
+This decision is retained as history. ADR-0104 removes Shadow invalidation and
+the `shadow accept-program-change` operation, so executable changes are now
+reported as non-blocking observations and continuity needs no acceptance.
 
 An official Shadow window normally invalidates whenever the executable program
 identity changes. A user-reviewed change that does not alter the installed

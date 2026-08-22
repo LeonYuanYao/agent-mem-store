@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded-by-0104
 ---
 
 # Decouple native Memory from Shadow identity
@@ -11,13 +11,7 @@ Shadow window. MemStore MCP configuration, managed Hook state, executable
 program identity, installed candidate, and approved retrieval profile remain
 gating identities.
 
-An active version-one window may move to the native-memory-independent identity
-only through the explicit `shadow migrate-identity` dry-run and apply flow. The
-migration proves that candidate, installation, MCP, managed Hook state, and
-retrieval profile remain compatible. It preserves the window identity, start
-time, minimum end time, and frozen coverage counts while recording the previous
-baseline digest, program digests, native Memory observations, reason, and time.
-
-This migration corrects the experiment boundary; it does not manufacture
-coverage, restart elapsed time, enable MemStore injection, or perform Full
-Cutover.
+ADR-0104 later removed identity invalidation and the `shadow migrate-identity`
+operation entirely. Native Memory flags and all other implementation changes
+are now observations in Shadow status; none restart the elapsed-time window or
+block Gate 6 eligibility.

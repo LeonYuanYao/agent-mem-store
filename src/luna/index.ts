@@ -1188,7 +1188,7 @@ export class CodexLunaAdapter {
       governanceOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 2,
+        promptVersion: 3,
         task: "review_memory_governance_page",
         rules: [
           "Use only the frozen Memory revisions and audit signals supplied in this page.",
@@ -1199,7 +1199,8 @@ export class CodexLunaAdapter {
           "Prefer one condition-preserving successor when Agent-derived Memories in the same scope and applicability materially duplicate each other; supersede weaker duplicates without broadening the retained claim.",
           "For non-exact semantic duplicate, subsumption, or conflict decisions, act only when auditSignals includes a current reviewedDuplicateClusters entry; do not infer a cluster from similarity alone.",
           "Otherwise archive or supersede Agent-derived Memory only with stronger traceable evidence while preserving scope and applicability.",
-          "Relationships must cite supplied evidence and connect only Memory identities in the frozen run.",
+          "Relationship actions do not require a reviewed duplicate cluster. When the supplied Memory bodies directly establish that one durable claim supports, extends, or qualifies another, add a relationship using only identities in the frozen run.",
+          "Relationships must cite supplied body or provenance evidence; never create one from embedding similarity, category proximity, or topical resemblance alone.",
           "A future purge item records an obligation only; it does not authorize deletion.",
           "Do not change schedules, ranking, scope, model configuration, safety policy, or execute commands.",
           "Keep summaries factual and bounded. Missing evidence means no action."

@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { afterEach, expect, test } from "vitest";
 
 import { buildRetrievalIndex, type EmbeddingAdapter } from "../../src/retrieval/index.js";
@@ -273,5 +274,69 @@ test("a full explicit read records a full-body representation receipt", async ()
     expect(row?.representation_kind).toBe("full");
   } finally {
     database.close();
+  }
+});
+
+test("explicit recall preserves the SQLite busy cause when a receipt writer is blocked", async () => {
+  const fixture = await createIndexedFixture();
+  const { openRuntimeDatabase } = await import("../../src/runtime/database.js");
+  const writer = await openRuntimeDatabase(fixture.runtimeRoot);
+  writer.exec("BEGIN IMMEDIATE");
+  try {
+    await expect(recallSearch({
+      ...fixture,
+      query: "SQLite WAL durability",
+      scope: "current",
+      currentProjectId: projectA,
+      callerIdentity: "codex:busy-receipt",
+      adapter,
+      requestedAt: "2026-08-07T10:04:00.000Z"
+    })).rejects.toThrow(/database is locked/iu);
+  } finally {
+    writer.exec("ROLLBACK");
+    writer.close();
+  }
+});
+
+test("explicit recall waits through a transient receipt-writer lock", async () => {
+  const fixture = await createIndexedFixture();
+  const writer = new Worker(`
+    const { parentPort, workerData } = require("node:worker_threads");
+    const { DatabaseSync } = require("node:sqlite");
+    const database = new DatabaseSync(workerData);
+    database.exec("BEGIN IMMEDIATE");
+    parentPort.postMessage("locked");
+    setTimeout(() => {
+      database.exec("ROLLBACK");
+      database.close();
+      parentPort.postMessage("released");
+    }, 500);
+  `, {
+    eval: true,
+    workerData: join(fixture.runtimeRoot, "state", "memstore.sqlite")
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      writer.once("message", (message: unknown) => {
+        if (message === "locked") resolve();
+        else reject(new Error("Receipt writer did not acquire the expected lock."));
+      });
+      writer.once("error", reject);
+    });
+    await expect(recallSearch({
+      ...fixture,
+      query: "SQLite WAL durability",
+      scope: "current",
+      currentProjectId: projectA,
+      callerIdentity: "codex:transient-receipt",
+      adapter,
+      requestedAt: "2026-08-07T10:05:00.000Z"
+    })).resolves.toMatchObject({
+      items: [expect.objectContaining({
+        memoryId: "msmem_123e4567-e89b-42d3-a456-426614174201"
+      })]
+    });
+  } finally {
+    await writer.terminate();
   }
 });

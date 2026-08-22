@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 
@@ -16,6 +17,17 @@ import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
 
 const tokenizer = getEncoding("o200k_base");
 const scopeSchema = z.enum(["current", "global", "project", "all_projects"]);
+const explicitRecallBusyTimeoutMilliseconds = 2_000;
+
+function openRecallDatabase(runtimeRoot: string): Promise<DatabaseSync> {
+  return openRuntimeDatabase(runtimeRoot, {
+    busyTimeoutMilliseconds: explicitRecallBusyTimeoutMilliseconds
+  });
+}
+
+function rollbackIfTransaction(database: DatabaseSync): void {
+  if (database.isTransaction) database.exec("ROLLBACK");
+}
 
 export class CursorStaleError extends Error {
   public readonly code = "cursor_stale";
@@ -236,7 +248,7 @@ export async function recallSearch(request: {
   }
   const limit = z.number().int().min(1).max(50).parse(request.limit ?? 16);
   const targetTokens = z.number().int().positive().parse(request.targetTokens ?? 4096);
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRecallDatabase(request.runtimeRoot);
   let active: Record<string, unknown>;
   let rows: readonly Record<string, unknown>[];
   try {
@@ -279,7 +291,7 @@ export async function recallSearch(request: {
   const lexicalRanks = new Map<string, number>();
   const expression = ftsExpression(normalized);
   if (expression !== undefined) {
-    const lexicalDatabase = await openRuntimeDatabase(request.runtimeRoot);
+    const lexicalDatabase = await openRecallDatabase(request.runtimeRoot);
     try {
       const allowed = new Set(documents.map((item) => item.memoryId));
       const matches = lexicalDatabase.prepare(
@@ -422,7 +434,7 @@ export async function recallSearch(request: {
       })
     : undefined;
   const receiptId = `msreceipt_${randomUUID()}`;
-  const receiptDatabase = await openRuntimeDatabase(request.runtimeRoot);
+  const receiptDatabase = await openRecallDatabase(request.runtimeRoot);
   try {
     receiptDatabase.exec("BEGIN IMMEDIATE");
     receiptDatabase.prepare(
@@ -463,7 +475,7 @@ export async function recallSearch(request: {
     ));
     receiptDatabase.exec("COMMIT");
   } catch (error) {
-    receiptDatabase.exec("ROLLBACK");
+    rollbackIfTransaction(receiptDatabase);
     throw error;
   } finally {
     receiptDatabase.close();
@@ -561,7 +573,7 @@ async function recordExplicitReadReceipt(request: {
   readonly requestedAt: string;
 }): Promise<string> {
   const receiptId = `msreceipt_${randomUUID()}`;
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRecallDatabase(request.runtimeRoot);
   try {
     database.exec("BEGIN IMMEDIATE");
     database.prepare(
@@ -597,7 +609,7 @@ async function recordExplicitReadReceipt(request: {
     );
     database.exec("COMMIT");
   } catch (error) {
-    database.exec("ROLLBACK");
+    rollbackIfTransaction(database);
     throw error;
   } finally {
     database.close();
@@ -617,7 +629,7 @@ async function updateExplicitRetrievalChain(request: {
   readonly warning?: string;
 }> {
   const chainId = request.chainId ?? `mschain_${randomUUID()}`;
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRecallDatabase(request.runtimeRoot);
   try {
     database.exec("BEGIN IMMEDIATE");
     const existing = database.prepare(
@@ -657,7 +669,7 @@ async function updateExplicitRetrievalChain(request: {
         : {})
     };
   } catch (error) {
-    database.exec("ROLLBACK");
+    rollbackIfTransaction(database);
     throw error;
   } finally {
     database.close();
@@ -759,7 +771,7 @@ export async function recallRelated(request: {
     throw new Error("Memory relationships are unavailable.");
   }
   const direction = z.enum(["incoming", "outgoing", "both"]).parse(request.direction ?? "both");
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRecallDatabase(request.runtimeRoot);
   let rows: readonly Record<string, unknown>[];
   try {
     rows = database.prepare(
@@ -863,7 +875,7 @@ export async function reportIrrelevant(request: {
   readonly diagnosticBundlePath: string;
 }> {
   const observedAt = z.iso.datetime().parse(request.observedAt);
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRecallDatabase(request.runtimeRoot);
   try {
     database.exec("BEGIN IMMEDIATE");
     const returned = database.prepare(
@@ -998,7 +1010,7 @@ export async function reportIrrelevant(request: {
       diagnosticBundlePath: z.string().parse(result?.diagnostic_bundle_path)
     };
   } catch (error) {
-    database.exec("ROLLBACK");
+    rollbackIfTransaction(database);
     throw error;
   } finally {
     database.close();

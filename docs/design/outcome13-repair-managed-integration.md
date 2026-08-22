@@ -80,6 +80,7 @@ version, dimensions, and normalization rather than the mutable content revision.
 Gate 5 evidence uses the current real Codex topology only as read-only input to
 an isolated temporary HOME. Repository tests and evidence generation do not
 change a real Hook, MCP, Skill, LaunchAgent, notifier, Vault, Runtime,
-native-memory setting, or native-memory data. Applying an upgrade, restarting
-the Worker, or starting a replacement official Shadow window remains a named
-live-operation review boundary.
+native-memory setting, or native-memory data. Applying an upgrade or restarting
+the Worker remains a named live-operation review boundary. An active Shadow
+window records the resulting implementation changes without replacing or
+restarting the window.

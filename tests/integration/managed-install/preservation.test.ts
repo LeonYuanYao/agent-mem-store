@@ -113,6 +113,39 @@ async function replaceManagedCliWithLegacyRecipe(data: Awaited<ReturnType<typeof
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
+async function replaceManagedHooksWithLegacyRecipe(
+  data: Awaited<ReturnType<typeof fixture>>
+): Promise<void> {
+  const document = JSON.parse(await readFile(data.hooksTargetPath, "utf8")) as {
+    hooks: Record<string, Array<{ hooks?: Array<{ command?: string; timeout?: number }> }>>;
+  };
+  for (const [event, routes] of Object.entries(document.hooks)) {
+    for (const hook of routes.flatMap((route) => route.hooks ?? [])) {
+      if (hook.command?.includes(`memstore:gate5-shadow-v1:${event}:shadow`) !== true) continue;
+      hook.command = hook.command.replace("dist/cli/hook.js' codex", "dist/cli/main.js' hook codex");
+      if (event === "PostToolUse") hook.timeout = 1;
+    }
+  }
+  const legacySource = `${JSON.stringify(document, null, 2)}\n`;
+  await writeFile(data.hooksTargetPath, legacySource);
+  const manifestPath = join(data.runtimeRoot, "install", "ownership-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    targets: Array<{
+      label: string;
+      expectedPost: { state: string; sha256?: string };
+      expectedSource?: string;
+    }>;
+  };
+  const hooksTarget = manifest.targets.find((target) => target.label === "codex_hooks");
+  if (hooksTarget === undefined) throw new Error("Fixture has no managed Hooks target.");
+  hooksTarget.expectedPost = {
+    state: "file",
+    sha256: createHash("sha256").update(legacySource).digest("hex")
+  };
+  hooksTarget.expectedSource = legacySource;
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 test("preview is mutation-free and install, repair, and uninstall preserve unrelated state", async () => {
   const data = await fixture();
   const beforeConfig = await readFile(data.configPath, "utf8");
@@ -150,6 +183,13 @@ test("preview is mutation-free and install, repair, and uninstall preserve unrel
       event === "SessionStart" ? 2 : 1
     );
   }
+  const managedPostToolUse = (installedHooks.hooks as Record<
+    string,
+    Array<{ hooks?: Array<{ command?: string; timeout?: number }> }>
+  >).PostToolUse
+    ?.flatMap((route) => route.hooks ?? [])
+    .find((hook) => hook.command?.includes("memstore:gate5-shadow-v1:PostToolUse:shadow") === true);
+  expect(managedPostToolUse).toMatchObject({ timeout: 2 });
   const installedHooksSource = await readFile(data.hooksPath, "utf8");
   expect(installedHooksSource.match(/dist\/cli\/hook\.js/gu)).toHaveLength(5);
   expect(installedHooksSource).not.toContain("dist/cli/main.js' hook codex");
@@ -332,4 +372,38 @@ test("upgrade previews and replaces an owned legacy CLI recipe", async () => {
     "utf8"
   )) as { targets: Array<{ label: string }> };
   expect(manifest.targets.filter((target) => target.label === "memstore_cli")).toHaveLength(1);
+});
+
+test("repair upgrades owned legacy Hook recipes without changing unrelated Hooks", async () => {
+  const data = await fixture();
+  const request = {
+    ...data,
+    lunaCodexHome: join(data.homeRoot, ".codex"),
+    codexExecutable: "/opt/homebrew/bin/codex",
+    embeddingModelDirectory: join(data.runtimeRoot, "models", "e5-base-q8"),
+    installedAt: "2026-08-08T12:00:00.000Z"
+  };
+  const preview = await previewManagedIntegration(request);
+  await applyManagedIntegration(request, preview);
+  await replaceManagedHooksWithLegacyRecipe(data);
+  const userConfig = `${await readFile(data.configPath, "utf8")}\n[plugins.user]\nenabled = true\n`;
+  await writeFile(data.configPath, userConfig);
+
+  await expect(repairManagedIntegration(request, {
+    targetLabels: ["codex_hooks"]
+  })).resolves.toMatchObject({ state: "repaired" });
+  expect(await readFile(data.configPath, "utf8")).toBe(userConfig);
+  const repaired = JSON.parse(await readFile(data.hooksTargetPath, "utf8")) as {
+    hooks: Record<string, Array<{ hooks?: Array<{ command?: string; timeout?: number }> }>>;
+  };
+  expect(repaired.hooks.PreToolUse).toEqual(data.hooks.hooks.PreToolUse);
+  const managed = Object.values(repaired.hooks)
+    .flatMap((routes) => routes)
+    .flatMap((route) => route.hooks ?? [])
+    .filter((hook) => hook.command?.includes("memstore:gate5-shadow-v1:") === true);
+  expect(managed).toHaveLength(5);
+  expect(managed.every((hook) => hook.command?.includes("dist/cli/hook.js' codex") === true))
+    .toBe(true);
+  expect(managed.find((hook) => hook.command?.includes(":PostToolUse:shadow") === true))
+    .toMatchObject({ timeout: 2 });
 });

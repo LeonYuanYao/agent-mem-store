@@ -182,3 +182,54 @@ test("quality audit reports operational and temporal signals without mutating me
   expect(archived?.memory.lifecycle).toBe("archived");
   expect(archived?.memory.lifecycleDetails.reason).toBe("quality:operational-provenance-v1");
 });
+
+test("operational archive catches runtime-bound status without archiving durable current-state rules", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-memory-quality-runtime-state-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const transientId = "msmem_123e4567-e89b-42d3-a456-426614174074";
+  const durableId = "msmem_123e4567-e89b-42d3-a456-426614174075";
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "agent",
+    memory: makeCanonicalMemory({
+      memoryId: transientId,
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174074",
+      authority: "agent_derived",
+      body: "The current Shadow window msshadow_123e4567-e89b-42d3-a456-426614174074 is still pending."
+    })
+  });
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "agent",
+    memory: makeCanonicalMemory({
+      memoryId: durableId,
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174075",
+      authority: "agent_derived",
+      body: "When current evidence is incomplete, preserve the existing safety gate."
+    })
+  });
+
+  await expect(archiveOperationalMemories({
+    runtimeRoot,
+    vaultRoot,
+    archivedAt: "2026-08-18T22:45:00.000Z",
+    preview: true
+  })).resolves.toMatchObject({
+    eligibleCount: 1,
+    memoryIds: [transientId]
+  });
+  await archiveOperationalMemories({
+    runtimeRoot,
+    vaultRoot,
+    archivedAt: "2026-08-18T22:45:00.000Z",
+    preview: false
+  });
+  expect((await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: transientId }))?.memory)
+    .toMatchObject({ lifecycle: "archived", lifecycleDetails: { reason: "quality:transient-runtime-state-v2" } });
+  expect((await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: durableId }))?.memory.lifecycle)
+    .toBe("active");
+});
