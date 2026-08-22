@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 
@@ -656,6 +656,7 @@ function classifyProcessFailure(result: LunaProcessResult): LunaInvocationError 
 export interface CodexLunaAdapterOptions {
   readonly codexExecutable: string;
   readonly codexHome: string;
+  readonly isolatedHome?: string;
   readonly temporaryRoot: string;
   readonly timeoutMilliseconds?: number;
   readonly runProcess?: LunaProcessRunner;
@@ -666,6 +667,30 @@ export class CodexLunaAdapter {
 
   public constructor(options: CodexLunaAdapterOptions) {
     this.#options = options;
+  }
+
+  async #disabledSkillConfiguration(): Promise<string> {
+    const skillFiles: string[] = [];
+    for (const root of [join(this.#options.codexHome, "skills"), "/etc/codex/skills"]) {
+      let entries: string[];
+      try {
+        entries = await readdir(root, { recursive: true, encoding: "utf8" });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "ENOENT"
+        ) continue;
+        throw error;
+      }
+      for (const entry of entries) {
+        if (basename(entry) === "SKILL.md") skillFiles.push(join(root, entry));
+      }
+    }
+    const items = [...new Set(skillFiles)].sort().map((path) =>
+      `{path=${JSON.stringify(path)},enabled=false}`
+    );
+    return `skills.config=[${items.join(",")}]`;
   }
 
   public async distillBatch(
@@ -1219,6 +1244,13 @@ export class CodexLunaAdapter {
     timeoutMilliseconds = 120_000
   ): Promise<Output> {
     await mkdir(this.#options.temporaryRoot, { recursive: true, mode: 0o700 });
+    const isolatedHome = this.#options.isolatedHome ?? join(
+      this.#options.temporaryRoot,
+      "luna-home"
+    );
+    await mkdir(isolatedHome, { recursive: true, mode: 0o700 });
+    await chmod(isolatedHome, 0o700);
+    const disabledSkillConfiguration = await this.#disabledSkillConfiguration();
     const isolatedDirectory = await mkdtemp(
       join(this.#options.temporaryRoot, "memstore-luna-")
     );
@@ -1240,6 +1272,9 @@ export class CodexLunaAdapter {
         executable: this.#options.codexExecutable,
         arguments: [
           "exec",
+          "--strict-config",
+          "-c",
+          disabledSkillConfiguration,
           "--model",
           "gpt-5.6-luna",
           "--ephemeral",
@@ -1283,6 +1318,7 @@ export class CodexLunaAdapter {
         currentWorkingDirectory: isolatedDirectory,
         environment: {
           ...inheritedEnvironment,
+          HOME: isolatedHome,
           PATH: lunaPath,
           CODEX_HOME: this.#options.codexHome
         },

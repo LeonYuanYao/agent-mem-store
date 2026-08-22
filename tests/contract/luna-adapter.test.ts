@@ -1,4 +1,13 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
@@ -378,10 +387,27 @@ test("the Luna adapter makes the running Node executable discoverable in a restr
 test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only process", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-adapter-"));
   temporaryDirectories.push(root);
+  const codexHome = join(root, "codex-home");
+  const skillPath = join(codexHome, "skills", "example", "SKILL.md");
+  const externalSkillDirectory = join(root, "external-skill");
+  const linkedSkillPath = join(codexHome, "skills", "linked", "SKILL.md");
+  const isolatedHome = join(root, "persistent-luna-home");
+  await mkdir(dirname(skillPath), { recursive: true });
+  await writeFile(skillPath, "---\nname: example\ndescription: must stay hidden\n---\n", "utf8");
+  await mkdir(externalSkillDirectory, { recursive: true });
+  await writeFile(
+    join(externalSkillDirectory, "SKILL.md"),
+    "---\nname: linked\ndescription: must also stay hidden\n---\n",
+    "utf8"
+  );
+  await symlink(externalSkillDirectory, dirname(linkedSkillPath), "dir");
+  await mkdir(isolatedHome, { recursive: true });
+  await chmod(isolatedHome, 0o755);
   const requests: LunaProcessRequest[] = [];
   const adapter = new CodexLunaAdapter({
     codexExecutable: "/opt/bin/codex",
-    codexHome: join(root, "codex-home"),
+    codexHome,
+    isolatedHome,
     temporaryRoot: root,
     runProcess: (request): Promise<LunaProcessResult> => {
       requests.push(request);
@@ -467,14 +493,21 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
       "unified_exec",
       "--disable",
       "code_mode_host",
+      "--strict-config",
       "--ignore-user-config",
       "--output-schema",
       "-"
     ])
   );
+  const configIndex = request.arguments.indexOf("-c");
+  expect(configIndex).toBeGreaterThan(-1);
+  expect(request.arguments[configIndex + 1]).toBe(
+    `skills.config=[{path=${JSON.stringify(skillPath)},enabled=false},{path=${JSON.stringify(linkedSkillPath)},enabled=false}]`
+  );
   expect(request.standardInput).toContain("Classify every Candidate as long_term, project_phase, or session_only");
-  expect(request.environment.CODEX_HOME).toBe(join(root, "codex-home"));
-  expect(request.environment.HOME).toBeUndefined();
+  expect(request.environment.CODEX_HOME).toBe(codexHome);
+  expect(request.environment.HOME).toBe(isolatedHome);
+  expect((await stat(isolatedHome)).mode & 0o777).toBe(0o700);
   expect(request.environment.AWS_SECRET_ACCESS_KEY).toBeUndefined();
   expect(request.standardInput).toContain('"schemaVersion":1');
   expect(request.standardInput).toContain('"evidenceId":"e1"');

@@ -373,6 +373,7 @@ async function configuredWorkerAdapters(runtimeRoot: string): Promise<{
     : new CodexLunaAdapter({
         codexExecutable: process.env.MEMSTORE_CODEX_EXECUTABLE ?? "codex",
         codexHome: resolve(codexHome),
+        isolatedHome: resolve(runtimeRoot, "luna-home"),
         temporaryRoot: resolve(runtimeRoot, "tmp")
       });
   let embedding: Awaited<ReturnType<typeof loadConfiguredEmbeddingAdapter>>;
