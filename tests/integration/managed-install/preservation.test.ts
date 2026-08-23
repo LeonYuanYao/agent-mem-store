@@ -170,6 +170,8 @@ test("preview is mutation-free and install, repair, and uninstall preserve unrel
   expect(installedConfig).toContain("[plugins.keep]");
   expect(installedConfig).toContain("[mcp_servers.keep]");
   expect(installedConfig).toContain("[mcp_servers.memstore]");
+  expect(installedConfig).toContain("MEMSTORE_LUNA_CODEX_HOME");
+  expect(installedConfig).toContain("MEMSTORE_CODEX_EXECUTABLE");
   expect(installedConfig).toContain("generate_memories = true");
   const installedHooks = JSON.parse(await readFile(data.hooksPath, "utf8")) as typeof data.hooks;
   expect((await lstat(data.hooksPath)).isSymbolicLink()).toBe(true);

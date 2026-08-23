@@ -13,6 +13,7 @@ import {
   type CanonicalMemory
 } from "../vault/index.js";
 import type { EmbeddingAdapter } from "./index.js";
+import type { RetrievalJudge } from "./judge.js";
 import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
 
 const tokenizer = getEncoding("o200k_base");
@@ -91,6 +92,7 @@ function queryBinding(request: {
   readonly scopeBinding: string;
   readonly callerIdentity: string;
   readonly indexRevisionId: string;
+  readonly judgmentPolicy: "none" | "foreground_judge_v1";
 }): string {
   return createHash("sha256").update(JSON.stringify({
     schemaVersion: 1,
@@ -98,6 +100,7 @@ function queryBinding(request: {
     scope: request.scopeBinding,
     caller: request.callerIdentity,
     rankingPolicy: "hybrid-recall-v1",
+    judgmentPolicy: request.judgmentPolicy,
     indexRevisionId: request.indexRevisionId
   })).digest("hex");
 }
@@ -223,6 +226,7 @@ export async function recallSearch(request: {
   readonly cursor?: string;
   readonly callerIdentity: string;
   readonly adapter?: EmbeddingAdapter;
+  readonly judge?: RetrievalJudge;
   readonly chainId?: string;
   readonly requestedAt: string;
 }): Promise<{
@@ -232,6 +236,7 @@ export async function recallSearch(request: {
   readonly receiptId: string;
   readonly renderedTokenCount: number;
   readonly semanticStage: "complete" | "lexical_only";
+  readonly judgmentStage: "complete" | "not_configured" | "not_needed";
   readonly chainId: string;
   readonly cumulativeTokenCount: number;
   readonly warning?: string;
@@ -282,7 +287,8 @@ export async function recallSearch(request: {
     normalizedQuery: normalized,
     scopeBinding: bindingScope,
     callerIdentity: request.callerIdentity,
-    indexRevisionId
+    indexRevisionId,
+    judgmentPolicy: request.judge === undefined ? "none" : "foreground_judge_v1"
   });
   const cursor = request.cursor === undefined ? undefined : decodeCursor(request.cursor, binding);
   const documents = rows.map((row) => documentFromRow(row));
@@ -400,10 +406,10 @@ export async function recallSearch(request: {
     ? 0
     : ranked.findIndex((item) => item.document.memoryId === cursor.lastMemoryId) + 1;
   if (cursor !== undefined && startIndex === 0) throw new CursorStaleError();
-  const selected: RecallSearchItem[] = [];
+  const locallySelected: RecallSearchItem[] = [];
   let renderedTokenCount = 0;
   let lastConsumedIndex = startIndex - 1;
-  for (let index = startIndex; index < ranked.length && selected.length < limit; index += 1) {
+  for (let index = startIndex; index < ranked.length && locallySelected.length < limit; index += 1) {
     const rankedItem = ranked[index];
     if (rankedItem === undefined) break;
     const item: RecallSearchItem = {
@@ -421,10 +427,35 @@ export async function recallSearch(request: {
         : {})
     };
     const itemTokens = tokenizer.encode(renderSearchItem(item)).length;
-    if (selected.length > 0 && renderedTokenCount + itemTokens > targetTokens) break;
-    selected.push(item);
+    if (locallySelected.length > 0 && renderedTokenCount + itemTokens > targetTokens) break;
+    locallySelected.push(item);
     renderedTokenCount += itemTokens;
     lastConsumedIndex = index;
+  }
+  let selected = locallySelected;
+  let judgmentStage: "complete" | "not_configured" | "not_needed" =
+    request.judge === undefined ? "not_configured" : "not_needed";
+  if (request.judge !== undefined && locallySelected.length > 0) {
+    const judgment = await request.judge.judge({
+      query: request.query,
+      items: locallySelected.map((item) => ({
+        memoryId: item.memoryId,
+        description: item.description,
+        scope: item.scope,
+        authority: item.authority
+      }))
+    });
+    const available = new Set(locallySelected.map((item) => item.memoryId));
+    if (judgment.retainedMemoryIds.some((memoryId) => !available.has(memoryId))) {
+      throw new Error("Retrieval judge retained an unavailable Memory identity.");
+    }
+    const retained = new Set(judgment.retainedMemoryIds);
+    selected = locallySelected.filter((item) => retained.has(item.memoryId));
+    renderedTokenCount = selected.reduce(
+      (sum, item) => sum + tokenizer.encode(renderSearchItem(item)).length,
+      0
+    );
+    judgmentStage = "complete";
   }
   const nextCursor = lastConsumedIndex >= startIndex && lastConsumedIndex < ranked.length - 1
     ? encodeCursor({
@@ -494,6 +525,7 @@ export async function recallSearch(request: {
     receiptId,
     renderedTokenCount,
     semanticStage,
+    judgmentStage,
     ...chain
   };
 }

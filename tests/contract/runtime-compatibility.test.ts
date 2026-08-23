@@ -46,3 +46,18 @@ test("an applied migration with a changed checksum blocks database opening", asy
 
   await expect(openRuntimeDatabase(root)).rejects.toThrow("checksum");
 });
+
+test("runtime initialization retires the full-history lexical index", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-retired-fts-"));
+  temporaryDirectories.push(root);
+
+  const database = await openRuntimeDatabase(root);
+  try {
+    expect(() => database.prepare("SELECT COUNT(*) FROM fts_memories").get())
+      .toThrow("no such table: fts_memories");
+    expect(database.prepare("SELECT COUNT(*) AS count FROM active_fts_memories").get())
+      .toEqual({ count: 0 });
+  } finally {
+    database.close();
+  }
+});

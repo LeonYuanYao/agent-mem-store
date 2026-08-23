@@ -229,6 +229,11 @@ const migrations: readonly Migration[] = [
     version: 44,
     name: "remove_shadow_invalidation",
     path: new URL("../../migrations/0044-remove-shadow-invalidation.sql", import.meta.url)
+  },
+  {
+    version: 45,
+    name: "drop_retired_retrieval_fts",
+    path: new URL("../../migrations/0045-drop-retired-retrieval-fts.sql", import.meta.url)
   }
 ];
 

@@ -1875,8 +1875,6 @@ export async function purgeArchivedCanonicalBody(request: {
       ).run(request.memoryId, request.memoryId);
       commitDatabase.prepare("DELETE FROM memory_revisions WHERE memory_id = ?")
         .run(request.memoryId);
-      commitDatabase.prepare("DELETE FROM fts_memories WHERE memory_id = ?")
-        .run(request.memoryId);
       commitDatabase.prepare("DELETE FROM retrieval_documents WHERE memory_id = ?")
         .run(request.memoryId);
       for (const index of affectedIndexes) {

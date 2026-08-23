@@ -3,6 +3,7 @@ import { z } from "zod";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { inspectProject } from "../projects/index.js";
 import type { EmbeddingAdapter } from "../retrieval/index.js";
+import type { RetrievalJudge } from "../retrieval/judge.js";
 import {
   recallProvenance,
   recallRelated,
@@ -18,6 +19,7 @@ export interface RecallContext {
   readonly callerIdentity: string;
   readonly requestedAt: string;
   readonly embeddingAdapter?: EmbeddingAdapter;
+  readonly retrievalJudge?: RetrievalJudge;
 }
 
 async function currentProjectId(context: RecallContext): Promise<string | undefined> {
@@ -59,6 +61,7 @@ export async function executeRecall(
       ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
       ...(request.target_tokens === undefined ? {} : { targetTokens: request.target_tokens }),
       ...(context.embeddingAdapter === undefined ? {} : { adapter: context.embeddingAdapter }),
+      ...(context.retrievalJudge === undefined ? {} : { judge: context.retrievalJudge }),
       callerIdentity: context.callerIdentity,
       requestedAt: context.requestedAt
     });

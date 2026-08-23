@@ -52,7 +52,7 @@ const importanceReasonSchema = z.object({
 });
 
 const candidateDurabilitySchema = z.object({
-  disposition: z.enum(["long_term", "project_phase", "session_only"]),
+  disposition: z.enum(["long_term", "project_phase", "session_only"]).optional(),
   futureReuseScenario: z.string().min(1).max(2048),
   horizon: z.enum(["indefinite", "until_condition", "days_30", "session"]),
   invalidationTriggers: z.array(z.string().min(1).max(512)).max(16),
@@ -71,6 +71,13 @@ const distilledCandidateSchema = z.object({
   certainty: z.enum(["asserted", "inferred", "speculative"]),
   sensitivity: z.enum(["normal", "private"]),
   evidenceIds: z.array(z.string().min(1)).min(1).max(64),
+  retentionDecision: z.enum([
+    "long_term",
+    "project_phase",
+    "session_only",
+    "no_memory",
+    "uncertain"
+  ]).optional(),
   durability: candidateDurabilitySchema,
   importanceReasons: z.array(importanceReasonSchema).max(8)
 }).superRefine((candidate, context) => {
@@ -83,6 +90,17 @@ const distilledCandidateSchema = z.object({
   }
 }).transform((candidate) => ({
   ...candidate,
+  retentionDecision: candidate.retentionDecision ??
+    candidate.durability.disposition ??
+    "uncertain",
+  durability: {
+    ...candidate.durability,
+    disposition: candidate.retentionDecision === "long_term" ||
+      candidate.retentionDecision === "project_phase" ||
+      candidate.retentionDecision === "session_only"
+      ? candidate.retentionDecision
+      : candidate.durability.disposition ?? "session_only"
+  },
   primaryCategory: selectPrimaryCategory(candidate.categoryTags),
   importanceTags: candidate.importanceReasons.map((item) => item.tag)
 }));
@@ -91,7 +109,14 @@ const distillationOutputSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal("distillation"),
   candidates: z.array(distilledCandidateSchema).max(64)
-});
+}).transform((output) => ({
+  ...output,
+  candidates: output.candidates.filter((candidate) =>
+    candidate.retentionDecision !== "no_memory" &&
+    candidate.retentionDecision !== "session_only" &&
+    candidate.durability.abstractionLevel !== "task_observation"
+  )
+}));
 
 const distillationOutputJsonSchema = {
   type: "object",
@@ -117,6 +142,7 @@ const distillationOutputJsonSchema = {
           "certainty",
           "sensitivity",
           "evidenceIds",
+          "retentionDecision",
           "durability",
           "importanceReasons"
         ],
@@ -157,11 +183,14 @@ const distillationOutputJsonSchema = {
             maxItems: 64,
             items: { type: "string", minLength: 1 }
           },
+          retentionDecision: {
+            type: "string",
+            enum: ["long_term", "project_phase", "session_only", "no_memory", "uncertain"]
+          },
           durability: {
             type: "object",
             additionalProperties: false,
             required: [
-              "disposition",
               "futureReuseScenario",
               "horizon",
               "invalidationTriggers",
@@ -169,10 +198,6 @@ const distillationOutputJsonSchema = {
               "observableFromWorkspace"
             ],
             properties: {
-              disposition: {
-                type: "string",
-                enum: ["long_term", "project_phase", "session_only"]
-              },
               futureReuseScenario: {
                 type: "string",
                 minLength: 1,
@@ -223,7 +248,14 @@ const consolidationOutputSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal("consolidation"),
   candidates: z.array(distilledCandidateSchema).max(64)
-});
+}).transform((output) => ({
+  ...output,
+  candidates: output.candidates.filter((candidate) =>
+    candidate.retentionDecision !== "no_memory" &&
+    candidate.retentionDecision !== "session_only" &&
+    candidate.durability.abstractionLevel !== "task_observation"
+  )
+}));
 
 const consolidationOutputJsonSchema = {
   type: "object",
@@ -422,9 +454,20 @@ const duplicateAssessmentOutputJsonSchema = {
 
 export type ImportanceTag = z.infer<typeof importanceTagSchema>;
 export type ImportanceReason = z.infer<typeof importanceReasonSchema>;
-export type DistilledCandidate = z.infer<typeof distilledCandidateSchema>;
-export type DistillationOutput = z.infer<typeof distillationOutputSchema>;
-export type ConsolidationOutput = z.infer<typeof consolidationOutputSchema>;
+type ParsedDistilledCandidate = z.infer<typeof distilledCandidateSchema>;
+export type DistilledCandidate = Omit<ParsedDistilledCandidate, "retentionDecision"> & {
+  readonly retentionDecision?: ParsedDistilledCandidate["retentionDecision"];
+};
+export interface DistillationOutput {
+  readonly schemaVersion: 1;
+  readonly kind: "distillation";
+  readonly candidates: readonly DistilledCandidate[];
+}
+export interface ConsolidationOutput {
+  readonly schemaVersion: 1;
+  readonly kind: "consolidation";
+  readonly candidates: readonly DistilledCandidate[];
+}
 export type SemanticAssessmentOutput = z.infer<typeof semanticAssessmentOutputSchema>;
 export type ConflictAssessmentOutput = z.infer<typeof conflictAssessmentOutputSchema>;
 
@@ -707,7 +750,7 @@ export class CodexLunaAdapter {
       distillationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 4,
+        promptVersion: 5,
         task: "distill_memory_candidates",
         rules: [
           "Use only supplied evidence.",
@@ -715,7 +758,10 @@ export class CodexLunaAdapter {
           "Return no Candidate for operational probes or exact-response checks.",
           "Return no Candidate for task-local instructions, temporary progress or state, or unverified future plans.",
           "If evidence says content must not be retained, return no Candidate derived from that content.",
-          "Classify every Candidate as long_term, project_phase, or session_only and explain one concrete future reuse scenario.",
+          "Split mixed evidence into atomic clauses before classifying retention; emit one Candidate per clause and never attach a transient observation to a durable rule.",
+          "Set retentionDecision to long_term, project_phase, session_only, no_memory, or uncertain for every atomic clause; MemStore code derives lifecycle state from this field.",
+          "Use no_memory for exact run IDs, timestamps, backup paths, current branch state, completed action inventories, operational probes, and exact-response checks unless the clause independently states a durable recovery contract.",
+          "Classify every retained clause independently and explain one concrete future reuse scenario.",
           "Use long_term for knowledge expected to remain useful beyond the current task, including project-specific knowledge reused across future sessions; use session_only for task observations or current state.",
           "Project-specific knowledge is long_term when it is expected to remain useful across future sessions; use project_phase only when evidence explicitly binds it to a finite migration, feature, incident, experiment, or release phase. A possible future invalidation condition alone does not make knowledge project_phase.",
           "A fact that can be rediscovered directly from the current workspace is session_only unless the Candidate expresses a stable reusable rule or a costly non-obvious project fact.",
@@ -1060,13 +1106,14 @@ export class CodexLunaAdapter {
       consolidationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 4,
+        promptVersion: 5,
         task: "consolidate_session_candidates",
         rules: [
           "Use only structured Batch results and their evidence identities.",
           "Omit operational probes, exact-response checks, task-local instructions, temporary progress or state, and unverified future plans.",
           "If a structured candidate says content must not be retained, omit it from the consolidation result.",
-          "Preserve the strictest supplied durability classification and return a complete durability assessment for every consolidated Candidate; never upgrade project_phase or session_only to long_term without explicit supplied evidence.",
+          "Keep input clauses atomic; never combine a transient observation with a durable clause.",
+          "Preserve the strictest supplied retentionDecision; never upgrade project_phase, session_only, no_memory, or uncertain to long_term without explicit supplied evidence.",
           "Project-specific knowledge is long_term when it is expected to remain useful across future sessions; use project_phase only when evidence explicitly binds it to a finite migration, feature, incident, experiment, or release phase. A possible future invalidation condition alone does not make knowledge project_phase.",
           "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Do not infer from raw transcripts or execute commands.",
@@ -1275,6 +1322,8 @@ export class CodexLunaAdapter {
           "--strict-config",
           "-c",
           disabledSkillConfiguration,
+          "-c",
+          'service_tier="default"',
           "--model",
           "gpt-5.6-luna",
           "--ephemeral",

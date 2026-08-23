@@ -66,6 +66,7 @@ import {
 import { inspectOperation, inspectStatus, waitForOperation } from "../operations/status.js";
 import { SwiftNotifierAdapter } from "../adapters/macos/notifier.js";
 import { CodexLunaAdapter } from "../luna/index.js";
+import { CodexTerraRetrievalJudge } from "../retrieval/judge.js";
 import { runCodexHook } from "./codex-hook.js";
 import {
   applyManagedIntegration,
@@ -911,6 +912,16 @@ async function runRecall(arguments_: readonly string[]): Promise<unknown> {
     callerIdentity: process.env.MEMSTORE_CALLER_IDENTITY ?? `cli:${path}`,
     requestedAt: new Date().toISOString()
   };
+  const terraCodexHome = process.env.MEMSTORE_TERRA_CODEX_HOME ??
+    process.env.MEMSTORE_LUNA_CODEX_HOME;
+  const retrievalJudge = terraCodexHome === undefined
+    ? undefined
+    : new CodexTerraRetrievalJudge({
+        codexExecutable: process.env.MEMSTORE_CODEX_EXECUTABLE ?? "codex",
+        codexHome: resolve(terraCodexHome),
+        isolatedHome: resolve(location.runtimeRoot, "terra-home"),
+        temporaryRoot: resolve(location.runtimeRoot, "tmp")
+      });
   if (action === "search") {
     const query = parsed.positionals[2];
     if (query === undefined) throw new MemStoreCommandError("query_required", "recall search requires a query.");
@@ -933,7 +944,8 @@ async function runRecall(arguments_: readonly string[]): Promise<unknown> {
           : { target_tokens: optionalPositiveInteger(parsed.values["target-tokens"]) })
       }, {
         ...context,
-        ...(embedding === undefined ? {} : { embeddingAdapter: embedding.adapter })
+        ...(embedding === undefined ? {} : { embeddingAdapter: embedding.adapter }),
+        ...(retrievalJudge === undefined ? {} : { retrievalJudge })
       });
     } catch (error) {
       if (!(error instanceof EmbeddingArtifactMismatchError)) throw error;

@@ -499,12 +499,17 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
       "-"
     ])
   );
+  expect(request.arguments).toEqual(expect.arrayContaining([
+    "-c",
+    'service_tier="default"'
+  ]));
+  expect(request.arguments).not.toContain('service_tier="fast"');
   const configIndex = request.arguments.indexOf("-c");
   expect(configIndex).toBeGreaterThan(-1);
   expect(request.arguments[configIndex + 1]).toBe(
     `skills.config=[{path=${JSON.stringify(skillPath)},enabled=false},{path=${JSON.stringify(linkedSkillPath)},enabled=false}]`
   );
-  expect(request.standardInput).toContain("Classify every Candidate as long_term, project_phase, or session_only");
+  expect(request.standardInput).toContain("Split mixed evidence into atomic clauses before classifying retention");
   expect(request.environment.CODEX_HOME).toBe(codexHome);
   expect(request.environment.HOME).toBe(isolatedHome);
   expect((await stat(isolatedHome)).mode & 0o777).toBe(0o700);
@@ -695,13 +700,88 @@ test("distillation instructs Luna to omit non-durable operational content", asyn
     }]
   });
 
-  expect(structuredRequest?.promptVersion).toBe(4);
+  expect(structuredRequest?.promptVersion).toBe(5);
   expect(structuredRequest?.rules).toEqual(expect.arrayContaining([
     "Return no Candidate for operational probes or exact-response checks.",
     "Return no Candidate for task-local instructions, temporary progress or state, or unverified future plans.",
     "If evidence says content must not be retained, return no Candidate derived from that content.",
+    "Split mixed evidence into atomic clauses before classifying retention; emit one Candidate per clause and never attach a transient observation to a durable rule.",
     "Project-specific knowledge is long_term when it is expected to remain useful across future sessions; use project_phase only when evidence explicitly binds it to a finite migration, feature, incident, experiment, or release phase. A possible future invalidation condition alone does not make knowledge project_phase."
   ]));
+});
+
+test("distillation keeps only atomic reusable clauses and code derives their lifecycle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-atomic-admission-"));
+  temporaryDirectories.push(root);
+  const base = {
+    primaryCategory: "architecture_contract",
+    categoryTags: ["architecture_contract"],
+    applicabilitySummary: "Release verification",
+    conditions: [],
+    exclusions: [],
+    preservedNegations: [],
+    certainty: "asserted",
+    sensitivity: "normal",
+    evidenceIds: ["e1"],
+    importanceReasons: []
+  };
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: [
+          {
+            ...base,
+            statement: "Run typecheck before every release.",
+            retentionDecision: "long_term",
+            durability: {
+              futureReuseScenario: "Verify a future release.",
+              horizon: "indefinite",
+              invalidationTriggers: [],
+              abstractionLevel: "reusable_rule",
+              observableFromWorkspace: false
+            }
+          },
+          {
+            ...base,
+            statement: "The current typecheck completed at 10:30.",
+            retentionDecision: "session_only",
+            durability: {
+              futureReuseScenario: "Describe this run.",
+              horizon: "session",
+              invalidationTriggers: [],
+              abstractionLevel: "task_observation",
+              observableFromWorkspace: true
+            }
+          }
+        ]
+      }),
+      stderr: ""
+    })
+  });
+
+  const output = await adapter.distillBatch({
+    operationId: "atomic-admission",
+    scope: { kind: "global" },
+    evidence: [{
+      evidenceId: "source-1",
+      evidenceClass: "explicit_user_statement",
+      content: "Run typecheck before every release. It completed at 10:30 today.",
+      sourceIdentity: "codex:atomic-admission",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  });
+
+  expect(output.candidates).toHaveLength(1);
+  expect(output.candidates[0]?.statement).toBe("Run typecheck before every release.");
+  expect(output.candidates[0]?.retentionDecision).toBe("long_term");
+  expect(output.candidates[0]?.durability.disposition).toBe("long_term");
 });
 
 test("the Responses API output schema gives every const field an explicit JSON type", async () => {
@@ -1037,7 +1117,7 @@ test("consolidation and semantic assessment use distinct versioned structured ta
   });
 
   expect(requests).toHaveLength(3);
-  expect(requests[0]?.standardInput).toContain('"promptVersion":4');
+  expect(requests[0]?.standardInput).toContain('"promptVersion":5');
   expect(requests[0]?.standardInput).toContain('"task":"consolidate_session_candidates"');
   expect(requests[0]?.timeoutMilliseconds).toBe(300_000);
   expect(requests[1]?.standardInput).toContain('"promptVersion":3');

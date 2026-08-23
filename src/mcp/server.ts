@@ -4,6 +4,7 @@ import { z } from "zod";
 import { errorEnvelope, successEnvelope } from "../contracts/envelope.js";
 import { executeRecall, type RecallContext } from "../operations/recall.js";
 import type { EmbeddingAdapter } from "../retrieval/index.js";
+import type { RetrievalJudge } from "../retrieval/judge.js";
 
 export interface MemStoreMcpServerOptions {
   readonly runtimeRoot: string;
@@ -12,6 +13,7 @@ export interface MemStoreMcpServerOptions {
   readonly callerIdentity?: string;
   readonly now?: () => string;
   readonly embeddingAdapter?: EmbeddingAdapter;
+  readonly retrievalJudge?: RetrievalJudge;
 }
 
 function toolResult(command: string, result: unknown) {
@@ -47,7 +49,10 @@ export function createMemStoreMcpServer(
     requestedAt: options.now?.() ?? new Date().toISOString(),
     ...(options.embeddingAdapter === undefined
       ? {}
-      : { embeddingAdapter: options.embeddingAdapter })
+      : { embeddingAdapter: options.embeddingAdapter }),
+    ...(options.retrievalJudge === undefined
+      ? {}
+      : { retrievalJudge: options.retrievalJudge })
   });
 
   server.registerTool("memstore_search", {

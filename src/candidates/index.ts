@@ -809,7 +809,7 @@ export async function createAgentCandidate(request: {
           `msdecision_${randomUUID()}`,
           candidateId,
           existing === undefined ? "wait" : "merge",
-          existing === undefined ? "candidate_created" : "matching_candidate_evidence_merged",
+          existing === undefined ? "novelty_insert" : "novelty_update_exact_alias",
           createdAt
         );
       database.exec("COMMIT");

@@ -236,6 +236,12 @@ function appendMemStoreMcp(source: string, request: ManagedRequest): string {
     "[mcp_servers.memstore.env]",
     `MEMSTORE_RUNTIME_ROOT = ${tomlString(resolve(request.runtimeRoot))}`,
     `MEMSTORE_VAULT_ROOT = ${tomlString(resolve(request.vaultRoot))}`,
+    ...(request.lunaCodexHome === undefined
+      ? []
+      : [`MEMSTORE_LUNA_CODEX_HOME = ${tomlString(resolve(request.lunaCodexHome))}`]),
+    ...(request.codexExecutable === undefined
+      ? []
+      : [`MEMSTORE_CODEX_EXECUTABLE = ${tomlString(request.codexExecutable)}`]),
     ""
   ].join("\n");
   return `${source.trimEnd()}\n\n${block}`;

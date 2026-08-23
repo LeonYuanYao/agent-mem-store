@@ -7,6 +7,7 @@ import { afterEach, expect, test } from "vitest";
 
 import { createMemStoreMcpServer } from "../../../src/mcp/server.js";
 import { buildRetrievalIndex, type EmbeddingAdapter } from "../../../src/retrieval/index.js";
+import type { RetrievalJudge } from "../../../src/retrieval/judge.js";
 import { writeCanonicalMemory } from "../../../src/vault/index.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
 
@@ -128,6 +129,75 @@ test("MCP explicit Recall uses the configured semantic adapter", async () => {
       semanticStage: "complete",
       items: [{ memoryId: "msmem_123e4567-e89b-42d3-a456-426614174209" }]
     }
+  });
+  await client.close();
+  await server.close();
+});
+
+test("MCP explicit Recall applies the configured foreground retrieval judge", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-mcp-judge-"));
+  temporaryDirectories.push(root);
+  const workspace = join(root, "workspace");
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174019";
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, ".memstore-project"), JSON.stringify({
+    schema_version: 1,
+    project_id: projectId
+  }));
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174229",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174239",
+      scope: { kind: "project", projectId },
+      body: "Use SQLite WAL for durable local state.",
+      compact: "Use SQLite WAL for durable state."
+    })
+  });
+  const adapter: EmbeddingAdapter = {
+    identity: {
+      adapterVersion: "mcp-judge-v1",
+      modelIdentity: "mcp-judge-fixture",
+      artifactSha256: "d".repeat(64),
+      dimensions: 2,
+      normalization: "l2"
+    },
+    embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter,
+    builtAt: "2026-08-18T01:00:00.000Z"
+  });
+  const judge: RetrievalJudge = {
+    judge: () => Promise.resolve({ retainedMemoryIds: [], packDecision: "empty" })
+  };
+  const server = createMemStoreMcpServer({
+    runtimeRoot,
+    vaultRoot,
+    path: workspace,
+    callerIdentity: "mcp-judge-test",
+    embeddingAdapter: adapter,
+    retrievalJudge: judge
+  });
+  const client = new Client({ name: "judge-client", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+
+  const result = await client.callTool({
+    name: "memstore_search",
+    arguments: { query: "SQLite WAL durability" }
+  });
+
+  expect(result.structuredContent).toMatchObject({
+    ok: true,
+    result: { judgmentStage: "complete", items: [] }
   });
   await client.close();
   await server.close();

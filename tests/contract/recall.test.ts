@@ -5,6 +5,7 @@ import { Worker } from "node:worker_threads";
 import { afterEach, expect, test } from "vitest";
 
 import { buildRetrievalIndex, type EmbeddingAdapter } from "../../src/retrieval/index.js";
+import type { RetrievalJudge } from "../../src/retrieval/judge.js";
 import {
   CursorStaleError,
   recallSearch,
@@ -112,6 +113,34 @@ test("explicit recall searches current Project plus Global and deepens by Memory
     detail: "standard",
     body: "For durable local state, enable SQLite WAL and short transactions."
   });
+});
+
+test("explicit recall returns only memories that the configured judge finds necessary now", async () => {
+  const roots = await createIndexedFixture();
+  const judgedMemoryIds: string[][] = [];
+  const judge: RetrievalJudge = {
+    judge: (request) => {
+      judgedMemoryIds.push(request.items.map((item) => item.memoryId));
+      return Promise.resolve({ retainedMemoryIds: [], packDecision: "empty" });
+    }
+  };
+
+  const page = await recallSearch({
+    ...roots,
+    query: "SQLite WAL durability",
+    scope: "current",
+    currentProjectId: projectA,
+    callerIdentity: "codex:test-session",
+    adapter,
+    judge,
+    requestedAt: "2026-08-07T10:01:00.000Z"
+  });
+
+  expect(judgedMemoryIds).toEqual([[
+    "msmem_123e4567-e89b-42d3-a456-426614174201"
+  ]]);
+  expect(page.items).toEqual([]);
+  expect(page.judgmentStage).toBe("complete");
 });
 
 test("an explicit search cursor is rejected when its query binding changes", async () => {
