@@ -234,6 +234,16 @@ const migrations: readonly Migration[] = [
     version: 45,
     name: "drop_retired_retrieval_fts",
     path: new URL("../../migrations/0045-drop-retired-retrieval-fts.sql", import.meta.url)
+  },
+  {
+    version: 46,
+    name: "admission_audit",
+    path: new URL("../../migrations/0046-admission-audit.sql", import.meta.url)
+  },
+  {
+    version: 47,
+    name: "redact_admission_audit_hashes",
+    path: new URL("../../migrations/0047-redact-admission-audit-hashes.sql", import.meta.url)
   }
 ];
 

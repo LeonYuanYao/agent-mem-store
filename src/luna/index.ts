@@ -24,6 +24,7 @@ import type { DuplicateClusterInput } from "../quality/duplicates.js";
 
 const compactTokenizer = getEncoding("o200k_base");
 const compactHardTokenLimit = 96;
+const maximumRawAdmissionClauses = 128;
 
 const importanceTagSchema = z.enum([
   "user_decision",
@@ -108,15 +109,8 @@ const distilledCandidateSchema = z.object({
 const distillationOutputSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal("distillation"),
-  candidates: z.array(distilledCandidateSchema).max(64)
-}).transform((output) => ({
-  ...output,
-  candidates: output.candidates.filter((candidate) =>
-    candidate.retentionDecision !== "no_memory" &&
-    candidate.retentionDecision !== "session_only" &&
-    candidate.durability.abstractionLevel !== "task_observation"
-  )
-}));
+  candidates: z.array(distilledCandidateSchema).max(maximumRawAdmissionClauses)
+});
 
 const distillationOutputJsonSchema = {
   type: "object",
@@ -127,7 +121,7 @@ const distillationOutputJsonSchema = {
     kind: { type: "string", const: "distillation" },
     candidates: {
       type: "array",
-      maxItems: 64,
+      maxItems: maximumRawAdmissionClauses,
       items: {
         type: "object",
         additionalProperties: false,
@@ -247,15 +241,8 @@ const distillationOutputJsonSchema = {
 const consolidationOutputSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal("consolidation"),
-  candidates: z.array(distilledCandidateSchema).max(64)
-}).transform((output) => ({
-  ...output,
-  candidates: output.candidates.filter((candidate) =>
-    candidate.retentionDecision !== "no_memory" &&
-    candidate.retentionDecision !== "session_only" &&
-    candidate.durability.abstractionLevel !== "task_observation"
-  )
-}));
+  candidates: z.array(distilledCandidateSchema).max(maximumRawAdmissionClauses)
+});
 
 const consolidationOutputJsonSchema = {
   type: "object",
@@ -572,6 +559,7 @@ export interface LunaSafeDiagnostic {
     | "output_schema"
     | "evidence_binding"
     | "importance_validation"
+    | "retention_validation"
     | "local_processing";
   readonly code: string;
   readonly path?: string;
@@ -760,6 +748,7 @@ export class CodexLunaAdapter {
           "If evidence says content must not be retained, return no Candidate derived from that content.",
           "Split mixed evidence into atomic clauses before classifying retention; emit one Candidate per clause and never attach a transient observation to a durable rule.",
           "Set retentionDecision to long_term, project_phase, session_only, no_memory, or uncertain for every atomic clause; MemStore code derives lifecycle state from this field.",
+          "Return no more than 64 clauses whose retentionDecision is long_term or project_phase; rejected or uncertain atomic clauses may use the remaining raw output capacity.",
           "Use no_memory for exact run IDs, timestamps, backup paths, current branch state, completed action inventories, operational probes, and exact-response checks unless the clause independently states a durable recovery contract.",
           "Classify every retained clause independently and explain one concrete future reuse scenario.",
           "Use long_term for knowledge expected to remain useful beyond the current task, including project-specific knowledge reused across future sessions; use session_only for task observations or current state.",
@@ -1114,6 +1103,7 @@ export class CodexLunaAdapter {
           "If a structured candidate says content must not be retained, omit it from the consolidation result.",
           "Keep input clauses atomic; never combine a transient observation with a durable clause.",
           "Preserve the strictest supplied retentionDecision; never upgrade project_phase, session_only, no_memory, or uncertain to long_term without explicit supplied evidence.",
+          "Return no more than 64 clauses whose retentionDecision is long_term or project_phase; rejected or uncertain atomic clauses may use the remaining raw output capacity.",
           "Project-specific knowledge is long_term when it is expected to remain useful across future sessions; use project_phase only when evidence explicitly binds it to a finite migration, feature, incident, experiment, or release phase. A possible future invalidation condition alone does not make knowledge project_phase.",
           "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Do not infer from raw transcripts or execute commands.",
@@ -1159,6 +1149,7 @@ export class CodexLunaAdapter {
       output.candidates,
       availableEvidenceIds
     );
+    requireNoRetentionUpgrade(output.candidates, request.batchResults);
     return output;
   }
 
@@ -1490,5 +1481,62 @@ function requireValidImportanceReasons(
       availableEvidenceIds,
       candidate.importanceTags.length > 0
     );
+  }
+}
+
+function retentionDecisionOf(candidate: DistilledCandidate):
+  | "long_term"
+  | "project_phase"
+  | "session_only"
+  | "no_memory"
+  | "uncertain" {
+  return candidate.retentionDecision ?? candidate.durability.disposition;
+}
+
+const retentionStrictness = {
+  long_term: 0,
+  project_phase: 1,
+  uncertain: 2,
+  session_only: 3,
+  no_memory: 4
+} as const;
+
+function requireNoRetentionUpgrade(
+  outputCandidates: readonly DistilledCandidate[],
+  batchResults: ConsolidateSessionRequest["batchResults"]
+): void {
+  const inputCandidates = batchResults.flatMap((batch) => batch.candidates);
+  for (const output of outputCandidates) {
+    const outputEvidence = new Set([
+      ...output.evidenceIds,
+      ...output.importanceReasons.flatMap((reason) => reason.evidenceIds)
+    ]);
+    const matchedInputs = inputCandidates.filter((candidate) =>
+      candidate.evidenceIds.some((evidenceId) => outputEvidence.has(evidenceId)) ||
+      candidate.importanceReasons.some((reason) =>
+        reason.evidenceIds.some((evidenceId) => outputEvidence.has(evidenceId))
+      )
+    );
+    const strictestInput = matchedInputs.reduce<DistilledCandidate | undefined>(
+      (strictest, candidate) =>
+        strictest === undefined ||
+        retentionStrictness[retentionDecisionOf(candidate)] >
+          retentionStrictness[retentionDecisionOf(strictest)]
+          ? candidate
+          : strictest,
+      undefined
+    );
+    if (
+      strictestInput !== undefined &&
+      retentionStrictness[retentionDecisionOf(output)] <
+        retentionStrictness[retentionDecisionOf(strictestInput)]
+    ) {
+      throw new LunaInvocationError(
+        "schema_invalid",
+        true,
+        "Luna consolidation cannot upgrade the retention decision of cited input evidence.",
+        { stage: "retention_validation", code: "retention_upgrade" }
+      );
+    }
   }
 }

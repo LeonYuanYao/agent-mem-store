@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 
 import { handleCodexHook } from "../../../src/adapters/codex/hook.js";
+import { recordAdmissionAudit } from "../../../src/admission/audit.js";
+import { enqueueLunaOperation } from "../../../src/luna/operations.js";
 import { initializeMemStore } from "../../../src/operations/initialize.js";
 import {
   inspectOfficialShadowWindow,
@@ -18,6 +20,7 @@ import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { writeCanonicalMemory } from "../../../src/vault/index.js";
 import { runWorkerOnce } from "../../../src/worker/main.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
+import { makeLongTermCandidateDurability } from "../../helpers/candidate-durability.js";
 
 const roots: string[] = [];
 
@@ -266,6 +269,63 @@ test("an official Shadow window requires a completed real-Hook probe and records
   } finally {
     readinessFixture.close();
   }
+  const admissionOperation = await enqueueLunaOperation({
+    runtimeRoot,
+    kind: "distill_batch",
+    idempotencyKey: "shadow-admission-fixture",
+    payload: { batchId: "shadow-admission-batch" },
+    createdAt: "2026-08-10T04:00:00.000Z"
+  });
+  const admissionCommon = {
+    primaryCategory: "durable_reference" as const,
+    categoryTags: ["durable_reference" as const],
+    applicabilitySummary: "future project work",
+    conditions: [],
+    exclusions: [],
+    preservedNegations: [],
+    certainty: "asserted" as const,
+    sensitivity: "normal" as const,
+    evidenceIds: ["shadow-admission-evidence"],
+    importanceTags: [],
+    importanceReasons: []
+  };
+  await recordAdmissionAudit({
+    runtimeRoot,
+    operationId: admissionOperation.operationId,
+    sourceKind: "distillation",
+    sourceId: "shadow-admission-batch",
+    candidates: [
+      {
+        ...admissionCommon,
+        statement: "Keep this durable rule.",
+        retentionDecision: "long_term",
+        durability: makeLongTermCandidateDurability()
+      },
+      {
+        ...admissionCommon,
+        statement: "The current run completed at 04:00.",
+        retentionDecision: "no_memory",
+        durability: {
+          ...makeLongTermCandidateDurability(),
+          disposition: "session_only",
+          horizon: "session",
+          abstractionLevel: "task_observation"
+        }
+      },
+      {
+        ...admissionCommon,
+        statement: "A one-off finding may be durable.",
+        retentionDecision: "uncertain",
+        durability: {
+          ...makeLongTermCandidateDurability(),
+          disposition: "session_only",
+          horizon: "session"
+        }
+      }
+    ],
+    promptVersion: 5,
+    createdAt: "2026-08-10T04:00:01.000Z"
+  });
   await expect(inspectOfficialShadowWindow({
     runtimeRoot,
     repositoryRoot,
@@ -330,6 +390,46 @@ test("an official Shadow window requires a completed real-Hook probe and records
             candidateId: "mscandidate_shadow_durability_session",
             disposition: "session_only"
           }
+        ]
+      },
+      admissionAudit: {
+        policyVersion: "atomic-admission-v1",
+        retentionDays: 14,
+        totalCount: 3,
+        outcomes: {
+          admitted: 1,
+          rejected: 1,
+          isolated: 1
+        },
+        decisions: {
+          long_term: 1,
+          project_phase: 0,
+          session_only: 0,
+          no_memory: 1,
+          uncertain: 1
+        },
+        reasons: {
+          long_term: 1,
+          project_phase: 0,
+          session_only: 0,
+          no_memory: 1,
+          uncertain: 1,
+          task_observation: 0
+        },
+        redactedCount: 0,
+        rejectedSamples: [
+          expect.objectContaining({
+            retentionDecision: "no_memory",
+            reason: "no_memory",
+            statement: "The current run completed at 04:00."
+          })
+        ],
+        isolatedSamples: [
+          expect.objectContaining({
+            retentionDecision: "uncertain",
+            reason: "uncertain",
+            statement: "A one-off finding may be durable."
+          })
         ]
       },
       knowledgeSamples: {

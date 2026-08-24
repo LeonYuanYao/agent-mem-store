@@ -30,6 +30,7 @@ const safeDiagnosticSchema = z.object({
     "output_schema",
     "evidence_binding",
     "importance_validation",
+    "retention_validation",
     "local_processing"
   ]),
   code: z.string().regex(/^[a-z0-9_]{1,128}$/u),

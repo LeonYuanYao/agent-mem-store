@@ -710,7 +710,7 @@ test("distillation instructs Luna to omit non-durable operational content", asyn
   ]));
 });
 
-test("distillation keeps only atomic reusable clauses and code derives their lifecycle", async () => {
+test("distillation exposes every atomic retention decision for downstream admission", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-atomic-admission-"));
   temporaryDirectories.push(root);
   const base = {
@@ -778,10 +778,198 @@ test("distillation keeps only atomic reusable clauses and code derives their lif
     }]
   });
 
-  expect(output.candidates).toHaveLength(1);
+  expect(output.candidates).toHaveLength(2);
   expect(output.candidates[0]?.statement).toBe("Run typecheck before every release.");
   expect(output.candidates[0]?.retentionDecision).toBe("long_term");
   expect(output.candidates[0]?.durability.disposition).toBe("long_term");
+  expect(output.candidates[1]?.statement).toBe("The current typecheck completed at 10:30.");
+  expect(output.candidates[1]?.retentionDecision).toBe("session_only");
+  expect(output.candidates[1]?.durability.disposition).toBe("session_only");
+});
+
+test("consolidation exposes rejected retention decisions for downstream admission", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-consolidation-admission-"));
+  temporaryDirectories.push(root);
+  const common = {
+    primaryCategory: "workflow_environment_toolchain",
+    categoryTags: ["workflow_environment_toolchain"],
+    applicabilitySummary: "future project work",
+    conditions: [],
+    exclusions: [],
+    preservedNegations: [],
+    certainty: "asserted",
+    sensitivity: "normal",
+    evidenceIds: ["e1"],
+    importanceReasons: []
+  } as const;
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        kind: "consolidation",
+        candidates: [
+          {
+            ...common,
+            statement: "Future releases require a clean typecheck.",
+            retentionDecision: "long_term",
+            durability: {
+              futureReuseScenario: "Verify a future release.",
+              horizon: "indefinite",
+              invalidationTriggers: [],
+              abstractionLevel: "reusable_rule",
+              observableFromWorkspace: false
+            }
+          },
+          {
+            ...common,
+            statement: "The typecheck completed at 10:00 today.",
+            retentionDecision: "no_memory",
+            durability: {
+              futureReuseScenario: "Describe this run.",
+              horizon: "session",
+              invalidationTriggers: [],
+              abstractionLevel: "task_observation",
+              observableFromWorkspace: true
+            }
+          }
+        ]
+      }),
+      stderr: ""
+    })
+  });
+
+  const output = await adapter.consolidateSession({
+    operationId: "consolidation-admission",
+    sessionId: "consolidation-admission-session",
+    batchResults: [{
+      batchId: "batch-1",
+      candidates: [],
+      evidenceIds: ["source-evidence"]
+    }]
+  });
+
+  expect(output.candidates.map((candidate) => candidate.retentionDecision))
+    .toEqual(["long_term", "no_memory"]);
+});
+
+test("consolidation cannot upgrade project-phase evidence to long-term retention", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-consolidation-upgrade-"));
+  temporaryDirectories.push(root);
+  const candidate = {
+    statement: "This migration workaround applies until the migration ends.",
+    primaryCategory: "workflow_environment_toolchain" as const,
+    categoryTags: ["workflow_environment_toolchain" as const],
+    applicabilitySummary: "during the active migration",
+    conditions: [],
+    exclusions: [],
+    preservedNegations: [],
+    certainty: "asserted" as const,
+    sensitivity: "normal" as const,
+    evidenceIds: ["source-evidence"],
+    retentionDecision: "project_phase" as const,
+    durability: {
+      disposition: "project_phase" as const,
+      futureReuseScenario: "Reuse until the migration is complete.",
+      horizon: "until_condition" as const,
+      invalidationTriggers: ["Migration completed."],
+      abstractionLevel: "project_fact" as const,
+      observableFromWorkspace: false
+    },
+    importanceTags: [],
+    importanceReasons: []
+  };
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        kind: "consolidation",
+        candidates: [{
+          ...candidate,
+          evidenceIds: ["e1"],
+          retentionDecision: "long_term",
+          durability: {
+            ...candidate.durability,
+            disposition: undefined,
+            horizon: "indefinite"
+          }
+        }]
+      }),
+      stderr: ""
+    })
+  });
+
+  await expect(adapter.consolidateSession({
+    operationId: "consolidation-upgrade",
+    sessionId: "consolidation-upgrade-session",
+    batchResults: [{
+      batchId: "batch-1",
+      candidates: [candidate],
+      evidenceIds: ["source-evidence"]
+    }]
+  })).rejects.toMatchObject({
+    category: "schema_invalid",
+    diagnostic: { stage: "retention_validation", code: "retention_upgrade" }
+  });
+});
+
+test("distillation accepts more than 64 raw clauses when admission can reduce them", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-raw-clause-limit-"));
+  temporaryDirectories.push(root);
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: Array.from({ length: 70 }, (_, index) => ({
+          statement: `Atomic clause ${String(index)}.`,
+          primaryCategory: "durable_reference",
+          categoryTags: ["durable_reference"],
+          applicabilitySummary: "this recorded run",
+          conditions: [],
+          exclusions: [],
+          preservedNegations: [],
+          certainty: "asserted",
+          sensitivity: "normal",
+          evidenceIds: ["e1"],
+          retentionDecision: index < 5 ? "long_term" : "no_memory",
+          durability: {
+            futureReuseScenario: index < 5 ? "Reuse in a future Session." : "No future reuse.",
+            horizon: index < 5 ? "indefinite" : "session",
+            invalidationTriggers: [],
+            abstractionLevel: index < 5 ? "reusable_rule" : "task_observation",
+            observableFromWorkspace: index >= 5
+          },
+          importanceReasons: []
+        }))
+      }),
+      stderr: ""
+    })
+  });
+
+  await expect(adapter.distillBatch({
+    operationId: "raw-clause-limit",
+    scope: { kind: "project", projectId: "msproj-raw-clause-limit" },
+    evidence: [{
+      evidenceId: "source-evidence",
+      evidenceClass: "agent_summary",
+      content: "A long Session with many atomic observations.",
+      sourceIdentity: "codex:raw-clause-limit",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  })).resolves.toMatchObject({ candidates: { length: 70 } });
 });
 
 test("the Responses API output schema gives every const field an explicit JSON type", async () => {

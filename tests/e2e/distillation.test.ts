@@ -13,6 +13,7 @@ import {
   type LunaWorkerAdapter
 } from "../../src/worker/distillation.js";
 import { openRuntimeDatabase } from "../../src/runtime/database.js";
+import { inspectAdmissionAudit } from "../../src/admission/audit.js";
 import { makeLongTermCandidateDurability } from "../helpers/candidate-durability.js";
 
 const temporaryDirectories: string[] = [];
@@ -165,12 +166,133 @@ test("a long Session is distilled in batches and consolidated from structured re
   expect(consolidationInput).not.toContain("RAW-EVIDENCE");
   expect(consolidationInput).toContain("Batch statement");
   for (const eventId of eventIds) expect(consolidationInput).toContain(eventId);
+  const auditDatabase = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(auditDatabase.prepare(
+      `SELECT source_kind, prompt_version
+       FROM admission_audit
+       ORDER BY created_at, source_kind`
+    ).all()).toEqual([
+      { source_kind: "distillation", prompt_version: 5 },
+      { source_kind: "distillation", prompt_version: 5 },
+      { source_kind: "distillation", prompt_version: 5 },
+      { source_kind: "consolidation", prompt_version: 3 }
+    ]);
+  } finally {
+    auditDatabase.close();
+  }
   await expect(listSessionCandidates(runtimeRoot, "long-session")).resolves.toHaveLength(1);
   for (const eventId of eventIds) {
     await expect(inspectCaptureEventState(runtimeRoot, eventId)).resolves.toMatchObject({
       state: "completed"
     });
   }
+});
+
+test("the Worker admits durable clauses and isolates every rejected decision for Shadow review", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-admission-audit-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const projectId = "msproj_admission_audit";
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent_admission_audit",
+      deduplicationKey: "codex:admission-audit",
+      agent: "codex",
+      eventKind: "SessionEnd",
+      occurredAt: "2026-08-23T10:00:00.000Z",
+      projectId,
+      sessionId: "admission-audit-session",
+      payload: { text: "Mixed durable and transient evidence." }
+    }
+  });
+  const prepared = await prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 64,
+    preparedAt: "2026-08-23T10:00:01.000Z"
+  });
+  if (prepared.state !== "queued") throw new Error("Expected one queued admission Batch.");
+
+  const common = {
+    primaryCategory: "workflow_environment_toolchain" as const,
+    categoryTags: ["workflow_environment_toolchain" as const],
+    applicabilitySummary: "future project work",
+    conditions: [],
+    exclusions: [],
+    preservedNegations: [],
+    certainty: "asserted" as const,
+    sensitivity: "normal" as const,
+    evidenceIds: ["msevent_admission_audit"],
+    importanceTags: [],
+    importanceReasons: []
+  };
+  const sessionDurability = {
+    disposition: "session_only" as const,
+    futureReuseScenario: "No reuse beyond this Session.",
+    horizon: "session" as const,
+    invalidationTriggers: [],
+    abstractionLevel: "task_observation" as const,
+    observableFromWorkspace: true
+  };
+  const adapter: LunaWorkerAdapter = {
+    distillBatch() {
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: [
+          {
+            ...common,
+            statement: "Future releases require a clean typecheck.",
+            retentionDecision: "long_term",
+            durability: makeLongTermCandidateDurability()
+          },
+          {
+            ...common,
+            statement: "The typecheck completed at 10:00 today.",
+            retentionDecision: "no_memory",
+            durability: sessionDurability
+          },
+          {
+            ...common,
+            statement: "This one-off workaround may matter later.",
+            retentionDecision: "uncertain",
+            durability: sessionDurability
+          },
+          {
+            ...common,
+            statement: "The current branch is feature/admission.",
+            retentionDecision: "long_term",
+            durability: {
+              ...makeLongTermCandidateDurability(),
+              abstractionLevel: "task_observation"
+            }
+          }
+        ]
+      });
+    },
+    consolidateSession() {
+      throw new Error("A one-Batch Session must not consolidate.");
+    }
+  };
+
+  await expect(runNextLunaWork({
+    runtimeRoot,
+    workerId: "worker-admission-audit",
+    now: "2026-08-23T10:00:02.000Z",
+    adapter
+  })).resolves.toMatchObject({ state: "completed", operationId: prepared.operationId });
+
+  await expect(listSessionCandidates(runtimeRoot, "admission-audit-session"))
+    .resolves.toMatchObject([{ state: "waiting" }]);
+  await expect(inspectAdmissionAudit({ runtimeRoot, operationId: prepared.operationId }))
+    .resolves.toMatchObject([
+      { ordinal: 0, retentionDecision: "long_term", outcome: "admitted", reason: "long_term" },
+      { ordinal: 1, retentionDecision: "no_memory", outcome: "rejected", reason: "no_memory" },
+      { ordinal: 2, retentionDecision: "uncertain", outcome: "isolated", reason: "uncertain" },
+      { ordinal: 3, retentionDecision: "long_term", outcome: "rejected", reason: "task_observation" }
+    ]);
 });
 
 test("the Worker coalescing window waits briefly but SessionEnd flushes the whole Session", async () => {

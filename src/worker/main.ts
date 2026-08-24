@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Temporal } from "@js-temporal/polyfill";
 
+import { pruneExpiredAdmissionAudit } from "../admission/audit.js";
 import type { GovernanceAdapter } from "../governance/worker.js";
 import { runNextGovernanceStep } from "../governance/worker.js";
 import { scheduleDueGovernance } from "../governance/scheduling.js";
@@ -140,6 +141,7 @@ export async function runWorkerOnce(request: {
   const database = await openRuntimeDatabase(request.runtimeRoot);
   let paused = false;
   let scheduleExists = false;
+  let admissionPruningDue = false;
   let timeZone = "UTC";
   try {
     paused = database.prepare(
@@ -152,12 +154,26 @@ export async function runWorkerOnce(request: {
       "SELECT time_zone FROM governance_schedule WHERE singleton = 1"
     ).get();
     if (typeof schedule?.time_zone === "string") timeZone = schedule.time_zone;
+    const admissionMaintenance = database.prepare(
+      "SELECT next_prune_at FROM admission_audit_maintenance WHERE singleton = 1"
+    ).get();
+    admissionPruningDue = typeof admissionMaintenance?.next_prune_at === "string" &&
+      admissionMaintenance.next_prune_at <= now;
   } finally {
     database.close();
   }
   if (paused) return { state: "paused" };
 
   const activities: string[] = [];
+  if (admissionPruningDue) {
+    const pruned = await pruneExpiredAdmissionAudit({
+      runtimeRoot: request.runtimeRoot,
+      now
+    });
+    if (pruned.deletedCount > 0) {
+      activities.push(`admission-audit:pruned:${String(pruned.deletedCount)}`);
+    }
+  }
   let shouldRefreshReview = false;
   const emergencySpool = await importNextEmergencySpoolEvent({
     runtimeRoot: request.runtimeRoot,

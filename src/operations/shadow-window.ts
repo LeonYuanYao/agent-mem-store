@@ -5,6 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { parse } from "smol-toml";
 import { z } from "zod";
 
+import { summarizeAdmissionAudit } from "../admission/audit.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { approvedShadowEmbeddingProfile } from "../retrieval/shadow-profile.js";
 
@@ -753,6 +754,7 @@ export async function inspectOfficialShadowWindow(request: {
               userPromptStageTimings: readinessUserPromptStageTimings(database, startedAt),
               snapshotRetention: readinessSnapshotRetention(database),
               candidateDurability: readinessCandidateDurability(database, startedAt),
+              admissionAudit: summarizeAdmissionAudit(database, { startedAt, now }),
               knowledgeSamples: readinessKnowledgeSamples(database),
               retrievalSamples: readinessRetrievalSamples(database, startedAt)
             }

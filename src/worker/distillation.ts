@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
+import { admittedOutput, recordAdmissionAudit } from "../admission/audit.js";
 import { readCapturedEvent } from "../capture/index.js";
 import { createAgentCandidate } from "../candidates/index.js";
 import { recordHumanGlobalAuthorization } from "../candidates/human.js";
@@ -1031,6 +1032,16 @@ export async function runNextLunaWork(request: {
         evidence: batch.evidence
       });
       const completedAt = z.iso.datetime().parse(currentTime());
+      await recordAdmissionAudit({
+        runtimeRoot: request.runtimeRoot,
+        operationId: operation.operationId,
+        sourceKind: "distillation",
+        sourceId: payload.batchId,
+        candidates: output.candidates,
+        promptVersion: 5,
+        createdAt: completedAt
+      });
+      const admitted = admittedOutput(output);
       const database = await openRuntimeDatabase(request.runtimeRoot);
       try {
         database.exec("BEGIN IMMEDIATE");
@@ -1041,7 +1052,7 @@ export async function runNextLunaWork(request: {
                SET state = 'completed', result_json = ?, completed_at = ?
                WHERE batch_id = ?`
             )
-            .run(JSON.stringify(output), completedAt, payload.batchId);
+            .run(JSON.stringify(admitted), completedAt, payload.batchId);
           database
             .prepare(
               `UPDATE capture_events SET state = 'completed', updated_at = ?
@@ -1120,6 +1131,16 @@ export async function runNextLunaWork(request: {
         batchResults
       });
       const completedAt = z.iso.datetime().parse(currentTime());
+      await recordAdmissionAudit({
+        runtimeRoot: request.runtimeRoot,
+        operationId: operation.operationId,
+        sourceKind: "consolidation",
+        sourceId: payload.sessionId,
+        candidates: output.candidates,
+        promptVersion: 3,
+        createdAt: completedAt
+      });
+      const admitted = admittedOutput(output);
       const sessionEvidence = (
         await Promise.all(
           batchRows.map((row) =>
@@ -1134,7 +1155,7 @@ export async function runNextLunaWork(request: {
         runtimeRoot: request.runtimeRoot,
         sessionId: payload.sessionId,
         projectId: projectIds.size === 1 ? [...projectIds][0] ?? null : null,
-        output,
+        output: admitted,
         evidence: sessionEvidence.flatMap((item) => item.evidence),
         createdAt: completedAt
       });
@@ -1146,7 +1167,7 @@ export async function runNextLunaWork(request: {
             `UPDATE session_consolidations
              SET state = 'completed', result_json = ?, completed_at = ?
              WHERE operation_id = ?`
-          ).run(JSON.stringify(output), completedAt, operation.operationId);
+          ).run(JSON.stringify(admitted), completedAt, operation.operationId);
           updateDatabase.prepare(
             `INSERT INTO session_distillation_cursors(
                session_id, generation, through_batch_ordinal, updated_at
