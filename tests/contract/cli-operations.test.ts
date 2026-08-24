@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -7,6 +7,7 @@ import { afterEach, expect, test } from "vitest";
 
 import { LunaInvocationError } from "../../src/luna/index.js";
 import { initializeMemStore } from "../../src/operations/initialize.js";
+import { captureEvent } from "../../src/capture/index.js";
 import {
   enqueueCompactBackfill,
   runNextMemoryQualityStep,
@@ -107,6 +108,72 @@ test("Shadow status is reachable through the public CLI", async () => {
     schema_version: 1,
     ok: true,
     command: "shadow.report"
+  });
+}, 15_000);
+
+test("a reviewed source-first verification run is recorded through the public CLI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-cli-shadow-verification-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const inputPath = join(root, "verification.json");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent_cli_verification",
+      deduplicationKey: "codex:cli-verification",
+      agent: "codex",
+      eventKind: "UserPromptSubmit",
+      occurredAt: "2026-08-24T10:00:00.000Z",
+      projectId: "msproj_cli_verification",
+      sessionId: "cli-verification-session",
+      turnId: "turn-1",
+      payload: { text: "A durable rule was missed." }
+    }
+  });
+  await writeFile(inputPath, JSON.stringify({
+    reviewerKind: "human",
+    sourceWindow: {
+      startedAt: "2026-08-24T00:00:00.000Z",
+      endedAt: "2026-08-24T23:59:59.000Z"
+    },
+    sampleFrame: {
+      kind: "source_first_session_stratified",
+      strata: ["project", "session_length"],
+      perStratumCap: 2
+    },
+    units: [{
+      unitId: "cli-missed",
+      sourceRef: {
+        sessionId: "cli-verification-session",
+        turnIds: ["turn-1"],
+        evidenceIds: ["msevent_cli_verification"]
+      },
+      eligibleDurablePresent: true,
+      disposition: "missed_durable",
+      linkedMemoryIds: [],
+      note: "The durable rule has no matching Canonical Memory."
+    }]
+  }), "utf8");
+  const common = ["--runtime", runtimeRoot, "--vault", vaultRoot, "--json"];
+
+  await expect(cli([
+    "shadow", "verify", "--file", inputPath, "--preview", ...common
+  ])).resolves.toMatchObject({
+    command: "shadow.verify",
+    result: { state: "preview", dry_run: true, recall: 0 }
+  });
+  const recorded = await cli(["shadow", "verify", "--file", inputPath, ...common]);
+  expect(recorded).toMatchObject({
+    command: "shadow.verify",
+    result: { state: "recorded", recall: 0 }
+  });
+  const runId = String((recorded.result as { runId?: unknown }).runId);
+  await expect(cli(["shadow", "verification", runId, ...common])).resolves.toMatchObject({
+    command: "shadow.verification",
+    result: { runId, counts: { missed_durable: 1 }, recall: 0 }
   });
 }, 15_000);
 

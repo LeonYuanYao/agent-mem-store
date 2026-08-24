@@ -663,7 +663,7 @@ test("the adapter deterministically normalizes Luna primary category to category
   });
 });
 
-test("distillation instructs Luna to omit non-durable operational content", async () => {
+test("distillation separates durable candidates from explicitly considered rejections", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-durability-rules-"));
   temporaryDirectories.push(root);
   let structuredRequest: {
@@ -700,17 +700,202 @@ test("distillation instructs Luna to omit non-durable operational content", asyn
     }]
   });
 
-  expect(structuredRequest?.promptVersion).toBe(5);
+  expect(structuredRequest?.promptVersion).toBe(6);
   expect(structuredRequest?.rules).toEqual(expect.arrayContaining([
-    "Return no Candidate for operational probes or exact-response checks.",
-    "Return no Candidate for task-local instructions, temporary progress or state, or unverified future plans.",
-    "If evidence says content must not be retained, return no Candidate derived from that content.",
-    "Split mixed evidence into atomic clauses before classifying retention; emit one Candidate per clause and never attach a transient observation to a durable rule.",
+    "Return only long_term or project_phase clauses as Candidates.",
+    "Summarize only memory-shaped clauses that you explicitly considered and rejected; do not count unconsidered input or pure tool noise.",
+    "rejectionSummary is considered-rejection coverage only: it is non-exhaustive and must never be treated as recall evidence.",
+    "Use source_echo when a clause only restates supplied instructions, specifications, or prior memory without a newly learned conclusion, correction, or applicability fact.",
     "Project-specific knowledge is long_term when it is expected to remain useful across future sessions; use project_phase only when evidence explicitly binds it to a finite migration, feature, incident, experiment, or release phase. A possible future invalidation condition alone does not make knowledge project_phase."
+  ]));
+  expect(structuredRequest?.rules).not.toEqual(expect.arrayContaining([
+    "Set retentionDecision to long_term, project_phase, session_only, no_memory, or uncertain for every atomic clause; MemStore code derives lifecycle state from this field.",
+    "Return no more than 64 clauses whose retentionDecision is long_term or project_phase; rejected or uncertain atomic clauses may use the remaining raw output capacity."
   ]));
 });
 
-test("distillation exposes every atomic retention decision for downstream admission", async () => {
+test("distillation reports bounded considered rejections without treating them as recall", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-rejection-summary-"));
+  temporaryDirectories.push(root);
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: [],
+        rejectionSummary: {
+          schemaVersion: 1,
+          coverage: "considered_memory_shaped_rejections_only",
+          counts: {
+            no_memory: 0,
+            session_only: 1,
+            uncertain: 0,
+            source_echo: 0
+          },
+          samples: [{
+            reason: "session_only",
+            proposition: "The current typecheck completed successfully.",
+            evidenceIds: ["e1"]
+          }]
+        }
+      }),
+      stderr: ""
+    })
+  });
+
+  await expect(adapter.distillBatch({
+    operationId: "rejection-summary",
+    scope: { kind: "project", projectId: "msproj_123e4567-e89b-42d3-a456-426614174001" },
+    evidence: [{
+      evidenceId: "source-1",
+      evidenceClass: "command_outcome",
+      content: "The current typecheck completed successfully.",
+      sourceIdentity: "codex:rejection-summary",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  })).resolves.toMatchObject({
+    rejectionSummary: {
+      coverage: "considered_memory_shaped_rejections_only",
+      counts: { session_only: 1 },
+      samples: [{
+        reason: "session_only",
+        evidenceIds: ["source-1"]
+      }]
+    }
+  });
+});
+
+test("distillation deterministically bounds excess rejection samples without retrying Luna", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-rejection-overflow-"));
+  temporaryDirectories.push(root);
+  let invocationCount = 0;
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => {
+      invocationCount += 1;
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          kind: "distillation",
+          candidates: [],
+          rejectionSummary: {
+            schemaVersion: 1,
+            coverage: "considered_memory_shaped_rejections_only",
+            counts: { no_memory: 3, session_only: 0, uncertain: 0, source_echo: 0 },
+            samples: ["e1", "e2", "e3"].map((evidenceId, index) => ({
+              reason: "no_memory",
+              proposition: `Transient run result ${String(index + 1)}.`,
+              evidenceIds: [evidenceId]
+            }))
+          }
+        }),
+        stderr: ""
+      });
+    }
+  });
+
+  const output = await adapter.distillBatch({
+    operationId: "rejection-overflow",
+    scope: { kind: "project", projectId: "msproj_123e4567-e89b-42d3-a456-426614174001" },
+    evidence: [1, 2, 3].map((index) => ({
+      evidenceId: `source-${String(index)}`,
+      evidenceClass: "command_outcome" as const,
+      content: `Transient run result ${String(index)}.`,
+      sourceIdentity: `codex:rejection-overflow:${String(index)}`,
+      sourceTruncated: false,
+      memoryEcho: false
+    }))
+  });
+
+  expect(invocationCount).toBe(1);
+  expect(output.rejectionSummary?.counts.no_memory).toBe(3);
+  expect(output.rejectionSummary?.samples.map((sample) => sample.evidenceIds[0]))
+    .toEqual(["source-1", "source-2"]);
+});
+
+test("distillation drops an unbound diagnostic sample but rejects an unbound Candidate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-diagnostic-evidence-"));
+  temporaryDirectories.push(root);
+  const outputFor = (candidateEvidenceId: string) => ({
+    schemaVersion: 1,
+    kind: "distillation",
+    candidates: [{
+      statement: "Run typecheck before release.",
+      primaryCategory: "workflow_environment_toolchain",
+      categoryTags: ["workflow_environment_toolchain"],
+      applicabilitySummary: "Project releases",
+      conditions: [],
+      exclusions: [],
+      preservedNegations: [],
+      certainty: "asserted",
+      sensitivity: "normal",
+      evidenceIds: [candidateEvidenceId],
+      durability: makeLongTermCandidateDurability(),
+      importanceReasons: []
+    }],
+    rejectionSummary: {
+      schemaVersion: 1,
+      coverage: "considered_memory_shaped_rejections_only",
+      counts: { no_memory: 1, session_only: 0, uncertain: 0, source_echo: 0 },
+      samples: [{
+        reason: "no_memory",
+        proposition: "A transient result.",
+        evidenceIds: ["invented-summary-alias"]
+      }]
+    }
+  });
+  const request = {
+    operationId: "diagnostic-evidence",
+    scope: { kind: "project" as const, projectId: "msproj_test" },
+    evidence: [{
+      evidenceId: "source-1",
+      evidenceClass: "explicit_user_statement" as const,
+      content: "Run typecheck before release.",
+      sourceIdentity: "source-identity",
+      sourceTruncated: false,
+      memoryEcho: false
+    }]
+  };
+  const diagnosticAdapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: JSON.stringify(outputFor("e1")),
+      stderr: ""
+    })
+  });
+  const output = await diagnosticAdapter.distillBatch(request);
+  expect(output.candidates).toHaveLength(1);
+  expect(output.rejectionSummary?.counts.no_memory).toBe(1);
+  expect(output.rejectionSummary?.samples).toEqual([]);
+
+  const invalidCandidateAdapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: JSON.stringify(outputFor("invented-candidate-alias")),
+      stderr: ""
+    })
+  });
+  await expect(invalidCandidateAdapter.distillBatch(request)).rejects.toMatchObject({
+    category: "schema_invalid",
+    diagnostic: { stage: "evidence_binding", code: "unknown_evidence_alias" }
+  });
+});
+
+test("distillation rejects non-durable clauses returned as Candidates", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-atomic-admission-"));
   temporaryDirectories.push(root);
   const base = {
@@ -765,7 +950,7 @@ test("distillation exposes every atomic retention decision for downstream admiss
     })
   });
 
-  const output = await adapter.distillBatch({
+  await expect(adapter.distillBatch({
     operationId: "atomic-admission",
     scope: { kind: "global" },
     evidence: [{
@@ -776,18 +961,10 @@ test("distillation exposes every atomic retention decision for downstream admiss
       sourceTruncated: false,
       memoryEcho: false
     }]
-  });
-
-  expect(output.candidates).toHaveLength(2);
-  expect(output.candidates[0]?.statement).toBe("Run typecheck before every release.");
-  expect(output.candidates[0]?.retentionDecision).toBe("long_term");
-  expect(output.candidates[0]?.durability.disposition).toBe("long_term");
-  expect(output.candidates[1]?.statement).toBe("The current typecheck completed at 10:30.");
-  expect(output.candidates[1]?.retentionDecision).toBe("session_only");
-  expect(output.candidates[1]?.durability.disposition).toBe("session_only");
+  })).rejects.toMatchObject({ category: "schema_invalid" });
 });
 
-test("consolidation exposes rejected retention decisions for downstream admission", async () => {
+test("consolidation reports bounded dispositions while returning only durable Candidates", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-consolidation-admission-"));
   temporaryDirectories.push(root);
   const common = {
@@ -823,20 +1000,17 @@ test("consolidation exposes rejected retention decisions for downstream admissio
               abstractionLevel: "reusable_rule",
               observableFromWorkspace: false
             }
-          },
-          {
-            ...common,
-            statement: "The typecheck completed at 10:00 today.",
-            retentionDecision: "no_memory",
-            durability: {
-              futureReuseScenario: "Describe this run.",
-              horizon: "session",
-              invalidationTriggers: [],
-              abstractionLevel: "task_observation",
-              observableFromWorkspace: true
-            }
           }
-        ]
+        ],
+        consolidationSummary: {
+          schemaVersion: 1,
+          counts: { dedup: 0, source_echo: 1, downgrade: 0 },
+          samples: [{
+            action: "source_echo",
+            evidenceIds: ["e1"],
+            note: "The run result only repeats supplied operational evidence."
+          }]
+        }
       }),
       stderr: ""
     })
@@ -853,10 +1027,56 @@ test("consolidation exposes rejected retention decisions for downstream admissio
   });
 
   expect(output.candidates.map((candidate) => candidate.retentionDecision))
-    .toEqual(["long_term", "no_memory"]);
+    .toEqual(["long_term"]);
+  expect(output.consolidationSummary).toMatchObject({
+    counts: { source_echo: 1 },
+    samples: [{ action: "source_echo", evidenceIds: ["source-evidence"] }]
+  });
 });
 
-test("consolidation cannot upgrade project-phase evidence to long-term retention", async () => {
+test("consolidation deterministically bounds excess action samples", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-consolidation-overflow-"));
+  temporaryDirectories.push(root);
+  const adapter = new CodexLunaAdapter({
+    codexExecutable: "codex",
+    codexHome: join(root, "codex-home"),
+    temporaryRoot: root,
+    runProcess: () => Promise.resolve({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        kind: "consolidation",
+        candidates: [],
+        consolidationSummary: {
+          schemaVersion: 1,
+          counts: { dedup: 3, source_echo: 0, downgrade: 0 },
+          samples: ["e1", "e2", "e3"].map((evidenceId, index) => ({
+            action: "dedup",
+            evidenceIds: [evidenceId],
+            note: `Duplicate ${String(index + 1)} was removed.`
+          }))
+        }
+      }),
+      stderr: ""
+    })
+  });
+
+  const output = await adapter.consolidateSession({
+    operationId: "consolidation-overflow",
+    sessionId: "consolidation-overflow-session",
+    batchResults: [{
+      batchId: "batch-1",
+      candidates: [],
+      evidenceIds: ["source-1", "source-2", "source-3"]
+    }]
+  });
+
+  expect(output.consolidationSummary?.counts.dedup).toBe(3);
+  expect(output.consolidationSummary?.samples.map((sample) => sample.evidenceIds[0]))
+    .toEqual(["source-1", "source-2"]);
+});
+
+test("consolidation deterministically clamps a retention upgrade to its project-phase input", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-consolidation-upgrade-"));
   temporaryDirectories.push(root);
   const candidate = {
@@ -906,7 +1126,7 @@ test("consolidation cannot upgrade project-phase evidence to long-term retention
     })
   });
 
-  await expect(adapter.consolidateSession({
+  const output = await adapter.consolidateSession({
     operationId: "consolidation-upgrade",
     sessionId: "consolidation-upgrade-session",
     batchResults: [{
@@ -914,13 +1134,26 @@ test("consolidation cannot upgrade project-phase evidence to long-term retention
       candidates: [candidate],
       evidenceIds: ["source-evidence"]
     }]
-  })).rejects.toMatchObject({
-    category: "schema_invalid",
-    diagnostic: { stage: "retention_validation", code: "retention_upgrade" }
+  });
+  expect(output.candidates).toHaveLength(1);
+  expect(output.candidates[0]).toMatchObject({
+    retentionDecision: "project_phase",
+    durability: {
+      disposition: "project_phase",
+      horizon: "until_condition",
+      invalidationTriggers: ["Migration completed."]
+    }
+  });
+  expect(output.consolidationSummary).toMatchObject({
+    counts: { downgrade: 1 },
+    samples: [{
+      action: "downgrade",
+      evidenceIds: ["source-evidence"]
+    }]
   });
 });
 
-test("distillation accepts more than 64 raw clauses when admission can reduce them", async () => {
+test("distillation summarizes many rejected clauses without emitting them as Candidates", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-raw-clause-limit-"));
   temporaryDirectories.push(root);
   const adapter = new CodexLunaAdapter({
@@ -932,7 +1165,7 @@ test("distillation accepts more than 64 raw clauses when admission can reduce th
       stdout: JSON.stringify({
         schemaVersion: 1,
         kind: "distillation",
-        candidates: Array.from({ length: 70 }, (_, index) => ({
+        candidates: Array.from({ length: 5 }, (_, index) => ({
           statement: `Atomic clause ${String(index)}.`,
           primaryCategory: "durable_reference",
           categoryTags: ["durable_reference"],
@@ -943,16 +1176,22 @@ test("distillation accepts more than 64 raw clauses when admission can reduce th
           certainty: "asserted",
           sensitivity: "normal",
           evidenceIds: ["e1"],
-          retentionDecision: index < 5 ? "long_term" : "no_memory",
+          retentionDecision: "long_term",
           durability: {
-            futureReuseScenario: index < 5 ? "Reuse in a future Session." : "No future reuse.",
-            horizon: index < 5 ? "indefinite" : "session",
+            futureReuseScenario: "Reuse in a future Session.",
+            horizon: "indefinite",
             invalidationTriggers: [],
-            abstractionLevel: index < 5 ? "reusable_rule" : "task_observation",
-            observableFromWorkspace: index >= 5
+            abstractionLevel: "reusable_rule",
+            observableFromWorkspace: false
           },
           importanceReasons: []
-        }))
+        })),
+        rejectionSummary: {
+          schemaVersion: 1,
+          coverage: "considered_memory_shaped_rejections_only",
+          counts: { no_memory: 65, session_only: 0, uncertain: 0, source_echo: 0 },
+          samples: []
+        }
       }),
       stderr: ""
     })
@@ -969,7 +1208,10 @@ test("distillation accepts more than 64 raw clauses when admission can reduce th
       sourceTruncated: false,
       memoryEcho: false
     }]
-  })).resolves.toMatchObject({ candidates: { length: 70 } });
+  })).resolves.toMatchObject({
+    candidates: { length: 5 },
+    rejectionSummary: { counts: { no_memory: 65 } }
+  });
 });
 
 test("the Responses API output schema gives every const field an explicit JSON type", async () => {
@@ -1305,8 +1547,17 @@ test("consolidation and semantic assessment use distinct versioned structured ta
   });
 
   expect(requests).toHaveLength(3);
-  expect(requests[0]?.standardInput).toContain('"promptVersion":5');
+  expect(requests[0]?.standardInput).toContain('"promptVersion":6');
   expect(requests[0]?.standardInput).toContain('"task":"consolidate_session_candidates"');
+  expect(requests[0]?.standardInput).toContain(
+    "return only long_term or project_phase clauses as Candidates"
+  );
+  expect(requests[0]?.standardInput).toContain(
+    "Report dedup, source_echo, and downgrade dispositions only in consolidationSummary"
+  );
+  expect(requests[0]?.standardInput).not.toContain(
+    "rejected or uncertain atomic clauses may use the remaining raw output capacity"
+  );
   expect(requests[0]?.timeoutMilliseconds).toBe(300_000);
   expect(requests[1]?.standardInput).toContain('"promptVersion":3');
   expect(requests[1]?.standardInput).toContain('"task":"assess_candidate_semantics"');
@@ -1434,7 +1685,16 @@ test("large consolidation stays below the Codex input limit and preserves exact 
             evidenceIds: [evidenceAlias],
             durability: makeLongTermCandidateDurability(),
             importanceReasons: []
-          }]
+          }],
+          consolidationSummary: {
+            schemaVersion: 1,
+            counts: { dedup: 1, source_echo: 0, downgrade: 0 },
+            samples: evidenceAlias === undefined ? [] : [{
+              action: "dedup",
+              evidenceIds: [evidenceAlias],
+              note: "A duplicate was removed at this consolidation level."
+            }]
+          }
         }),
         stderr: ""
       });
@@ -1472,6 +1732,11 @@ test("large consolidation stays below the Codex input limit and preserves exact 
   expect(processInputLengths.length).toBeGreaterThan(1);
   expect(Math.max(...processInputLengths)).toBeLessThanOrEqual(1_048_576);
   expect(originalEvidenceIds).toContain(output.candidates[0]?.evidenceIds[0]);
+  expect(output.consolidationSummary?.counts.dedup).toBe(processInputLengths.length);
+  expect(output.consolidationSummary?.samples).toHaveLength(2);
+  expect(output.consolidationSummary?.samples.every((sample) =>
+    originalEvidenceIds.includes(sample.evidenceIds[0] ?? "")
+  )).toBe(true);
 });
 
 test("distillation uses short evidence aliases and reports safe schema diagnostics", async () => {

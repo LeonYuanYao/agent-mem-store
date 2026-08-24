@@ -173,10 +173,10 @@ test("a long Session is distilled in batches and consolidated from structured re
        FROM admission_audit
        ORDER BY created_at, source_kind`
     ).all()).toEqual([
-      { source_kind: "distillation", prompt_version: 5 },
-      { source_kind: "distillation", prompt_version: 5 },
-      { source_kind: "distillation", prompt_version: 5 },
-      { source_kind: "consolidation", prompt_version: 3 }
+      { source_kind: "distillation", prompt_version: 6 },
+      { source_kind: "distillation", prompt_version: 6 },
+      { source_kind: "distillation", prompt_version: 6 },
+      { source_kind: "consolidation", prompt_version: 6 }
     ]);
   } finally {
     auditDatabase.close();
@@ -189,7 +189,7 @@ test("a long Session is distilled in batches and consolidated from structured re
   }
 });
 
-test("the Worker admits durable clauses and isolates every rejected decision for Shadow review", async () => {
+test("the Worker persists considered rejections without inserting them into admission audit", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-admission-audit-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -228,14 +228,6 @@ test("the Worker admits durable clauses and isolates every rejected decision for
     importanceTags: [],
     importanceReasons: []
   };
-  const sessionDurability = {
-    disposition: "session_only" as const,
-    futureReuseScenario: "No reuse beyond this Session.",
-    horizon: "session" as const,
-    invalidationTriggers: [],
-    abstractionLevel: "task_observation" as const,
-    observableFromWorkspace: true
-  };
   const adapter: LunaWorkerAdapter = {
     distillBatch() {
       return Promise.resolve({
@@ -247,29 +239,18 @@ test("the Worker admits durable clauses and isolates every rejected decision for
             statement: "Future releases require a clean typecheck.",
             retentionDecision: "long_term",
             durability: makeLongTermCandidateDurability()
-          },
-          {
-            ...common,
-            statement: "The typecheck completed at 10:00 today.",
-            retentionDecision: "no_memory",
-            durability: sessionDurability
-          },
-          {
-            ...common,
-            statement: "This one-off workaround may matter later.",
-            retentionDecision: "uncertain",
-            durability: sessionDurability
-          },
-          {
-            ...common,
-            statement: "The current branch is feature/admission.",
-            retentionDecision: "long_term",
-            durability: {
-              ...makeLongTermCandidateDurability(),
-              abstractionLevel: "task_observation"
-            }
           }
-        ]
+        ],
+        rejectionSummary: {
+          schemaVersion: 1,
+          coverage: "considered_memory_shaped_rejections_only",
+          counts: { no_memory: 1, session_only: 1, uncertain: 1, source_echo: 0 },
+          samples: [{
+            reason: "no_memory",
+            proposition: "The typecheck completed at 10:00 today.",
+            evidenceIds: ["msevent_admission_audit"]
+          }]
+        }
       });
     },
     consolidateSession() {
@@ -288,11 +269,22 @@ test("the Worker admits durable clauses and isolates every rejected decision for
     .resolves.toMatchObject([{ state: "waiting" }]);
   await expect(inspectAdmissionAudit({ runtimeRoot, operationId: prepared.operationId }))
     .resolves.toMatchObject([
-      { ordinal: 0, retentionDecision: "long_term", outcome: "admitted", reason: "long_term" },
-      { ordinal: 1, retentionDecision: "no_memory", outcome: "rejected", reason: "no_memory" },
-      { ordinal: 2, retentionDecision: "uncertain", outcome: "isolated", reason: "uncertain" },
-      { ordinal: 3, retentionDecision: "long_term", outcome: "rejected", reason: "task_observation" }
+      { ordinal: 0, retentionDecision: "long_term", outcome: "admitted", reason: "long_term" }
     ]);
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    const row = database.prepare(
+      "SELECT result_json FROM distillation_batches WHERE batch_id = ?"
+    ).get(prepared.batchId);
+    expect(JSON.parse(String(row?.result_json))).toMatchObject({
+      rejectionSummary: {
+        coverage: "considered_memory_shaped_rejections_only",
+        counts: { no_memory: 1, session_only: 1, uncertain: 1, source_echo: 0 }
+      }
+    });
+  } finally {
+    database.close();
+  }
 });
 
 test("the Worker coalescing window waits briefly but SessionEnd flushes the whole Session", async () => {

@@ -1,29 +1,25 @@
 ---
-status: accepted
+status: superseded
 ---
 
 # Audit rejected Admission decisions with bounded retention
 
-Shadow validation must measure both over-retention and mistaken rejection.
-Filtering `no_memory`, `session_only`, `uncertain`, or task-observation clauses
-before any auditable persistence makes false negatives invisible even when the
-Candidate and promotion paths correctly expose over-retention.
+This decision was based on an incorrect assumption: a model could expose every
+atomic clause it failed to retain and thereby make false negatives observable.
+The model cannot count durable information that it never recognized. Recording
+only its own emitted decisions creates a model-selected denominator and cannot
+measure recall.
 
-The Worker therefore records every bounded atomic Admission decision in
-Machine-local Runtime Data before applying the deterministic Candidate gate.
-The record includes the operation and source identity, ordinal, exact
-`retentionDecision`, abstraction level, admitted/rejected/isolated outcome,
-bounded model-derived statement, evidence identities, policy version, and the
-actual distillation or consolidation prompt version. It is never written to the
-Memory Vault, indexed, injected, or exposed through normal recall. A local
-sensitivity check removes both the statement and its content hash when it is not
-Normal.
+Existing `admission_audit` rows remain useful for admitted Candidate tier,
+precision, and prompt-version diagnostics. They are not relabeled as recall
+evidence. New production output records bounded considered-rejection and
+consolidation summaries in existing Batch result JSON.
 
-Admission Audit rows expire after 14 calendar days. The Worker performs at most
-one scheduled pruning write per day and catches up after downtime. Ordinary
-Batch and consolidation results persist only admitted clauses, so rejected
-statements do not survive by being copied into long-lived `result_json`.
+Admission Audit rows retain their existing 14-day lifecycle. Rejection summaries
+store at most two bounded samples per reason and explicitly state that their
+coverage is non-exhaustive. They are never written to the Memory Vault, indexed,
+injected, or exposed through normal recall.
 
-The Shadow Readiness Report aggregates decision and reason counts, redaction
-counts, and bounded rejected/isolated samples. The audit is diagnostic evidence,
-not a Candidate queue, second memory store, or automatic repair input.
+Independent source-first review is required to measure missed durable knowledge.
+See [ADR-0109](./0109-separate-considered-rejection-telemetry-from-source-first-recall.md),
+which supersedes this decision.

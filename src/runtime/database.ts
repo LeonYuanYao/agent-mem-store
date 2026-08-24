@@ -244,6 +244,11 @@ const migrations: readonly Migration[] = [
     version: 47,
     name: "redact_admission_audit_hashes",
     path: new URL("../../migrations/0047-redact-admission-audit-hashes.sql", import.meta.url)
+  },
+  {
+    version: 48,
+    name: "knowledge_verification_runs",
+    path: new URL("../../migrations/0048-knowledge-verification-runs.sql", import.meta.url)
   }
 ];
 

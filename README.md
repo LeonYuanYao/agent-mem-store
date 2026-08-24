@@ -4,8 +4,8 @@ MemStore is a program/data-separated long-term memory system for coding agents.
 The program lives in this repository; Canonical Memory lives in a user-selected
 Obsidian Vault; machine execution state lives under an explicit runtime root.
 
-Current milestone: Gate 5 Shadow hardening after the approved Engineering MVP
-and managed installation reviews. Repository code supports an installed Shadow,
+Current milestone: Gate 6 readiness review after the approved Engineering MVP,
+managed installation, and seven-day Shadow observation. Repository code supports an installed Shadow,
 but this document does not assert the state of any particular machine; use
 `memstore status`, `memstore doctor --deep`, and `memstore shadow status` for
 live read-only inspection.
@@ -78,7 +78,16 @@ pnpm exec tsx src/cli/main.ts runtime backup \
 
 pnpm exec tsx src/cli/main.ts portability readiness \
   --vault /path/to/test-vault --runtime /path/to/test-runtime --json
+
+pnpm exec tsx src/cli/main.ts shadow verify \
+  --file /path/to/human-reviewed-source-first-verification.json \
+  --vault /path/to/test-vault --runtime /path/to/test-runtime \
+  --preview --json
 ```
+
+`shadow verify` validates a source-first review against exact Capture Event and
+active Memory identities. Removing `--preview` records the reviewed result in
+machine-local Runtime Data; it never creates or changes Durable Memory.
 
 Existing managed installations can preview a narrowly scoped upgrade before
 applying it. The current upgrade adds only a missing owned `memstore` CLI and

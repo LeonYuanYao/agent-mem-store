@@ -6,6 +6,7 @@ import { parse } from "smol-toml";
 import { z } from "zod";
 
 import { summarizeAdmissionAudit } from "../admission/audit.js";
+import { summarizeKnowledgeVerificationRuns } from "./knowledge-verification.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { approvedShadowEmbeddingProfile } from "../retrieval/shadow-profile.js";
 
@@ -244,6 +245,138 @@ function readinessCandidateDurability(
         ? "project_phase"
         : "session_only"
     }))
+  };
+}
+
+const readinessRejectionSummarySchema = z.object({
+  coverage: z.literal("considered_memory_shaped_rejections_only"),
+  counts: z.object({
+    no_memory: z.number().int().nonnegative(),
+    session_only: z.number().int().nonnegative(),
+    uncertain: z.number().int().nonnegative(),
+    source_echo: z.number().int().nonnegative()
+  }),
+  samples: z.array(z.object({
+    reason: z.enum(["no_memory", "session_only", "uncertain", "source_echo"]),
+    proposition: z.string(),
+    evidenceIds: z.array(z.string())
+  })).optional().default([])
+});
+
+const readinessConsolidationSummarySchema = z.object({
+  counts: z.object({
+    dedup: z.number().int().nonnegative(),
+    source_echo: z.number().int().nonnegative(),
+    downgrade: z.number().int().nonnegative()
+  }),
+  samples: z.array(z.object({
+    action: z.enum(["dedup", "source_echo", "downgrade"]),
+    evidenceIds: z.array(z.string()),
+    note: z.string()
+  })).optional().default([])
+});
+
+function readinessModelDispositions(
+  database: DatabaseSync,
+  startedAt: string
+): Record<string, unknown> {
+  const distillationRows = database.prepare(
+    `SELECT batch_id, result_json
+     FROM distillation_batches
+     WHERE state = 'completed' AND result_json IS NOT NULL
+       AND COALESCE(completed_at, created_at) >= ?
+     ORDER BY batch_id`
+  ).all(startedAt);
+  const distillationCounts = {
+    no_memory: 0,
+    session_only: 0,
+    uncertain: 0,
+    source_echo: 0
+  };
+  const rejectionSamples: Record<string, Record<string, unknown>[]> = Object.fromEntries(
+    Object.keys(distillationCounts).map((reason) => [reason, []])
+  );
+  let distillationOperationCount = 0;
+  for (const row of distillationRows) {
+    try {
+      const result = z.looseObject({
+        rejectionSummary: readinessRejectionSummarySchema.optional()
+      }).parse(JSON.parse(z.string().parse(row.result_json)));
+      if (result.rejectionSummary === undefined) continue;
+      distillationOperationCount += 1;
+      for (const reason of Object.keys(distillationCounts) as Array<keyof typeof distillationCounts>) {
+        distillationCounts[reason] += result.rejectionSummary.counts[reason];
+      }
+      for (const sample of result.rejectionSummary.samples) {
+        const target = rejectionSamples[sample.reason];
+        if (target !== undefined && target.length < 2) {
+          target.push({
+            batchId: z.string().parse(row.batch_id),
+            reason: sample.reason,
+            proposition: reviewText(sample.proposition),
+            evidenceIds: sample.evidenceIds.slice(0, 4)
+          });
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  const consolidationRows = database.prepare(
+    `SELECT session_id, result_json
+     FROM session_consolidations
+     WHERE state = 'completed' AND result_json IS NOT NULL
+       AND COALESCE(completed_at, created_at) >= ?
+     ORDER BY session_id`
+  ).all(startedAt);
+  const consolidationCounts = { dedup: 0, source_echo: 0, downgrade: 0 };
+  const consolidationSamples: Record<string, Record<string, unknown>[]> = Object.fromEntries(
+    Object.keys(consolidationCounts).map((action) => [action, []])
+  );
+  let consolidationOperationCount = 0;
+  for (const row of consolidationRows) {
+    try {
+      const result = z.looseObject({
+        consolidationSummary: readinessConsolidationSummarySchema.optional()
+      }).parse(JSON.parse(z.string().parse(row.result_json)));
+      if (result.consolidationSummary === undefined) continue;
+      consolidationOperationCount += 1;
+      for (
+        const action of Object.keys(consolidationCounts) as Array<keyof typeof consolidationCounts>
+      ) {
+        consolidationCounts[action] += result.consolidationSummary.counts[action];
+      }
+      for (const sample of result.consolidationSummary.samples) {
+        const target = consolidationSamples[sample.action];
+        if (target !== undefined && target.length < 2) {
+          target.push({
+            sessionId: z.string().parse(row.session_id),
+            action: sample.action,
+            note: reviewText(sample.note),
+            evidenceIds: sample.evidenceIds.slice(0, 4)
+          });
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return {
+    distillation: {
+      operationCount: distillationOperationCount,
+      legacyWithoutSummaryCount: distillationRows.length - distillationOperationCount,
+      coverage: "considered_memory_shaped_rejections_only",
+      counts: distillationCounts,
+      samples: rejectionSamples
+    },
+    consolidation: {
+      operationCount: consolidationOperationCount,
+      legacyWithoutSummaryCount: consolidationRows.length - consolidationOperationCount,
+      counts: consolidationCounts,
+      samples: consolidationSamples
+    }
   };
 }
 
@@ -755,6 +888,8 @@ export async function inspectOfficialShadowWindow(request: {
               snapshotRetention: readinessSnapshotRetention(database),
               candidateDurability: readinessCandidateDurability(database, startedAt),
               admissionAudit: summarizeAdmissionAudit(database, { startedAt, now }),
+              modelDispositions: readinessModelDispositions(database, startedAt),
+              knowledgeVerification: summarizeKnowledgeVerificationRuns(database, startedAt),
               knowledgeSamples: readinessKnowledgeSamples(database),
               retrievalSamples: readinessRetrievalSamples(database, startedAt)
             }

@@ -5,33 +5,37 @@ status: accepted
 # Derive Admission lifecycle from atomic clauses
 
 Luna must split mixed evidence into atomic clauses before retention
-classification. Each clause receives exactly one `retentionDecision`:
-`long_term`, `project_phase`, `session_only`, `no_memory`, or `uncertain`.
-It cannot preserve a transient observation by attaching it to a reusable rule.
+classification. It cannot preserve a transient observation by attaching it to
+a reusable rule.
 
 Luna owns semantic classification; MemStore code owns deterministic enforcement.
-The adapter returns every bounded atomic decision so the Worker can audit the
-decision before admitting only `long_term` and `project_phase` clauses that are
-not task observations. `no_memory`, `session_only`, and task-observation clauses
-do not enter Candidate creation. `uncertain` remains explicitly isolated outside
-normal recall and cannot become long-term merely because a later model call is
-optimistic. Consolidation cannot make a cited input less restrictive than its
-strictest supplied retention decision. Exact Candidate
-fingerprints map deterministically to the executable novelty operations:
-new identity is `insert`; an existing exact identity is `update(alias)`.
-Non-memory clauses are omitted and ambiguous clauses remain uncertain. Broader
-semantic merge or revision remains governed by reviewed duplicate evidence.
+The distillation adapter returns full Candidate objects only for `long_term` and
+`project_phase` clauses. It summarizes clauses that the model explicitly
+considered and rejected in a bounded `rejectionSummary`; that summary is
+diagnostic data and cannot enter Candidate creation. Pure tool noise and input
+that the model did not recognize as memory-shaped may be omitted without a
+count. The summary therefore measures the model's considered rejection
+distribution, not recall or complete input coverage.
 
-Raw distillation and consolidation output permits at most 128 atomic clauses so
-a long Session containing many rejected observations does not lose a smaller set
-of durable clauses. No more than 64 admitted clauses may enter Candidate
-creation; overflow is a visible retryable retention-validation failure rather
-than silent truncation.
+Consolidation receives only admitted durable Candidates. It may deduplicate,
+identify a source echo, or downgrade a clause, but it cannot upgrade
+`project_phase` to `long_term` or reconstruct a rejected clause. These actions
+are recorded in a bounded `consolidationSummary`. Exact Candidate fingerprints
+map deterministically to the executable novelty operations: a new identity is
+`insert`; an existing exact identity is `update(alias)`. Broader semantic merge
+or revision remains governed by reviewed duplicate evidence.
+
+Raw distillation and consolidation output permits at most 128 durable Candidate
+objects. No more than 64 admitted clauses may enter Candidate creation;
+overflow is a visible retryable retention-validation failure rather than silent
+truncation. Rejected-clause counts do not consume this Candidate allowance, and
+each rejection or consolidation action retains at most two bounded samples.
 
 Exact run identifiers, timestamps, backup paths, current branch state,
 completed-action inventories, operational probes, and exact-response checks are
 `no_memory` by default unless a separate atomic clause establishes a durable
 recovery contract.
 
-See [ADR-0108](./0108-audit-rejected-admission-decisions-with-bounded-retention.md)
-for bounded Shadow observability of accepted, rejected, and uncertain clauses.
+See [ADR-0109](./0109-separate-considered-rejection-telemetry-from-source-first-recall.md)
+for the separation between production diagnostics and independent recall
+verification.

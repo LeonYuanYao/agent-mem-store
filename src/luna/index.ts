@@ -25,6 +25,245 @@ import type { DuplicateClusterInput } from "../quality/duplicates.js";
 const compactTokenizer = getEncoding("o200k_base");
 const compactHardTokenLimit = 96;
 const maximumRawAdmissionClauses = 128;
+const maximumRejectionSamplesPerReason = 2;
+
+const rejectionReasonSchema = z.enum([
+  "no_memory",
+  "session_only",
+  "uncertain",
+  "source_echo"
+]);
+
+const emptyRejectionSummary = () => ({
+  schemaVersion: 1 as const,
+  coverage: "considered_memory_shaped_rejections_only" as const,
+  counts: {
+    no_memory: 0,
+    session_only: 0,
+    uncertain: 0,
+    source_echo: 0
+  },
+  samples: []
+});
+
+const rejectionSummaryWireSchema = z.object({
+  schemaVersion: z.literal(1),
+  coverage: z.literal("considered_memory_shaped_rejections_only"),
+  counts: z.object({
+    no_memory: z.number().int().nonnegative(),
+    session_only: z.number().int().nonnegative(),
+    uncertain: z.number().int().nonnegative(),
+    source_echo: z.number().int().nonnegative()
+  }),
+  samples: z.array(z.object({
+    reason: rejectionReasonSchema,
+    proposition: z.string().min(1).max(240),
+    evidenceIds: z.array(z.string().min(1)).min(1).max(4)
+  })).max(rejectionReasonSchema.options.length * maximumRejectionSamplesPerReason)
+});
+
+const rejectionSummarySchema = rejectionSummaryWireSchema.superRefine((summary, context) => {
+  for (const reason of rejectionReasonSchema.options) {
+    const sampleCount = summary.samples.filter((sample) => sample.reason === reason).length;
+    if (sampleCount > maximumRejectionSamplesPerReason) {
+      context.addIssue({
+        code: "custom",
+        message: `At most ${String(maximumRejectionSamplesPerReason)} samples are allowed per rejection reason.`,
+        path: ["samples"]
+      });
+    }
+    if (summary.counts[reason] < sampleCount) {
+      context.addIssue({
+        code: "custom",
+        message: "A rejection sample must be included in its reason count.",
+        path: ["counts", reason]
+      });
+    }
+  }
+});
+
+function normalizeRejectionSummary(
+  summary: z.infer<typeof rejectionSummaryWireSchema>
+): z.infer<typeof rejectionSummarySchema> {
+  return rejectionSummarySchema.parse({
+    ...summary,
+    counts: Object.fromEntries(rejectionReasonSchema.options.map((reason) => [
+      reason,
+      Math.max(
+        summary.counts[reason],
+        summary.samples.filter((sample) => sample.reason === reason).length
+      )
+    ])),
+    samples: rejectionReasonSchema.options.flatMap((reason) =>
+      summary.samples
+        .filter((sample) => sample.reason === reason)
+        .slice(0, maximumRejectionSamplesPerReason)
+    )
+  });
+}
+
+const rejectionSummaryJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "coverage", "counts", "samples"],
+  properties: {
+    schemaVersion: { type: "integer", const: 1 },
+    coverage: {
+      type: "string",
+      const: "considered_memory_shaped_rejections_only"
+    },
+    counts: {
+      type: "object",
+      additionalProperties: false,
+      required: rejectionReasonSchema.options,
+      properties: Object.fromEntries(
+        rejectionReasonSchema.options.map((reason) => [reason, {
+          type: "integer",
+          minimum: 0
+        }])
+      )
+    },
+    samples: {
+      type: "array",
+      maxItems: rejectionReasonSchema.options.length * maximumRejectionSamplesPerReason,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["reason", "proposition", "evidenceIds"],
+        properties: {
+          reason: { type: "string", enum: rejectionReasonSchema.options },
+          proposition: { type: "string", minLength: 1, maxLength: 240 },
+          evidenceIds: {
+            type: "array",
+            minItems: 1,
+            maxItems: 4,
+            items: { type: "string", minLength: 1 }
+          }
+        }
+      }
+    }
+  }
+} as const;
+
+const consolidationActionSchema = z.enum(["dedup", "source_echo", "downgrade"]);
+
+const emptyConsolidationSummary = () => ({
+  schemaVersion: 1 as const,
+  counts: { dedup: 0, source_echo: 0, downgrade: 0 },
+  samples: []
+});
+
+const consolidationSummaryWireSchema = z.object({
+  schemaVersion: z.literal(1),
+  counts: z.object({
+    dedup: z.number().int().nonnegative(),
+    source_echo: z.number().int().nonnegative(),
+    downgrade: z.number().int().nonnegative()
+  }),
+  samples: z.array(z.object({
+    action: consolidationActionSchema,
+    evidenceIds: z.array(z.string().min(1)).min(1).max(4),
+    note: z.string().min(1).max(240)
+  })).max(consolidationActionSchema.options.length * maximumRejectionSamplesPerReason)
+});
+
+const consolidationSummarySchema = consolidationSummaryWireSchema.superRefine((summary, context) => {
+  for (const action of consolidationActionSchema.options) {
+    const sampleCount = summary.samples.filter((sample) => sample.action === action).length;
+    if (sampleCount > maximumRejectionSamplesPerReason) {
+      context.addIssue({
+        code: "custom",
+        message: `At most ${String(maximumRejectionSamplesPerReason)} samples are allowed per consolidation action.`,
+        path: ["samples"]
+      });
+    }
+    if (summary.counts[action] < sampleCount) {
+      context.addIssue({
+        code: "custom",
+        message: "A consolidation sample must be included in its action count.",
+        path: ["counts", action]
+      });
+    }
+  }
+});
+
+function normalizeConsolidationSummary(
+  summary: z.infer<typeof consolidationSummaryWireSchema>
+): z.infer<typeof consolidationSummarySchema> {
+  return consolidationSummarySchema.parse({
+    ...summary,
+    counts: Object.fromEntries(consolidationActionSchema.options.map((action) => [
+      action,
+      Math.max(
+        summary.counts[action],
+        summary.samples.filter((sample) => sample.action === action).length
+      )
+    ])),
+    samples: consolidationActionSchema.options.flatMap((action) =>
+      summary.samples
+        .filter((sample) => sample.action === action)
+        .slice(0, maximumRejectionSamplesPerReason)
+    )
+  });
+}
+
+function mergeConsolidationSummaries(
+  summaries: ReadonlyArray<z.infer<typeof consolidationSummarySchema> | undefined>
+): z.infer<typeof consolidationSummarySchema> {
+  const present = summaries.map((summary) => summary ?? emptyConsolidationSummary());
+  return consolidationSummarySchema.parse({
+    schemaVersion: 1,
+    counts: Object.fromEntries(consolidationActionSchema.options.map((action) => [
+      action,
+      present.reduce((total, summary) => total + summary.counts[action], 0)
+    ])),
+    samples: consolidationActionSchema.options.flatMap((action) =>
+      present
+        .flatMap((summary) => summary.samples)
+        .filter((sample) => sample.action === action)
+        .slice(0, maximumRejectionSamplesPerReason)
+    )
+  });
+}
+
+const consolidationSummaryJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "counts", "samples"],
+  properties: {
+    schemaVersion: { type: "integer", const: 1 },
+    counts: {
+      type: "object",
+      additionalProperties: false,
+      required: consolidationActionSchema.options,
+      properties: Object.fromEntries(
+        consolidationActionSchema.options.map((action) => [action, {
+          type: "integer",
+          minimum: 0
+        }])
+      )
+    },
+    samples: {
+      type: "array",
+      maxItems: consolidationActionSchema.options.length * maximumRejectionSamplesPerReason,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["action", "evidenceIds", "note"],
+        properties: {
+          action: { type: "string", enum: consolidationActionSchema.options },
+          evidenceIds: {
+            type: "array",
+            minItems: 1,
+            maxItems: 4,
+            items: { type: "string", minLength: 1 }
+          },
+          note: { type: "string", minLength: 1, maxLength: 240 }
+        }
+      }
+    }
+  }
+} as const;
 
 const importanceTagSchema = z.enum([
   "user_decision",
@@ -106,16 +345,31 @@ const distilledCandidateSchema = z.object({
   importanceTags: candidate.importanceReasons.map((item) => item.tag)
 }));
 
+const durableCandidateOutputSchema = distilledCandidateSchema.refine(
+  (candidate) =>
+    candidate.retentionDecision === "long_term" ||
+    candidate.retentionDecision === "project_phase",
+  {
+    message: "Candidate output is limited to long_term or project_phase clauses.",
+    path: ["retentionDecision"]
+  }
+);
+
 const distillationOutputSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal("distillation"),
-  candidates: z.array(distilledCandidateSchema).max(maximumRawAdmissionClauses)
+  candidates: z.array(durableCandidateOutputSchema).max(maximumRawAdmissionClauses),
+  rejectionSummary: rejectionSummarySchema.optional().default(emptyRejectionSummary)
+});
+
+const distillationWireOutputSchema = distillationOutputSchema.safeExtend({
+  rejectionSummary: rejectionSummaryWireSchema.optional().default(emptyRejectionSummary)
 });
 
 const distillationOutputJsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["schemaVersion", "kind", "candidates"],
+  required: ["schemaVersion", "kind", "candidates", "rejectionSummary"],
   properties: {
     schemaVersion: { type: "integer", const: 1 },
     kind: { type: "string", const: "distillation" },
@@ -179,7 +433,7 @@ const distillationOutputJsonSchema = {
           },
           retentionDecision: {
             type: "string",
-            enum: ["long_term", "project_phase", "session_only", "no_memory", "uncertain"]
+            enum: ["long_term", "project_phase"]
           },
           durability: {
             type: "object",
@@ -234,24 +488,33 @@ const distillationOutputJsonSchema = {
           }
         }
       }
-    }
+    },
+    rejectionSummary: rejectionSummaryJsonSchema
   }
 } as const;
 
 const consolidationOutputSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal("consolidation"),
-  candidates: z.array(distilledCandidateSchema).max(maximumRawAdmissionClauses)
+  candidates: z.array(durableCandidateOutputSchema).max(maximumRawAdmissionClauses),
+  consolidationSummary: consolidationSummarySchema.optional().default(emptyConsolidationSummary)
+});
+
+const consolidationWireOutputSchema = consolidationOutputSchema.safeExtend({
+  consolidationSummary: consolidationSummaryWireSchema
+    .optional()
+    .default(emptyConsolidationSummary)
 });
 
 const consolidationOutputJsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["schemaVersion", "kind", "candidates"],
+  required: ["schemaVersion", "kind", "candidates", "consolidationSummary"],
   properties: {
     schemaVersion: { type: "integer", const: 1 },
     kind: { type: "string", const: "consolidation" },
-    candidates: distillationOutputJsonSchema.properties.candidates
+    candidates: distillationOutputJsonSchema.properties.candidates,
+    consolidationSummary: consolidationSummaryJsonSchema
   }
 } as const;
 
@@ -449,11 +712,13 @@ export interface DistillationOutput {
   readonly schemaVersion: 1;
   readonly kind: "distillation";
   readonly candidates: readonly DistilledCandidate[];
+  readonly rejectionSummary?: z.infer<typeof rejectionSummarySchema>;
 }
 export interface ConsolidationOutput {
   readonly schemaVersion: 1;
   readonly kind: "consolidation";
   readonly candidates: readonly DistilledCandidate[];
+  readonly consolidationSummary?: z.infer<typeof consolidationSummarySchema>;
 }
 export type SemanticAssessmentOutput = z.infer<typeof semanticAssessmentOutputSchema>;
 export type ConflictAssessmentOutput = z.infer<typeof conflictAssessmentOutputSchema>;
@@ -738,22 +1003,22 @@ export class CodexLunaAdapter {
       distillationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 5,
+        promptVersion: 6,
         task: "distill_memory_candidates",
         rules: [
           "Use only supplied evidence.",
           "Preserve scope, certainty, conditions, exclusions, and negations.",
-          "Return no Candidate for operational probes or exact-response checks.",
-          "Return no Candidate for task-local instructions, temporary progress or state, or unverified future plans.",
-          "If evidence says content must not be retained, return no Candidate derived from that content.",
-          "Split mixed evidence into atomic clauses before classifying retention; emit one Candidate per clause and never attach a transient observation to a durable rule.",
-          "Set retentionDecision to long_term, project_phase, session_only, no_memory, or uncertain for every atomic clause; MemStore code derives lifecycle state from this field.",
-          "Return no more than 64 clauses whose retentionDecision is long_term or project_phase; rejected or uncertain atomic clauses may use the remaining raw output capacity.",
+          "Split mixed evidence into atomic clauses before classifying retention and never attach a transient observation to a durable rule.",
+          "Return only long_term or project_phase clauses as Candidates.",
+          "Summarize only memory-shaped clauses that you explicitly considered and rejected; do not count unconsidered input or pure tool noise.",
+          "rejectionSummary is considered-rejection coverage only: it is non-exhaustive and must never be treated as recall evidence.",
           "Use no_memory for exact run IDs, timestamps, backup paths, current branch state, completed action inventories, operational probes, and exact-response checks unless the clause independently states a durable recovery contract.",
+          "Use session_only for task-local instructions, temporary progress or state, and facts directly rediscoverable from the current workspace unless the clause states a stable reusable rule or costly non-obvious project fact.",
+          "Use uncertain when the supplied evidence does not justify a durable conclusion.",
+          "Use source_echo when a clause only restates supplied instructions, specifications, or prior memory without a newly learned conclusion, correction, or applicability fact.",
           "Classify every retained clause independently and explain one concrete future reuse scenario.",
-          "Use long_term for knowledge expected to remain useful beyond the current task, including project-specific knowledge reused across future sessions; use session_only for task observations or current state.",
+          "Use long_term for knowledge expected to remain useful beyond the current task, including project-specific knowledge reused across future sessions.",
           "Project-specific knowledge is long_term when it is expected to remain useful across future sessions; use project_phase only when evidence explicitly binds it to a finite migration, feature, incident, experiment, or release phase. A possible future invalidation condition alone does not make knowledge project_phase.",
-          "A fact that can be rediscovered directly from the current workspace is session_only unless the Candidate expresses a stable reusable rule or a costly non-obvious project fact.",
           memoryCategoryPromptInstruction,
           "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Cite evidenceIds for every candidate.",
@@ -768,16 +1033,16 @@ export class CodexLunaAdapter {
           }))
         }
       },
-      distillationOutputSchema
+      distillationWireOutputSchema
     );
     const originalEvidenceIds = new Set(request.evidence.map((item) => item.evidenceId));
+    const resolveEvidence = (value: string): string | undefined =>
+      evidenceIdByAlias.get(value) ?? (originalEvidenceIds.has(value) ? value : undefined);
     const restore = (value: string): string => {
-      const evidenceId = evidenceIdByAlias.get(value) ?? (
-        originalEvidenceIds.has(value) ? value : undefined
-      );
+      const evidenceId = resolveEvidence(value);
       if (evidenceId === undefined) {
         throw new LunaInvocationError(
-          "input_too_large",
+          "schema_invalid",
           true,
           "Luna structured output cites unavailable evidence.",
           { stage: "evidence_binding", code: "unknown_evidence_alias" }
@@ -794,7 +1059,17 @@ export class CodexLunaAdapter {
           ...reason,
           evidenceIds: reason.evidenceIds.map(restore)
         }))
-      }))
+      })),
+      rejectionSummary: normalizeRejectionSummary({
+        ...aliasedOutput.rejectionSummary,
+        samples: aliasedOutput.rejectionSummary.samples.flatMap((sample) => {
+          const evidenceIds = sample.evidenceIds.flatMap((value) => {
+            const evidenceId = resolveEvidence(value);
+            return evidenceId === undefined ? [] : [evidenceId];
+          });
+          return evidenceIds.length === 0 ? [] : [{ ...sample, evidenceIds }];
+        })
+      })
     });
     requireKnownEvidenceIds(
       output.candidates.flatMap((candidate) => candidate.evidenceIds),
@@ -804,6 +1079,11 @@ export class CodexLunaAdapter {
     requireValidImportanceReasons(
       output.candidates,
       request.evidence.map((item) => item.evidenceId)
+    );
+    requireKnownEvidenceIds(
+      output.rejectionSummary.samples.flatMap((sample) => sample.evidenceIds),
+      request.evidence.map((item) => item.evidenceId),
+      false
     );
     return output;
   }
@@ -1035,11 +1315,13 @@ export class CodexLunaAdapter {
         );
       }
       const partialResults: Array<ConsolidateSessionRequest["batchResults"][number]> = [];
+      const partialSummaries: Array<ConsolidationOutput["consolidationSummary"]> = [];
       for (const [index, group] of groups.entries()) {
         const output = await this.#consolidateSession(
           { ...request, batchResults: group },
           level + 1
         );
+        partialSummaries.push(output.consolidationSummary);
         partialResults.push({
           batchId: `${request.operationId}:level-${String(level)}:part-${String(index)}`,
           candidates: output.candidates,
@@ -1049,10 +1331,17 @@ export class CodexLunaAdapter {
           ]))]
         });
       }
-      return this.#consolidateSession(
+      const finalOutput = await this.#consolidateSession(
         { ...request, batchResults: partialResults },
         level + 1
       );
+      return {
+        ...finalOutput,
+        consolidationSummary: mergeConsolidationSummaries([
+          ...partialSummaries,
+          finalOutput.consolidationSummary
+        ])
+      };
     }
     const availableEvidenceIds = [
       ...new Set(request.batchResults.flatMap((batch) => batch.evidenceIds))
@@ -1095,15 +1384,16 @@ export class CodexLunaAdapter {
       consolidationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 5,
+        promptVersion: 6,
         task: "consolidate_session_candidates",
         rules: [
           "Use only structured Batch results and their evidence identities.",
-          "Omit operational probes, exact-response checks, task-local instructions, temporary progress or state, and unverified future plans.",
-          "If a structured candidate says content must not be retained, omit it from the consolidation result.",
-          "Keep input clauses atomic; never combine a transient observation with a durable clause.",
-          "Preserve the strictest supplied retentionDecision; never upgrade project_phase, session_only, no_memory, or uncertain to long_term without explicit supplied evidence.",
-          "Return no more than 64 clauses whose retentionDecision is long_term or project_phase; rejected or uncertain atomic clauses may use the remaining raw output capacity.",
+          "Input Candidates have already passed Batch admission; do not reconstruct omitted or rejected clauses.",
+          "Keep input clauses atomic and return only long_term or project_phase clauses as Candidates.",
+          "Preserve the strictest supplied retentionDecision and never upgrade project_phase to long_term.",
+          "Report dedup, source_echo, and downgrade dispositions only in consolidationSummary; do not return disposed clauses as Candidates.",
+          "Count only dispositions you explicitly made, keep at most two samples per action, and cite exact supplied evidence aliases for every sample.",
+          "Use source_echo when a clause only repeats supplied instructions, specifications, or prior memory without a newly learned conclusion, correction, or applicability fact.",
           "Project-specific knowledge is long_term when it is expected to remain useful across future sessions; use project_phase only when evidence explicitly binds it to a finite migration, feature, incident, experiment, or release phase. A possible future invalidation condition alone does not make knowledge project_phase.",
           "Evidence identities are short aliases. Copy only exact supplied aliases.",
           "Do not infer from raw transcripts or execute commands.",
@@ -1114,11 +1404,13 @@ export class CodexLunaAdapter {
         ],
         request: aliasedRequest
       },
-      consolidationOutputSchema,
+      consolidationWireOutputSchema,
       300_000
     );
+    const resolveEvidence = (evidenceAlias: string): string | undefined =>
+      evidenceIdByAlias.get(evidenceAlias);
     const restore = (evidenceAlias: string): string => {
-      const evidenceId = evidenceIdByAlias.get(evidenceAlias);
+      const evidenceId = resolveEvidence(evidenceAlias);
       if (evidenceId === undefined) {
         throw new LunaInvocationError(
           "schema_invalid",
@@ -1129,7 +1421,7 @@ export class CodexLunaAdapter {
       }
       return evidenceId;
     };
-    const output = consolidationOutputSchema.parse({
+    const modelOutput = consolidationOutputSchema.parse({
       ...aliasedOutput,
       candidates: aliasedOutput.candidates.map((candidate) => ({
         ...candidate,
@@ -1138,7 +1430,29 @@ export class CodexLunaAdapter {
           ...reason,
           evidenceIds: reason.evidenceIds.map(restore)
         }))
-      }))
+      })),
+      consolidationSummary: normalizeConsolidationSummary({
+        ...aliasedOutput.consolidationSummary,
+        samples: aliasedOutput.consolidationSummary.samples.flatMap((sample) => {
+          const evidenceIds = sample.evidenceIds.flatMap((value) => {
+            const evidenceId = resolveEvidence(value);
+            return evidenceId === undefined ? [] : [evidenceId];
+          });
+          return evidenceIds.length === 0 ? [] : [{ ...sample, evidenceIds }];
+        })
+      })
+    });
+    const retentionClamped = clampRetentionUpgrades(
+      modelOutput.candidates,
+      request.batchResults
+    );
+    const output = consolidationOutputSchema.parse({
+      ...modelOutput,
+      candidates: retentionClamped.candidates,
+      consolidationSummary: mergeConsolidationSummaries([
+        modelOutput.consolidationSummary,
+        retentionClamped.summary
+      ])
     });
     requireKnownEvidenceIds(
       output.candidates.flatMap((candidate) => candidate.evidenceIds),
@@ -1149,7 +1463,11 @@ export class CodexLunaAdapter {
       output.candidates,
       availableEvidenceIds
     );
-    requireNoRetentionUpgrade(output.candidates, request.batchResults);
+    requireKnownEvidenceIds(
+      output.consolidationSummary.samples.flatMap((sample) => sample.evidenceIds),
+      availableEvidenceIds,
+      false
+    );
     return output;
   }
 
@@ -1501,11 +1819,17 @@ const retentionStrictness = {
   no_memory: 4
 } as const;
 
-function requireNoRetentionUpgrade(
+function clampRetentionUpgrades(
   outputCandidates: readonly DistilledCandidate[],
   batchResults: ConsolidateSessionRequest["batchResults"]
-): void {
+): {
+  readonly candidates: readonly DistilledCandidate[];
+  readonly summary: z.infer<typeof consolidationSummarySchema>;
+} {
   const inputCandidates = batchResults.flatMap((batch) => batch.candidates);
+  const candidates: DistilledCandidate[] = [];
+  const samples: Array<z.infer<typeof consolidationSummaryWireSchema>["samples"][number]> = [];
+  let downgradeCount = 0;
   for (const output of outputCandidates) {
     const outputEvidence = new Set([
       ...output.evidenceIds,
@@ -1531,12 +1855,36 @@ function requireNoRetentionUpgrade(
       retentionStrictness[retentionDecisionOf(output)] <
         retentionStrictness[retentionDecisionOf(strictestInput)]
     ) {
-      throw new LunaInvocationError(
-        "schema_invalid",
-        true,
-        "Luna consolidation cannot upgrade the retention decision of cited input evidence.",
-        { stage: "retention_validation", code: "retention_upgrade" }
-      );
+      downgradeCount += 1;
+      if (samples.length < maximumRejectionSamplesPerReason) {
+        samples.push({
+          action: "downgrade",
+          evidenceIds: [...outputEvidence].slice(0, 4),
+          note: "MemStore clamped the Candidate to the strictest cited input retention."
+        });
+      }
+      const strictestDecision = retentionDecisionOf(strictestInput);
+      if (strictestDecision !== "long_term" && strictestDecision !== "project_phase") {
+        continue;
+      }
+      candidates.push({
+        ...output,
+        retentionDecision: strictestDecision,
+        durability: {
+          ...strictestInput.durability,
+          disposition: strictestDecision
+        }
+      });
+      continue;
     }
+    candidates.push(output);
   }
+  return {
+    candidates,
+    summary: consolidationSummarySchema.parse({
+      schemaVersion: 1,
+      counts: { dedup: 0, source_echo: 0, downgrade: downgradeCount },
+      samples
+    })
+  };
 }

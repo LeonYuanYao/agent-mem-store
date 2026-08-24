@@ -19,6 +19,11 @@ import {
   inspectOfficialShadowWindow,
   startOfficialShadowWindow
 } from "../operations/shadow-window.js";
+import {
+  inspectKnowledgeVerificationRun,
+  parseKnowledgeVerificationInput,
+  recordKnowledgeVerificationRun
+} from "../operations/knowledge-verification.js";
 import { inspectDoctor, retryOperation } from "../operations/maintenance.js";
 import {
   archiveOperationalMemories,
@@ -482,6 +487,36 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
         json: parsed.values.json
       };
     }
+    if (action === "verify") {
+      const input = parseKnowledgeVerificationInput(await readJsonFile(parsed.values.file));
+      return {
+        command: "shadow.verify",
+        result: await recordKnowledgeVerificationRun({
+          runtimeRoot: location.runtimeRoot,
+          ...input,
+          createdAt: now,
+          preview: parsed.values.preview
+        }),
+        json: parsed.values.json
+      };
+    }
+    if (action === "verification") {
+      const runId = parsed.positionals[2];
+      if (runId === undefined) {
+        throw new MemStoreCommandError(
+          "verification_run_required",
+          "shadow verification requires a Verification Run identity."
+        );
+      }
+      return {
+        command: "shadow.verification",
+        result: await inspectKnowledgeVerificationRun({
+          runtimeRoot: location.runtimeRoot,
+          runId
+        }),
+        json: parsed.values.json
+      };
+    }
     if (action === "start") {
       if (parsed.values["probe-event"] === undefined) {
         throw new MemStoreCommandError(
@@ -504,7 +539,7 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
     }
     throw new MemStoreCommandError(
       "unknown_command",
-      "Use shadow start, shadow status, or shadow report."
+      "Use shadow start, shadow status, shadow report, shadow verify, or shadow verification."
     );
   }
   if (command === "purge") {

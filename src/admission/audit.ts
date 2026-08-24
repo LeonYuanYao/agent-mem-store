@@ -13,7 +13,7 @@ import { openRuntimeDatabase } from "../runtime/database.js";
 
 export const admissionAuditRetentionMilliseconds = 14 * 24 * 60 * 60 * 1_000;
 export const admissionAuditPruneIntervalMilliseconds = 24 * 60 * 60 * 1_000;
-const admissionPolicyVersion = "atomic-admission-v1";
+const admissionPolicyVersion = "durable-candidate-admission-v2";
 const maximumAdmittedCandidates = 64;
 
 export type AdmissionRetentionDecision =
@@ -276,6 +276,7 @@ export function summarizeAdmissionAudit(
     uncertain: 0,
     task_observation: 0
   };
+  const admittedTiers = { long_term: 0, project_phase: 0 };
   let redactedCount = 0;
   const parsed = rows.map((row) => {
     const outcome = z.enum(["admitted", "rejected", "isolated"]).parse(row.outcome);
@@ -289,6 +290,9 @@ export function summarizeAdmissionAudit(
     outcomes[outcome] += 1;
     decisions[decision] += 1;
     reasons[reason] += 1;
+    if (outcome === "admitted" && (decision === "long_term" || decision === "project_phase")) {
+      admittedTiers[decision] += 1;
+    }
     if (row.statement_redacted === 1) redactedCount += 1;
     return {
       admissionId: z.string().parse(row.admission_id),
@@ -307,6 +311,7 @@ export function summarizeAdmissionAudit(
     totalCount: parsed.length,
     outcomes,
     decisions,
+    admittedTiers,
     reasons,
     redactedCount,
     rejectedSamples: parsed.filter((item) => item.outcome === "rejected").slice(0, 10),

@@ -1038,7 +1038,7 @@ export async function runNextLunaWork(request: {
         sourceKind: "distillation",
         sourceId: payload.batchId,
         candidates: output.candidates,
-        promptVersion: 5,
+        promptVersion: 6,
         createdAt: completedAt
       });
       const admitted = admittedOutput(output);
@@ -1137,7 +1137,7 @@ export async function runNextLunaWork(request: {
         sourceKind: "consolidation",
         sourceId: payload.sessionId,
         candidates: output.candidates,
-        promptVersion: 3,
+        promptVersion: 6,
         createdAt: completedAt
       });
       const admitted = admittedOutput(output);

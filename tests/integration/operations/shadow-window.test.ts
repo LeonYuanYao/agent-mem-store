@@ -326,6 +326,69 @@ test("an official Shadow window requires a completed real-Hook probe and records
     promptVersion: 5,
     createdAt: "2026-08-10T04:00:01.000Z"
   });
+  const consolidationOperation = await enqueueLunaOperation({
+    runtimeRoot,
+    kind: "consolidate_session",
+    idempotencyKey: "shadow-consolidation-fixture",
+    payload: { sessionId: "shadow-admission-session" },
+    createdAt: "2026-08-10T04:00:02.000Z"
+  });
+  const dispositionFixture = await openRuntimeDatabase(runtimeRoot);
+  try {
+    dispositionFixture.prepare(
+      `INSERT INTO distillation_batches(
+         batch_id, session_id, project_id, batch_ordinal, state,
+         operation_id, result_json, created_at, completed_at
+       ) VALUES (?, ?, NULL, 0, 'completed', ?, ?, ?, ?)`
+    ).run(
+      "shadow-admission-batch",
+      "shadow-admission-session",
+      admissionOperation.operationId,
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: [],
+        rejectionSummary: {
+          schemaVersion: 1,
+          coverage: "considered_memory_shaped_rejections_only",
+          counts: { no_memory: 2, session_only: 1, uncertain: 1, source_echo: 3 },
+          samples: [{
+            reason: "source_echo",
+            proposition: "A supplied specification was repeated without a new conclusion.",
+            evidenceIds: ["shadow-admission-evidence"]
+          }]
+        }
+      }),
+      "2026-08-10T04:00:00.000Z",
+      "2026-08-10T04:00:01.000Z"
+    );
+    dispositionFixture.prepare(
+      `INSERT INTO session_consolidations(
+         session_id, operation_id, state, result_json, created_at, completed_at
+       ) VALUES (?, ?, 'completed', ?, ?, ?)`
+    ).run(
+      "shadow-admission-session",
+      consolidationOperation.operationId,
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "consolidation",
+        candidates: [],
+        consolidationSummary: {
+          schemaVersion: 1,
+          counts: { dedup: 2, source_echo: 1, downgrade: 1 },
+          samples: [{
+            action: "dedup",
+            evidenceIds: ["shadow-admission-evidence"],
+            note: "Equivalent candidates were represented once."
+          }]
+        }
+      }),
+      "2026-08-10T04:00:02.000Z",
+      "2026-08-10T04:00:03.000Z"
+    );
+  } finally {
+    dispositionFixture.close();
+  }
   await expect(inspectOfficialShadowWindow({
     runtimeRoot,
     repositoryRoot,
@@ -393,7 +456,7 @@ test("an official Shadow window requires a completed real-Hook probe and records
         ]
       },
       admissionAudit: {
-        policyVersion: "atomic-admission-v1",
+        policyVersion: "durable-candidate-admission-v2",
         retentionDays: 14,
         totalCount: 3,
         outcomes: {
@@ -417,6 +480,10 @@ test("an official Shadow window requires a completed real-Hook probe and records
           task_observation: 0
         },
         redactedCount: 0,
+        admittedTiers: {
+          long_term: 1,
+          project_phase: 0
+        },
         rejectedSamples: [
           expect.objectContaining({
             retentionDecision: "no_memory",
@@ -431,6 +498,21 @@ test("an official Shadow window requires a completed real-Hook probe and records
             statement: "A one-off finding may be durable."
           })
         ]
+      },
+      modelDispositions: {
+        distillation: {
+          operationCount: 1,
+          coverage: "considered_memory_shaped_rejections_only",
+          counts: { no_memory: 2, session_only: 1, uncertain: 1, source_echo: 3 }
+        },
+        consolidation: {
+          operationCount: 1,
+          counts: { dedup: 2, source_echo: 1, downgrade: 1 }
+        }
+      },
+      knowledgeVerification: {
+        runCount: 0,
+        latest: null
       },
       knowledgeSamples: {
         architecture_contract: [
