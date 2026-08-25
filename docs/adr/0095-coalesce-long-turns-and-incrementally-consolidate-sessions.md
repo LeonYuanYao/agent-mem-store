@@ -15,6 +15,11 @@ Batch ranges after the stored cursor. Existing completed ranges are discovered
 by the background Worker. A one-Batch episode that was already ingested
 directly advances the same cursor so it is not sent to Luna again.
 
+When a host never delivers `SessionEnd`, two hours without new Session activity
+creates an idempotent body-free synthetic `SessionEnd`. This is an incremental
+checkpoint rather than a claim that the source thread can never resume; later
+events enter a new Batch range and consolidation generation.
+
 Session consolidations have priority over ordinary distillation operations in
 their shared Worker lane. This priority is bounded because a consolidation can
 exist only after its source Batches complete; it prevents a closed long Session

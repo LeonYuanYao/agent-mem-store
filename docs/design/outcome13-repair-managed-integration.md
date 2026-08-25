@@ -47,8 +47,10 @@ independent addition and is never rewritten. Upgrade does not change Codex
 configuration, Hooks, Vault data, Runtime data, or Worker process state.
 
 Worker hardening adds a 30-second coalescing window for ordinary capture events,
-immediate SessionEnd flush, and a body-free SessionEnd catch-up only after 24
-hours of inactivity. Candidate evaluation is automatically scheduled, while
+immediate SessionEnd flush, and a body-free SessionEnd catch-up after two hours
+of inactivity. The two-hour boundary matches abandoned-Turn sealing, keeps an
+actively changing long task open, and lets paused or resumable Sessions finalize
+durable Batch ranges without waiting a full day. Candidate evaluation is automatically scheduled, while
 retention, anomaly evaluation, and six-month Candidate Tombstone cleanup run
 once after each completed weekly governance window with a durable completion
 marker. `status` and `doctor` expose a stale Candidate pipeline rather than

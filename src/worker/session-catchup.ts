@@ -4,6 +4,8 @@ import { z } from "zod";
 import { captureEvent } from "../capture/index.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 
+export const abandonedSessionInactivityMilliseconds = 2 * 60 * 60 * 1_000;
+
 export type CaptureAbandonedSessionEndResult =
   | { readonly state: "empty" }
   | {
@@ -28,12 +30,18 @@ export async function captureAbandonedSessionEnd(request: {
   try {
     row = database.prepare(
       `WITH inactive_sessions AS (
-         SELECT session_id, MAX(occurred_at) AS last_event_at
+         SELECT session_id, MAX(occurred_at) AS last_event_at,
+                MAX(CASE WHEN event_kind = 'SessionEnd' THEN occurred_at END)
+                  AS last_session_end_at
          FROM capture_events
          WHERE session_id IS NOT NULL
          GROUP BY session_id
-         HAVING MAX(CASE WHEN event_kind = 'SessionEnd' THEN 1 ELSE 0 END) = 0
-            AND MAX(occurred_at) <= ?
+         HAVING MAX(occurred_at) <= ?
+            AND (
+              MAX(CASE WHEN event_kind = 'SessionEnd' THEN occurred_at END) IS NULL
+              OR MAX(CASE WHEN event_kind = 'SessionEnd' THEN occurred_at END) <
+                 MAX(occurred_at)
+            )
        )
        SELECT inactive.session_id, inactive.last_event_at,
               capture.event_id AS last_event_id, capture.project_id
@@ -41,6 +49,7 @@ export async function captureAbandonedSessionEnd(request: {
        JOIN capture_events AS capture
          ON capture.session_id = inactive.session_id
         AND capture.occurred_at = inactive.last_event_at
+        AND capture.event_kind <> 'SessionEnd'
        ORDER BY inactive.last_event_at ASC, capture.created_at DESC
        LIMIT 1`
     ).get(inactiveBefore);

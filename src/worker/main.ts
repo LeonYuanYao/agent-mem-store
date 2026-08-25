@@ -40,7 +40,10 @@ import {
   runNextLunaWork,
   type LunaWorkerAdapter
 } from "./distillation.js";
-import { captureAbandonedSessionEnd } from "./session-catchup.js";
+import {
+  abandonedSessionInactivityMilliseconds,
+  captureAbandonedSessionEnd
+} from "./session-catchup.js";
 import { runNextCandidateMaintenance } from "./candidate-maintenance.js";
 import {
   advanceCompactQualityDiscovery,
@@ -199,7 +202,7 @@ export async function runWorkerOnce(request: {
   const sessionCatchUp = await captureAbandonedSessionEnd({
     runtimeRoot: request.runtimeRoot,
     now,
-    inactivityMilliseconds: 24 * 60 * 60 * 1_000
+    inactivityMilliseconds: abandonedSessionInactivityMilliseconds
   });
   if (sessionCatchUp.state !== "empty") {
     activities.push("session-end:catch-up");

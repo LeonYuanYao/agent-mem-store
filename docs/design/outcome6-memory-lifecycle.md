@@ -102,9 +102,10 @@ authorize Outcome 7, installation, a real Vault write, or global integration.
 - Discovery of the bounded existing-Memory set to assess across a large corpus
   needs the Outcome 7 retrieval index. Given that set, Outcome 6 durably runs the
   conflict assessment and enforces isolation and explicit resolution.
-- A Session without a captured `SessionEnd` retains durable Batch results but
-  does not finalize them into Candidates yet. Missed-run and abandoned-Session
-  catch-up belongs to scheduled governance in Outcome 9.
+- A Session without a captured `SessionEnd` retains durable Batch results. The
+  installed Worker now creates an idempotent body-free checkpoint after two
+  hours without new Session activity, allowing incremental consolidation and
+  preserving later resume generations.
 - Explicit Human replacement spans two CAS-protected Canonical writes. A failure
   between predecessor archival and successor creation is visible and retryable,
   but it is not a cross-file atomic transaction. The later durable command path

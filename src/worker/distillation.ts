@@ -10,6 +10,7 @@ import {
   type DistillBatchRequest,
   type ConsolidateSessionRequest,
   type ConsolidationOutput,
+  type DistilledCandidate,
   type DistillationOutput,
   type LunaEvidence
 } from "../luna/index.js";
@@ -27,6 +28,52 @@ export interface LunaWorkerAdapter {
   consolidateSession(
     request: ConsolidateSessionRequest
   ): Promise<ConsolidationOutput>;
+}
+
+function candidateEvidenceIds(candidate: DistilledCandidate): readonly string[] {
+  return [...new Set([
+    ...candidate.evidenceIds,
+    ...candidate.importanceReasons.flatMap((reason) => reason.evidenceIds)
+  ])];
+}
+
+function preserveUnrepresentedExplicitUserCandidates(request: {
+  readonly batchResults: ConsolidateSessionRequest["batchResults"];
+  readonly output: ConsolidationOutput;
+  readonly evidence: readonly LunaEvidence[];
+}): ConsolidationOutput {
+  const explicitUserEvidenceIds = new Set(
+    request.evidence
+      .filter((item) => item.evidenceClass === "explicit_user_statement")
+      .map((item) => item.evidenceId)
+  );
+  if (explicitUserEvidenceIds.size === 0) return request.output;
+
+  const coveredEvidenceIds = new Set(
+    request.output.candidates.flatMap(candidateEvidenceIds)
+  );
+  const representedStatements = new Set(
+    request.output.candidates.map((candidate) => candidate.statement.trim())
+  );
+  const restored: DistilledCandidate[] = [];
+  for (const candidate of request.batchResults.flatMap((batch) => batch.candidates)) {
+    const evidenceIds = candidateEvidenceIds(candidate);
+    if (!evidenceIds.some((evidenceId) => explicitUserEvidenceIds.has(evidenceId))) continue;
+    if (
+      representedStatements.has(candidate.statement.trim()) ||
+      evidenceIds.some((evidenceId) => coveredEvidenceIds.has(evidenceId))
+    ) {
+      continue;
+    }
+    restored.push(candidate);
+    representedStatements.add(candidate.statement.trim());
+    for (const evidenceId of evidenceIds) coveredEvidenceIds.add(evidenceId);
+  }
+  if (restored.length === 0) return request.output;
+  return {
+    ...request.output,
+    candidates: [...request.output.candidates, ...restored]
+  };
 }
 
 export type PrepareDistillationBatchResult =
@@ -1125,12 +1172,25 @@ export async function runNextLunaWork(request: {
           ]))]
         };
       });
-      const output = await request.adapter.consolidateSession({
+      const batchResultsRequest = {
         operationId: operation.operationId,
         sessionId: payload.sessionId,
         batchResults
-      });
+      } satisfies ConsolidateSessionRequest;
+      const modelOutput = await request.adapter.consolidateSession(batchResultsRequest);
       const completedAt = z.iso.datetime().parse(currentTime());
+      const sessionEvidence = (
+        await Promise.all(
+          batchRows.map((row) =>
+            loadBatchEvidence(request.runtimeRoot, z.string().parse(row.batch_id))
+          )
+        )
+      );
+      const output = preserveUnrepresentedExplicitUserCandidates({
+        batchResults: batchResultsRequest.batchResults,
+        output: modelOutput,
+        evidence: sessionEvidence.flatMap((item) => item.evidence)
+      });
       await recordAdmissionAudit({
         runtimeRoot: request.runtimeRoot,
         operationId: operation.operationId,
@@ -1141,13 +1201,6 @@ export async function runNextLunaWork(request: {
         createdAt: completedAt
       });
       const admitted = admittedOutput(output);
-      const sessionEvidence = (
-        await Promise.all(
-          batchRows.map((row) =>
-            loadBatchEvidence(request.runtimeRoot, z.string().parse(row.batch_id))
-          )
-        )
-      );
       const projectIds = new Set(
         sessionEvidence.flatMap((item) => item.projectId === null ? [] : [item.projectId])
       );

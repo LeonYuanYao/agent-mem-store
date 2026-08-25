@@ -30,6 +30,12 @@ restore rejected clauses. A bounded `consolidationSummary` records counts and at
 most two evidence-linked samples for each action. Recursive consolidation merges
 the counts from every level and retains the same bounded sample cap.
 
+An explicit-user-backed durable input omitted without any represented evidence
+is not accepted as a consolidation rejection: the Worker restores that original
+Candidate locally. This coverage fallback applies only to Candidates already
+admitted by distillation and therefore does not reconstruct `no_memory`,
+`session_only`, `uncertain`, or source material that Luna never proposed.
+
 Recall is measured by a separate Knowledge Verification Run. Its sampling frame
 starts from Source Sessions, without using emitted Candidates as the source of
 the sample. Sessions are selected across declared strata such as Project,

@@ -127,7 +127,9 @@ test("a long Session is distilled in batches and consolidated from structured re
             preservedNegations: [],
             certainty: "asserted",
             sensitivity: "normal",
-            evidenceIds: [request.batchResults[0]?.evidenceIds[0] ?? "missing-evidence"],
+            evidenceIds: [...new Set(
+              request.batchResults.flatMap((batch) => batch.evidenceIds)
+            )],
             durability: makeLongTermCandidateDurability(),
             importanceTags: ["constraint"],
             importanceReasons: [{
@@ -186,6 +188,119 @@ test("a long Session is distilled in batches and consolidated from structured re
     await expect(inspectCaptureEventState(runtimeRoot, eventId)).resolves.toMatchObject({
       state: "completed"
     });
+  }
+});
+
+test("Session consolidation cannot silently discard an explicit-user durable Candidate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-consolidation-authority-coverage-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const projectId = "msproj_consolidation_authority";
+  const sessionId = "consolidation-authority-session";
+  const events = [
+    {
+      eventId: "msevent_consolidation_authority_user",
+      eventKind: "UserPromptSubmit" as const,
+      turnId: "consolidation-authority-turn",
+      payload: { prompt: "MemStore must use main as its ongoing maintenance branch." }
+    },
+    {
+      eventId: "msevent_consolidation_authority_tool",
+      eventKind: "PostToolUse" as const,
+      turnId: "consolidation-authority-turn",
+      payload: { output: "The branch was updated for this run." }
+    },
+    {
+      eventId: "msevent_consolidation_authority_end",
+      eventKind: "SessionEnd" as const,
+      payload: { reason: "closed" }
+    }
+  ];
+  for (const [index, event] of events.entries()) {
+    await captureEvent({
+      runtimeRoot,
+      event: {
+        schemaVersion: 1,
+        eventId: event.eventId,
+        deduplicationKey: `codex:consolidation-authority:${String(index)}`,
+        agent: "codex",
+        eventKind: event.eventKind,
+        occurredAt: `2026-08-25T08:00:0${String(index)}.000Z`,
+        projectId,
+        sessionId,
+        ...("turnId" in event ? { turnId: event.turnId } : {}),
+        payload: event.payload
+      }
+    });
+  }
+  for (let index = 0; index < 2; index += 1) {
+    await expect(prepareNextDistillationBatch({
+      runtimeRoot,
+      maximumEvents: 2,
+      preparedAt: `2026-08-25T08:01:0${String(index)}.000Z`
+    })).resolves.toMatchObject({ state: "queued", sessionId });
+  }
+
+  const durableStatement = "MemStore uses main as its ongoing maintenance branch.";
+  const adapter: LunaWorkerAdapter = {
+    distillBatch(request) {
+      const evidence = request.evidence[0];
+      if (evidence === undefined) throw new Error("Expected Batch evidence.");
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: [{
+          statement: evidence.evidenceClass === "explicit_user_statement"
+            ? durableStatement
+            : "The branch changed during this task.",
+          primaryCategory: "preference_constraint",
+          categoryTags: ["preference_constraint"],
+          applicabilitySummary: "MemStore maintenance",
+          conditions: [],
+          exclusions: [],
+          preservedNegations: [],
+          certainty: "asserted",
+          sensitivity: "normal",
+          evidenceIds: [evidence.evidenceId],
+          durability: makeLongTermCandidateDurability(),
+          importanceTags: [],
+          importanceReasons: []
+        }]
+      });
+    },
+    consolidateSession() {
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "consolidation",
+        candidates: [],
+        consolidationSummary: {
+          schemaVersion: 1,
+          counts: { dedup: 2, source_echo: 0, downgrade: 0 },
+          samples: []
+        }
+      });
+    }
+  };
+
+  for (let index = 0; index < 3; index += 1) {
+    await expect(runNextLunaWork({
+      runtimeRoot,
+      workerId: "worker-consolidation-authority",
+      now: `2026-08-25T08:02:0${String(index)}.000Z`,
+      adapter
+    })).resolves.toMatchObject({ state: "completed" });
+  }
+
+  await expect(listSessionCandidates(runtimeRoot, sessionId)).resolves.toMatchObject([
+    { state: "waiting" }
+  ]);
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(database.prepare(
+      "SELECT statement FROM memory_candidates WHERE source_session_id = ?"
+    ).get(sessionId)).toEqual({ statement: durableStatement });
+  } finally {
+    database.close();
   }
 });
 
