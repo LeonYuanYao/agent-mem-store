@@ -1,9 +1,40 @@
 # Gate 6 Full Cutover Readiness Review
 
-Status: prepared for Human review; automatic injection remains in Shadow mode.
+Status: approved and activated; post-Cutover machine verification passed.
 
 Prepared at: 2026-08-25. The live Codex configuration and Hook files were not
 changed while preparing this package.
+
+## Execution record
+
+The Human approved Gate 6 on 2026-08-25. Program commit
+`cutover-baseline-2026-08-25` was pushed to `origin/main`, the
+Worker restarted onto that build, and `doctor --deep` passed before activation.
+The approved digest remained unchanged, so the single Cutover activated at
+`2026-08-25T22:08:54.636Z`.
+
+- Live Codex config SHA-256:
+  `096473bff61bc8cfa0aca7b26fd71eaec3e93e28425068e39ba414dd08ef7ea6`
+  (unchanged).
+- Live Codex Hooks SHA-256:
+  `23a8abe472250693017c2863c685db85b9299b16b819cc532ebae38dc7611afa`.
+- Rollback manifest:
+  `<runtime-root>/cutover/<cutover-id>/manifest.json`.
+- A live new-Session probe returned a 1,192-token SessionStart pack in 219.7
+  milliseconds. Its relevant UserPromptSubmit probe returned a 155-token pack
+  in 186.7 milliseconds. Both Capture evaluations and Receipts completed.
+- A resumed historical Session probe returned a non-empty 1,181-token
+  SessionStart pack in 295.5 milliseconds.
+- Explicit current-Project recall returned the requested Memory first with both
+  lexical and semantic evidence. An isolated missing-socket probe returned the
+  accepted empty fail-open result without blocking the Session.
+- Final `doctor --deep` remained healthy, the emergency spool remained empty,
+  the Worker remained running, and the foreground socket remained owner-only.
+
+The host-level Codex trust confirmation remains a Human action on the next new
+or resumed Codex Session. Until that confirmation occurs, the exact active Hook
+files and direct Hook probes are verified, but that host Session may decline to
+run the changed definitions.
 
 ## Recommendation
 
