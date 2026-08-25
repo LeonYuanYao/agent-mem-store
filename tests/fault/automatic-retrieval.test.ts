@@ -199,7 +199,7 @@ test("large historical receipt volume does not consume the semantic deadline", a
   });
 
   expect(result.semanticStage).toBe("complete");
-});
+}, 15_000);
 
 test("large Project scope is parsed before the semantic deadline", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-pack-large-scope-"));

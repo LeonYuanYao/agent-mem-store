@@ -47,6 +47,22 @@ test("an applied migration with a changed checksum blocks database opening", asy
   await expect(openRuntimeDatabase(root)).rejects.toThrow("checksum");
 });
 
+test("opening an initialized Runtime does not compete for the SQLite writer lock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-runtime-read-open-"));
+  temporaryDirectories.push(root);
+  const initialized = await openRuntimeDatabase(root);
+  initialized.close();
+  const writer = new DatabaseSync(join(root, "state", "memstore.sqlite"));
+  writer.exec("BEGIN IMMEDIATE");
+  try {
+    const opened = await openRuntimeDatabase(root, { busyTimeoutMilliseconds: 25 });
+    opened.close();
+  } finally {
+    writer.exec("ROLLBACK");
+    writer.close();
+  }
+});
+
 test("runtime initialization retires the full-history lexical index", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-retired-fts-"));
   temporaryDirectories.push(root);

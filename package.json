@@ -17,6 +17,7 @@
     "build:notifier": "tsx scripts/build-notifier-app.ts",
     "benchmark:retrieval": "tsx scripts/benchmark-retrieval.ts",
     "benchmark:shadow": "tsx scripts/benchmark-shadow-latency.ts",
+    "benchmark:active-injection": "tsx scripts/benchmark-active-injection.ts",
     "clean": "node --run clean:dist",
     "clean:dist": "node -e \"import('node:fs/promises').then(({rm}) => rm('dist', { recursive: true, force: true }))\"",
     "evidence:gate3": "tsx scripts/evidence-gate3.ts",

@@ -48,6 +48,7 @@ export type CodexHookResult =
       readonly captured: true;
       readonly state: "captured" | "duplicate" | "spooled";
       readonly eventId: string;
+      readonly projectId?: string;
     }
   | {
       readonly continue: true;
@@ -185,6 +186,7 @@ export async function handleCodexHook(
   let occurredAt = new Date().toISOString();
   let emergencyEvent: CaptureEvent | undefined;
   let emergencyProjectPath: string | undefined;
+  let resolvedProjectId: string | undefined;
   try {
     const input = hookInputSchema.parse(request.input);
     eventKind = input.hook_event_name;
@@ -207,9 +209,10 @@ export async function handleCodexHook(
       runtimeRoot: request.runtimeRoot,
       busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds
     });
+    resolvedProjectId = project.status === "resolved" ? project.projectId : undefined;
     emergencyEvent = {
       ...emergencyEvent,
-      ...(project.status === "resolved" ? { projectId: project.projectId } : {})
+      ...(resolvedProjectId === undefined ? {} : { projectId: resolvedProjectId })
     };
     const captured = await captureEvent({
       runtimeRoot: request.runtimeRoot,
@@ -229,7 +232,8 @@ export async function handleCodexHook(
       continue: true,
       captured: true,
       state: captured.state,
-      eventId: captured.eventId
+      eventId: captured.eventId,
+      ...(resolvedProjectId === undefined ? {} : { projectId: resolvedProjectId })
     };
   } catch (error) {
     const systemCode = (error as NodeJS.ErrnoException).code;
@@ -255,7 +259,8 @@ export async function handleCodexHook(
             continue: true,
             captured: true,
             state: spooled.state,
-            eventId: spooled.eventId
+            eventId: spooled.eventId,
+            ...(resolvedProjectId === undefined ? {} : { projectId: resolvedProjectId })
           };
         } catch {
           // The active Agent session remains fail-open when both durable paths fail.

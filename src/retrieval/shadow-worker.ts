@@ -14,6 +14,60 @@ type ShadowEvaluationResult =
   | { readonly state: "skipped"; readonly eventId: string; readonly reason: string }
   | { readonly state: "retrying"; readonly eventId: string; readonly errorCode: string };
 
+export async function reserveForegroundEvaluation(request: {
+  readonly runtimeRoot: string;
+  readonly eventId: string;
+  readonly eventKind: "SessionStart" | "UserPromptSubmit";
+  readonly reservedAt: string;
+}): Promise<boolean> {
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    const result = database.prepare(
+      `INSERT OR IGNORE INTO shadow_event_evaluations(
+         event_id, event_kind, state, receipt_id, attempt_count, last_error_code,
+         next_retry_at, created_at, updated_at
+       ) VALUES (?, ?, 'processing', NULL, 1, 'foreground_reserved', NULL, ?, ?)`
+    ).run(
+      request.eventId,
+      request.eventKind,
+      request.reservedAt,
+      request.reservedAt
+    );
+    return result.changes === 1;
+  } finally {
+    database.close();
+  }
+}
+
+export async function finishForegroundEvaluation(request: {
+  readonly runtimeRoot: string;
+  readonly eventId: string;
+  readonly state: "completed" | "retrying";
+  readonly updatedAt: string;
+  readonly receiptId?: string;
+  readonly errorCode?: string;
+}): Promise<void> {
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    database.prepare(
+      `UPDATE shadow_event_evaluations
+       SET state = ?, receipt_id = ?, last_error_code = ?, next_retry_at = ?, updated_at = ?
+       WHERE event_id = ? AND state = 'processing' AND last_error_code = 'foreground_reserved'`
+    ).run(
+      request.state,
+      request.receiptId ?? null,
+      request.errorCode ?? null,
+      request.state === "retrying"
+        ? new Date(Date.parse(request.updatedAt) + 60_000).toISOString()
+        : null,
+      request.updatedAt,
+      request.eventId
+    );
+  } finally {
+    database.close();
+  }
+}
+
 async function claimNextShadowEvent(runtimeRoot: string, now: string): Promise<string | undefined> {
   const staleBefore = new Date(Date.parse(now) - 5 * 60 * 1000).toISOString();
   const selectionSql = `SELECT capture.event_id, capture.event_kind

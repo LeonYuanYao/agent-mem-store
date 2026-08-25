@@ -37,6 +37,7 @@ import {
   distillationBatchReady,
   prepareNextDistillationBatch,
   prepareNextSessionConsolidation,
+  recoverNextBlockedLifecycleOnlyBatch,
   runNextLunaWork,
   type LunaWorkerAdapter
 } from "./distillation.js";
@@ -186,6 +187,13 @@ export async function runWorkerOnce(request: {
     activities.push("emergency-spool:imported");
   } else if (emergencySpool.state === "quarantined") {
     activities.push("emergency-spool:quarantined");
+  }
+  const lifecycleRecovery = await recoverNextBlockedLifecycleOnlyBatch({
+    runtimeRoot: request.runtimeRoot,
+    recoveredAt: now
+  });
+  if (lifecycleRecovery.state === "completed") {
+    activities.push("distillation:lifecycle-only-recovered");
   }
   try {
     const pruning = await pruneRetiredRetrievalSnapshots({

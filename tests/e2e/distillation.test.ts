@@ -9,11 +9,13 @@ import {
   inspectSessionDistillation,
   prepareNextDistillationBatch,
   prepareNextSessionConsolidation,
+  recoverNextBlockedLifecycleOnlyBatch,
   runNextLunaWork,
   type LunaWorkerAdapter
 } from "../../src/worker/distillation.js";
 import { openRuntimeDatabase } from "../../src/runtime/database.js";
 import { inspectAdmissionAudit } from "../../src/admission/audit.js";
+import type { DistillationOutput } from "../../src/luna/index.js";
 import { makeLongTermCandidateDurability } from "../helpers/candidate-durability.js";
 
 const temporaryDirectories: string[] = [];
@@ -53,7 +55,7 @@ test("a long Session is distilled in batches and consolidated from structured re
     });
   }
 
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 2; index += 1) {
     await expect(
       prepareNextDistillationBatch({
         runtimeRoot,
@@ -62,6 +64,11 @@ test("a long Session is distilled in batches and consolidated from structured re
       })
     ).resolves.toMatchObject({ state: "queued", sessionId: "long-session" });
   }
+  await expect(prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 2,
+    preparedAt: "2026-08-07T07:01:02.000Z"
+  })).resolves.toMatchObject({ state: "completed_without_model", sessionId: "long-session" });
   await expect(
     prepareNextDistillationBatch({
       runtimeRoot,
@@ -103,6 +110,7 @@ test("a long Session is distilled in batches and consolidated from structured re
     },
     consolidateSession(request) {
       consolidationInput = JSON.stringify(request);
+      const substantiveBatches = request.batchResults.filter((batch) => batch.candidates.length > 0);
       for (const batch of request.batchResults) {
         const available = new Set(batch.evidenceIds);
         for (const evidenceId of batch.candidates.flatMap((candidate) =>
@@ -128,14 +136,14 @@ test("a long Session is distilled in batches and consolidated from structured re
             certainty: "asserted",
             sensitivity: "normal",
             evidenceIds: [...new Set(
-              request.batchResults.flatMap((batch) => batch.evidenceIds)
+              substantiveBatches.flatMap((batch) => batch.evidenceIds)
             )],
             durability: makeLongTermCandidateDurability(),
             importanceTags: ["constraint"],
             importanceReasons: [{
               tag: "constraint",
               reason: "Preserve the final supporting evidence.",
-              evidenceIds: [request.batchResults.at(-1)?.evidenceIds.at(-1) ?? "missing-evidence"]
+              evidenceIds: [substantiveBatches.at(-1)?.evidenceIds.at(-1) ?? "missing-evidence"]
             }]
           }
         ]
@@ -143,7 +151,7 @@ test("a long Session is distilled in batches and consolidated from structured re
     }
   };
 
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < 3; index += 1) {
     await expect(
       runNextLunaWork({
         runtimeRoot,
@@ -158,7 +166,7 @@ test("a long Session is distilled in batches and consolidated from structured re
     runtimeRoot,
     sessionId: "long-session"
   });
-  expect(distillationEvidenceCounts).toEqual([2, 2, 1]);
+  expect(distillationEvidenceCounts).toEqual([2, 2]);
   expect(session).toMatchObject({
     sessionId: "long-session",
     batchCount: 3,
@@ -167,7 +175,8 @@ test("a long Session is distilled in batches and consolidated from structured re
   });
   expect(consolidationInput).not.toContain("RAW-EVIDENCE");
   expect(consolidationInput).toContain("Batch statement");
-  for (const eventId of eventIds) expect(consolidationInput).toContain(eventId);
+  for (const eventId of eventIds.slice(0, -1)) expect(consolidationInput).toContain(eventId);
+  expect(consolidationInput).not.toContain(eventIds.at(-1));
   const auditDatabase = await openRuntimeDatabase(runtimeRoot);
   try {
     expect(auditDatabase.prepare(
@@ -175,7 +184,6 @@ test("a long Session is distilled in batches and consolidated from structured re
        FROM admission_audit
        ORDER BY created_at, source_kind`
     ).all()).toEqual([
-      { source_kind: "distillation", prompt_version: 6 },
       { source_kind: "distillation", prompt_version: 6 },
       { source_kind: "distillation", prompt_version: 6 },
       { source_kind: "consolidation", prompt_version: 6 }
@@ -191,7 +199,143 @@ test("a long Session is distilled in batches and consolidated from structured re
   }
 });
 
-test("Session consolidation cannot silently discard an explicit-user durable Candidate", async () => {
+test("Batch distillation cannot complete without a Candidate or considered disposition", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-empty-distillation-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent_empty_distillation_tool",
+      deduplicationKey: "codex:empty-distillation:tool",
+      agent: "codex",
+      eventKind: "PostToolUse",
+      occurredAt: "2026-08-25T07:00:00.000Z",
+      projectId: "msproj_empty_distillation",
+      sessionId: "empty-distillation-session",
+      turnId: "empty-distillation-turn",
+      payload: { output: "A reusable non-obvious schema limitation was verified." }
+    }
+  });
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent_empty_distillation_end",
+      deduplicationKey: "codex:empty-distillation:end",
+      agent: "codex",
+      eventKind: "SessionEnd",
+      occurredAt: "2026-08-25T07:00:01.000Z",
+      projectId: "msproj_empty_distillation",
+      sessionId: "empty-distillation-session",
+      payload: { reason: "closed" }
+    }
+  });
+  await expect(prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 64,
+    preparedAt: "2026-08-25T07:01:00.000Z"
+  })).resolves.toMatchObject({ state: "queued" });
+
+  const adapter: LunaWorkerAdapter = {
+    distillBatch() {
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: []
+      });
+    },
+    consolidateSession() {
+      throw new Error("An empty Batch must not advance to consolidation.");
+    }
+  };
+  await expect(runNextLunaWork({
+    runtimeRoot,
+    workerId: "worker-empty-distillation",
+    now: "2026-08-25T07:02:00.000Z",
+    adapter
+  })).resolves.toMatchObject({
+    state: "retrying",
+    operationKind: "distill_batch"
+  });
+});
+
+test("lifecycle-only batches complete deterministically without spending Luna retries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-lifecycle-only-distillation-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  for (const [eventId, eventKind, occurredAt] of [
+    ["msevent_lifecycle_start", "SessionStart", "2026-08-25T08:00:00.000Z"],
+    ["msevent_lifecycle_end", "SessionEnd", "2026-08-25T08:00:01.000Z"]
+  ] as const) {
+    await captureEvent({
+      runtimeRoot,
+      event: {
+        schemaVersion: 1,
+        eventId,
+        deduplicationKey: `codex:lifecycle-only:${eventKind}`,
+        agent: "codex",
+        eventKind,
+        occurredAt,
+        projectId: "msproj_lifecycle_only",
+        sessionId: "lifecycle-only-session",
+        payload: eventKind === "SessionStart" ? { source: "startup" } : { reason: "other" }
+      }
+    });
+  }
+  const prepared = await prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 64,
+    preparedAt: "2026-08-25T08:01:00.000Z"
+  });
+  expect(prepared).toMatchObject({
+    state: "completed_without_model",
+    eventCount: 2
+  });
+  if (prepared.state !== "completed_without_model") {
+    throw new Error("Expected lifecycle-only deterministic completion.");
+  }
+  await expect(inspectCaptureEventState(runtimeRoot, "msevent_lifecycle_start"))
+    .resolves.toMatchObject({ state: "completed" });
+  await expect(inspectCaptureEventState(runtimeRoot, "msevent_lifecycle_end"))
+    .resolves.toMatchObject({ state: "completed" });
+
+  const legacy = await openRuntimeDatabase(runtimeRoot);
+  try {
+    legacy.prepare(
+      `UPDATE luna_operations
+       SET state = 'blocked', completed_at = NULL, last_error_category = 'schema_invalid'
+       WHERE operation_id = ?`
+    ).run(prepared.operationId);
+    legacy.prepare(
+      "UPDATE distillation_batches SET state = 'processing', completed_at = NULL WHERE batch_id = ?"
+    ).run(prepared.batchId);
+    legacy.prepare(
+      `UPDATE capture_events SET state = 'pending'
+       WHERE event_id IN ('msevent_lifecycle_start', 'msevent_lifecycle_end')`
+    ).run();
+  } finally {
+    legacy.close();
+  }
+  await expect(recoverNextBlockedLifecycleOnlyBatch({
+    runtimeRoot,
+    recoveredAt: "2026-08-25T08:01:30.000Z"
+  })).resolves.toEqual({ state: "completed", operationId: prepared.operationId });
+
+  const adapter: LunaWorkerAdapter = {
+    distillBatch: vi.fn(() => { throw new Error("Lifecycle-only events must not invoke Luna."); }),
+    consolidateSession: vi.fn(() => { throw new Error("No consolidation operation is queued yet."); })
+  };
+  await expect(runNextLunaWork({
+    runtimeRoot,
+    workerId: "worker-lifecycle-only",
+    now: "2026-08-25T08:02:00.000Z",
+    adapter
+  })).resolves.toEqual({ state: "empty" });
+});
+
+test("Session consolidation cannot silently discard priority durable Candidates", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-consolidation-authority-coverage-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -233,39 +377,80 @@ test("Session consolidation cannot silently discard an explicit-user durable Can
       }
     });
   }
-  for (let index = 0; index < 2; index += 1) {
-    await expect(prepareNextDistillationBatch({
-      runtimeRoot,
-      maximumEvents: 2,
-      preparedAt: `2026-08-25T08:01:0${String(index)}.000Z`
-    })).resolves.toMatchObject({ state: "queued", sessionId });
-  }
+  await expect(prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 2,
+    preparedAt: "2026-08-25T08:01:00.000Z"
+  })).resolves.toMatchObject({ state: "queued", sessionId });
+  await expect(prepareNextDistillationBatch({
+    runtimeRoot,
+    maximumEvents: 2,
+    preparedAt: "2026-08-25T08:01:01.000Z"
+  })).resolves.toMatchObject({ state: "completed_without_model", sessionId });
 
   const durableStatement = "MemStore uses main as its ongoing maintenance branch.";
   const adapter: LunaWorkerAdapter = {
     distillBatch(request) {
-      const evidence = request.evidence[0];
-      if (evidence === undefined) throw new Error("Expected Batch evidence.");
-      return Promise.resolve({
-        schemaVersion: 1,
-        kind: "distillation",
-        candidates: [{
-          statement: evidence.evidenceClass === "explicit_user_statement"
-            ? durableStatement
-            : "The branch changed during this task.",
-          primaryCategory: "preference_constraint",
-          categoryTags: ["preference_constraint"],
-          applicabilitySummary: "MemStore maintenance",
+      const candidates: DistillationOutput["candidates"][number][] = [];
+      for (const evidence of request.evidence) {
+        if (evidence.evidenceClass === "explicit_user_statement") {
+          candidates.push({
+            statement: durableStatement,
+            primaryCategory: "preference_constraint" as const,
+            categoryTags: ["preference_constraint" as const],
+            applicabilitySummary: "MemStore maintenance",
+            conditions: [],
+            exclusions: [],
+            preservedNegations: [],
+            certainty: "asserted" as const,
+            sensitivity: "normal" as const,
+            evidenceIds: [evidence.evidenceId],
+            durability: makeLongTermCandidateDurability(),
+            importanceTags: [],
+            importanceReasons: []
+          });
+          continue;
+        }
+        if (evidence.evidenceClass !== "command_outcome") continue;
+        candidates.push({
+          statement: "Idle Worker queues use a read-only preflight before requesting a write lock.",
+          primaryCategory: "architecture_contract" as const,
+          categoryTags: ["architecture_contract" as const],
+          applicabilitySummary: "MemStore Worker queues",
           conditions: [],
           exclusions: [],
           preservedNegations: [],
-          certainty: "asserted",
-          sensitivity: "normal",
+          certainty: "asserted" as const,
+          sensitivity: "normal" as const,
           evidenceIds: [evidence.evidenceId],
           durability: makeLongTermCandidateDurability(),
-          importanceTags: [],
-          importanceReasons: []
-        }]
+          importanceTags: ["architecture_invariant" as const, "recurrence_hazard" as const],
+          importanceReasons: [
+            {
+              tag: "architecture_invariant" as const,
+              reason: "Empty queues must remain read-only.",
+              evidenceIds: [evidence.evidenceId]
+            },
+            {
+              tag: "recurrence_hazard" as const,
+              reason: "Idle lock contention can recur across Worker lanes.",
+              evidenceIds: [evidence.evidenceId]
+            }
+          ]
+        });
+      }
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates,
+        ...(candidates.length > 0 ? {} : {
+          rejectionSummary: {
+            schemaVersion: 1 as const,
+            coverage: "considered_memory_shaped_rejections_only" as const,
+            counts: { no_memory: 0, session_only: 1, uncertain: 0, source_echo: 0 },
+            samples: []
+          }
+        })
       });
     },
     consolidateSession() {
@@ -282,7 +467,7 @@ test("Session consolidation cannot silently discard an explicit-user durable Can
     }
   };
 
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 2; index += 1) {
     await expect(runNextLunaWork({
       runtimeRoot,
       workerId: "worker-consolidation-authority",
@@ -291,14 +476,15 @@ test("Session consolidation cannot silently discard an explicit-user durable Can
     })).resolves.toMatchObject({ state: "completed" });
   }
 
-  await expect(listSessionCandidates(runtimeRoot, sessionId)).resolves.toMatchObject([
-    { state: "waiting" }
-  ]);
+  await expect(listSessionCandidates(runtimeRoot, sessionId)).resolves.toHaveLength(2);
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     expect(database.prepare(
-      "SELECT statement FROM memory_candidates WHERE source_session_id = ?"
-    ).get(sessionId)).toEqual({ statement: durableStatement });
+      "SELECT statement FROM memory_candidates WHERE source_session_id = ? ORDER BY statement"
+    ).all(sessionId)).toEqual([
+      { statement: "Idle Worker queues use a read-only preflight before requesting a write lock." },
+      { statement: durableStatement }
+    ]);
   } finally {
     database.close();
   }
@@ -316,11 +502,41 @@ test("the Worker persists considered rejections without inserting them into admi
       eventId: "msevent_admission_audit",
       deduplicationKey: "codex:admission-audit",
       agent: "codex",
-      eventKind: "SessionEnd",
+      eventKind: "UserPromptSubmit",
       occurredAt: "2026-08-23T10:00:00.000Z",
       projectId,
       sessionId: "admission-audit-session",
-      payload: { text: "Mixed durable and transient evidence." }
+      turnId: "admission-audit-turn",
+      payload: { prompt: "Mixed durable and transient evidence." }
+    }
+  });
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent_admission_audit_stop",
+      deduplicationKey: "codex:admission-audit:stop",
+      agent: "codex",
+      eventKind: "Stop",
+      occurredAt: "2026-08-23T10:00:00.500Z",
+      projectId,
+      sessionId: "admission-audit-session",
+      turnId: "admission-audit-turn",
+      payload: { assistantMessage: "Transient response." }
+    }
+  });
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent_admission_audit_end",
+      deduplicationKey: "codex:admission-audit:end",
+      agent: "codex",
+      eventKind: "SessionEnd",
+      occurredAt: "2026-08-23T10:00:00.750Z",
+      projectId,
+      sessionId: "admission-audit-session",
+      payload: { reason: "other" }
     }
   });
   const prepared = await prepareNextDistillationBatch({
@@ -605,13 +821,16 @@ test("a resumed Session consolidates each newly closed Batch range", async () =>
         }
       });
     }
-    for (let index = 0; index < 2; index += 1) {
-      await expect(prepareNextDistillationBatch({
-        runtimeRoot,
-        maximumEvents: 2,
-        preparedAt: `2026-08-07T1${String(episode)}:01:0${String(index)}.000Z`
-      })).resolves.toMatchObject({ state: "queued", sessionId: "resumed-session" });
-    }
+    await expect(prepareNextDistillationBatch({
+      runtimeRoot,
+      maximumEvents: 2,
+      preparedAt: `2026-08-07T1${String(episode)}:01:00.000Z`
+    })).resolves.toMatchObject({ state: "queued", sessionId: "resumed-session" });
+    await expect(prepareNextDistillationBatch({
+      runtimeRoot,
+      maximumEvents: 2,
+      preparedAt: `2026-08-07T1${String(episode)}:01:01.000Z`
+    })).resolves.toMatchObject({ state: "completed_without_model", sessionId: "resumed-session" });
   };
 
   let consolidationCalls = 0;
@@ -662,7 +881,7 @@ test("a resumed Session consolidates each newly closed Batch range", async () =>
   };
 
   await captureEpisode(2);
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 2; index += 1) {
     await runNextLunaWork({
       runtimeRoot,
       workerId: "worker-resumed",
@@ -672,7 +891,7 @@ test("a resumed Session consolidates each newly closed Batch range", async () =>
   }
 
   await captureEpisode(3);
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 2; index += 1) {
     await runNextLunaWork({
       runtimeRoot,
       workerId: "worker-resumed",
@@ -754,11 +973,26 @@ test("a directly ingested single-Batch episode is excluded from later consolidat
       eventId: "msevent_direct_episode_1",
       deduplicationKey: "codex:direct-episode:1",
       agent: "codex",
-      eventKind: "SessionEnd",
+      eventKind: "Stop",
       occurredAt: "2026-08-07T15:00:00.000Z",
       projectId,
       sessionId: "direct-episode-session",
+      turnId: "direct-episode-turn-1",
       payload: { episode: 1 }
+    }
+  });
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent_direct_episode_1_end",
+      deduplicationKey: "codex:direct-episode:1:end",
+      agent: "codex",
+      eventKind: "SessionEnd",
+      occurredAt: "2026-08-07T15:00:00.500Z",
+      projectId,
+      sessionId: "direct-episode-session",
+      payload: { reason: "other" }
     }
   });
   await prepareNextDistillationBatch({

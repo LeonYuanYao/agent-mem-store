@@ -192,6 +192,18 @@ test("preview is mutation-free and install, repair, and uninstall preserve unrel
     ?.flatMap((route) => route.hooks ?? [])
     .find((hook) => hook.command?.includes("memstore:gate5-shadow-v1:PostToolUse:shadow") === true);
   expect(managedPostToolUse).toMatchObject({ timeout: 2 });
+  const contextHandlers = (["SessionStart", "UserPromptSubmit"] as const).map((event) =>
+    (installedHooks.hooks as Record<
+      string,
+      Array<{ hooks?: Array<{ command?: string; additionalContextLimit?: number }> }>
+    >)[event]
+      ?.flatMap((route) => route.hooks ?? [])
+      .find((hook) => hook.command?.includes(`memstore:gate5-shadow-v1:${event}:shadow`) === true)
+  );
+  expect(contextHandlers).toEqual([
+    expect.objectContaining({ additionalContextLimit: 1200 }),
+    expect.objectContaining({ additionalContextLimit: 1024 })
+  ]);
   const installedHooksSource = await readFile(data.hooksPath, "utf8");
   expect(installedHooksSource.match(/dist\/cli\/hook\.js/gu)).toHaveLength(5);
   expect(installedHooksSource).not.toContain("dist/cli/main.js' hook codex");

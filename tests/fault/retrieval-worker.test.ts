@@ -69,7 +69,13 @@ test("an embedding failure leaves the Worker running and cools down before anoth
     distillBatch: () => Promise.resolve({
       schemaVersion: 1 as const,
       kind: "distillation" as const,
-      candidates: []
+      candidates: [],
+      rejectionSummary: {
+        schemaVersion: 1 as const,
+        coverage: "considered_memory_shaped_rejections_only" as const,
+        counts: { no_memory: 1, session_only: 0, uncertain: 0, source_echo: 0 },
+        samples: []
+      }
     }),
     consolidateSession: () => Promise.reject(new Error("No consolidation is expected.")),
     assessCandidateSemantics: () => Promise.reject(new Error("No Candidate is expected.")),

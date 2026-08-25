@@ -25,11 +25,13 @@ map deterministically to the executable novelty operations: a new identity is
 `insert`; an existing exact identity is `update(alias)`. Broader semantic merge
 or revision remains governed by reviewed duplicate evidence.
 
-Consolidation also cannot silently erase a durable Candidate supported by an
-explicit user statement. If no output Candidate represents any of that input's
-evidence, the Worker restores the original Candidate before the existing
-admission limit and Promotion Gate. The restored content remains Agent-derived;
-this protects coverage without granting Human-authored authority or bypassing
+Consolidation also cannot silently erase a consolidation-protected Candidate.
+Protection applies to a durable input supported by an explicit user statement
+or by at least two distinct evidence-linked importance reasons. If neither an
+output Candidate nor an evidence-linked disposition represents that input, the
+Worker restores the original Candidate before the existing admission limit and
+Promotion Gate. The restored content remains Agent-derived; this protects
+priority coverage without granting Human-authored authority or bypassing
 semantic validation.
 
 Raw distillation and consolidation output permits at most 128 durable Candidate

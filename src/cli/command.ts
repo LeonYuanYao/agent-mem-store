@@ -72,6 +72,7 @@ import { inspectOperation, inspectStatus, waitForOperation } from "../operations
 import { SwiftNotifierAdapter } from "../adapters/macos/notifier.js";
 import { CodexLunaAdapter } from "../luna/index.js";
 import { CodexTerraRetrievalJudge } from "../retrieval/judge.js";
+import { startForegroundRetrievalServer } from "../retrieval/foreground-ipc.js";
 import { runCodexHook } from "./codex-hook.js";
 import {
   applyManagedIntegration,
@@ -765,6 +766,12 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       controller.abort();
     });
     const configured = await configuredWorkerAdapters(location.runtimeRoot);
+    const foreground = configured.adapters?.embedding === undefined
+      ? undefined
+      : await startForegroundRetrievalServer({
+          ...location,
+          adapter: configured.adapters.embedding
+        });
     try {
       return {
         command: "worker.run",
@@ -781,6 +788,7 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
         json: parsed.values.json
       };
     } finally {
+      await foreground?.close();
       await configured.dispose();
     }
   }

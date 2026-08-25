@@ -9,6 +9,11 @@ interface Migration {
   readonly path: URL;
 }
 
+interface LoadedMigration extends Migration {
+  readonly source: string;
+  readonly sourceSha256: string;
+}
+
 const migrations: readonly Migration[] = [
   {
     version: 1,
@@ -252,6 +257,20 @@ const migrations: readonly Migration[] = [
   }
 ];
 
+let loadedMigrationsPromise: Promise<readonly LoadedMigration[]> | undefined;
+
+function loadMigrations(): Promise<readonly LoadedMigration[]> {
+  loadedMigrationsPromise ??= Promise.all(migrations.map(async (migration) => {
+    const source = await readFile(migration.path, "utf8");
+    return {
+      ...migration,
+      source,
+      sourceSha256: createHash("sha256").update(source).digest("hex")
+    };
+  }));
+  return loadedMigrationsPromise;
+}
+
 export interface OpenRuntimeDatabaseOptions {
   readonly busyTimeoutMilliseconds?: number;
 }
@@ -285,16 +304,19 @@ export async function openRuntimeDatabase(
     ) STRICT
   `);
 
-  for (const migration of migrations) {
-    const source = await readFile(migration.path, "utf8");
-    const sourceSha256 = createHash("sha256").update(source).digest("hex");
-    const existing = database
-      .prepare(
-        "SELECT version, source_sha256 FROM schema_migrations WHERE version = ?"
-      )
-      .get(migration.version);
+  const loadedMigrations = await loadMigrations();
+  const existingMigrations = new Map(
+    database.prepare(
+      "SELECT version, source_sha256 FROM schema_migrations ORDER BY version"
+    ).all().map((row) => [row.version, row.source_sha256])
+  );
+  for (const migration of loadedMigrations) {
+    const existingSourceSha256 = existingMigrations.get(migration.version);
+    const existing = existingSourceSha256 === undefined
+      ? undefined
+      : { source_sha256: existingSourceSha256 };
     if (existing !== undefined) {
-      if (existing.source_sha256 !== sourceSha256) {
+      if (existing.source_sha256 !== migration.sourceSha256) {
         database.close();
         throw new Error(
           `Migration ${String(migration.version)} source checksum does not match the applied schema.`
@@ -305,7 +327,7 @@ export async function openRuntimeDatabase(
 
     database.exec("BEGIN IMMEDIATE");
     try {
-      database.exec(source);
+      database.exec(migration.source);
       database
         .prepare(
           `INSERT INTO schema_migrations(
@@ -315,7 +337,7 @@ export async function openRuntimeDatabase(
         .run(
           migration.version,
           migration.name,
-          sourceSha256,
+          migration.sourceSha256,
           "0.1.0",
           new Date().toISOString()
         );

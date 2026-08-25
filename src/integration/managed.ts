@@ -263,7 +263,10 @@ function managedHookGroup(request: ManagedRequest, event: Candidate["hookEvents"
     hooks: [{
       type: "command",
       command,
-      timeout: event === "SessionEnd" ? 3 : event === "PostToolUse" ? 2 : 1
+      timeout: event === "SessionEnd" ? 3 : event === "PostToolUse" ? 2 : 1,
+      ...((event === "SessionStart" || event === "UserPromptSubmit")
+        ? { additionalContextLimit: event === "SessionStart" ? 1200 : 1024 }
+        : {})
     }]
   };
 }

@@ -13,6 +13,10 @@ exact Candidate identity, duplicate governance, and later review are safer than
 an unobservable false negative; exceeding the admitted limit remains a visible
 retryable failure rather than silent truncation.
 
+ADR-0111 extends this coverage boundary to multi-signal importance evidence and
+requires explicit consolidation dispositions to suppress restoration. The
+explicit-user rule in this ADR remains the minimum protected case.
+
 A missing `SessionEnd` must also have a bounded effect on availability. After
 two hours without new Session activity, the Worker emits the existing
 body-free, idempotent synthetic `SessionEnd`, matching the abandoned-Turn

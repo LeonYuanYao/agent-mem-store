@@ -48,6 +48,7 @@ test("an unknown PostToolUse kind is captured through the generic envelope", asy
   });
   if (!result.captured) throw new Error("Expected the official Hook payload to be captured.");
   const eventId = result.eventId;
+  const projectId = result.projectId;
   const stored = await readCapturedEvent(runtimeRoot, eventId);
 
   expect(stored).toMatchObject({
@@ -84,7 +85,8 @@ test("an unknown PostToolUse kind is captured through the generic envelope", asy
     continue: true,
     captured: true,
     state: "duplicate",
-    eventId
+    eventId,
+    projectId
   });
 });
 

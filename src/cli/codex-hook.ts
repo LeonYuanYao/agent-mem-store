@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { handleCodexHook } from "../adapters/codex/hook.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
+import { requestForegroundRetrieval } from "../retrieval/foreground-client.js";
 
 const codexHookEventSchema = z.enum([
   "SessionStart",
@@ -12,6 +13,11 @@ const codexHookEventSchema = z.enum([
   "Stop",
   "SessionEnd"
 ]);
+
+const activeHookInputSchema = z.object({
+  session_id: z.string().min(1),
+  prompt: z.string().optional()
+});
 
 export async function runCodexHook(eventSource: unknown): Promise<void> {
   const event = codexHookEventSchema.parse(eventSource);
@@ -29,11 +35,35 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
     runtimeRoot: resolve(runtimeRoot),
     input: { ...input, hook_event_name: event }
   });
-  const output = result.state === "capture_unavailable"
+  let output: Record<string, unknown> = result.state === "capture_unavailable"
     ? {
         continue: true,
         systemMessage: `MemStore could not capture ${result.diagnostic.eventKind}; the session will continue without persisting this event.`
       }
     : { continue: true };
+  const injectionMode = process.env.MEMSTORE_INJECTION_MODE === "active" ? "active" : "shadow";
+  if (injectionMode === "active" &&
+      (event === "SessionStart" || event === "UserPromptSubmit") &&
+      result.captured && result.projectId !== undefined) {
+    const activeInput = activeHookInputSchema.parse(input);
+    const foreground = await requestForegroundRetrieval({
+      runtimeRoot: resolve(runtimeRoot),
+      event,
+      projectId: result.projectId,
+      sessionId: activeInput.session_id,
+      eventId: result.eventId,
+      ...(event === "UserPromptSubmit" ? { prompt: activeInput.prompt ?? "" } : {}),
+      requestedAt: new Date().toISOString()
+    });
+    if (foreground.state === "completed") {
+      output = {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: event,
+          additionalContext: foreground.text
+        }
+      };
+    }
+  }
   process.stdout.write(`${JSON.stringify(output)}\n`);
 }

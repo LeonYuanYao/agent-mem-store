@@ -37,7 +37,7 @@ function candidateEvidenceIds(candidate: DistilledCandidate): readonly string[] 
   ])];
 }
 
-function preserveUnrepresentedExplicitUserCandidates(request: {
+function preserveUnrepresentedPriorityCandidates(request: {
   readonly batchResults: ConsolidateSessionRequest["batchResults"];
   readonly output: ConsolidationOutput;
   readonly evidence: readonly LunaEvidence[];
@@ -50,7 +50,12 @@ function preserveUnrepresentedExplicitUserCandidates(request: {
   if (explicitUserEvidenceIds.size === 0) return request.output;
 
   const coveredEvidenceIds = new Set(
-    request.output.candidates.flatMap(candidateEvidenceIds)
+    [
+      ...request.output.candidates.flatMap(candidateEvidenceIds),
+      ...(request.output.consolidationSummary?.samples.flatMap(
+        (sample) => sample.evidenceIds
+      ) ?? [])
+    ]
   );
   const representedStatements = new Set(
     request.output.candidates.map((candidate) => candidate.statement.trim())
@@ -58,7 +63,15 @@ function preserveUnrepresentedExplicitUserCandidates(request: {
   const restored: DistilledCandidate[] = [];
   for (const candidate of request.batchResults.flatMap((batch) => batch.candidates)) {
     const evidenceIds = candidateEvidenceIds(candidate);
-    if (!evidenceIds.some((evidenceId) => explicitUserEvidenceIds.has(evidenceId))) continue;
+    const importanceSignals = new Set(
+      candidate.importanceReasons.map((reason) => reason.tag)
+    ).size;
+    if (
+      importanceSignals < 2 &&
+      !evidenceIds.some((evidenceId) => explicitUserEvidenceIds.has(evidenceId))
+    ) {
+      continue;
+    }
     if (
       representedStatements.has(candidate.statement.trim()) ||
       evidenceIds.some((evidenceId) => coveredEvidenceIds.has(evidenceId))
@@ -76,8 +89,45 @@ function preserveUnrepresentedExplicitUserCandidates(request: {
   };
 }
 
+function requireAccountedDistillationOutput(output: DistillationOutput): void {
+  const rejectionCount = output.rejectionSummary === undefined
+    ? 0
+    : Object.values(output.rejectionSummary.counts).reduce(
+      (total, count) => total + count,
+      0
+    );
+  if (output.candidates.length > 0 || rejectionCount > 0) return;
+  throw new LunaInvocationError(
+    "schema_invalid",
+    true,
+    "Luna returned no Candidate and no considered disposition for a non-empty Batch.",
+    { stage: "retention_validation", code: "empty_unaccounted_distillation" }
+  );
+}
+
+function lifecycleOnlyDistillationOutput(): DistillationOutput {
+  return {
+    schemaVersion: 1,
+    kind: "distillation",
+    candidates: [],
+    rejectionSummary: {
+      schemaVersion: 1,
+      coverage: "considered_memory_shaped_rejections_only",
+      counts: { no_memory: 0, session_only: 0, uncertain: 0, source_echo: 0 },
+      samples: []
+    }
+  };
+}
+
 export type PrepareDistillationBatchResult =
   | { readonly state: "empty" }
+  | {
+      readonly state: "completed_without_model";
+      readonly batchId: string;
+      readonly operationId: string;
+      readonly sessionId: string;
+      readonly eventCount: number;
+    }
   | {
       readonly state: "queued";
       readonly batchId: string;
@@ -244,6 +294,7 @@ export async function prepareNextDistillationBatch(request: {
   let sessionId: string;
   let selectedRows: readonly Record<string, unknown>[];
   let projectId: string | null;
+  let lifecycleOnly: boolean;
   try {
     const first = selectFirstEligibleDistillationEvent(selectionDatabase, eligibility);
     if (first === undefined) return { state: "empty" };
@@ -269,7 +320,7 @@ export async function prepareNextDistillationBatch(request: {
       : null;
     const rows = selectionDatabase
       .prepare(
-        `SELECT capture.event_id, capture.project_id, capture.retained_bytes
+        `SELECT capture.event_id, capture.event_kind, capture.project_id, capture.retained_bytes
          FROM capture_events AS capture
          WHERE capture.state = 'pending'
            AND COALESCE(capture.session_id, 'event:' || capture.event_id) = ?
@@ -309,6 +360,9 @@ export async function prepareNextDistillationBatch(request: {
       selectedBytes += retainedBytes;
     }
     selectedRows = boundedRows;
+    lifecycleOnly = selectedRows.every((row) =>
+      row.event_kind === "SessionStart" || row.event_kind === "SessionEnd"
+    );
     const projectIds = new Set(
       selectedRows
         .map((row) => row.project_id)
@@ -349,6 +403,60 @@ export async function prepareNextDistillationBatch(request: {
       const batchId = `msbatch_${randomUUID()}`;
       const operationId = `msop_${randomUUID()}`;
       const operationPayload = operationPayloadSource({ batchId });
+      if (lifecycleOnly) {
+        const result = lifecycleOnlyDistillationOutput();
+        database.prepare(
+          `INSERT INTO luna_operations(
+             operation_id, operation_kind, idempotency_key, project_id,
+             session_id, payload_json, payload_sha256, state,
+             created_at, updated_at, completed_at
+           ) VALUES (?, 'distill_batch', ?, ?, ?, ?, ?, 'completed', ?, ?, ?)`
+        ).run(
+          operationId,
+          `distill:${batchId}`,
+          projectId,
+          sessionId,
+          operationPayload.source,
+          operationPayload.sha256,
+          eligibility.preparedAt,
+          eligibility.preparedAt,
+          eligibility.preparedAt
+        );
+        database.prepare(
+          `INSERT INTO distillation_batches(
+             batch_id, session_id, project_id, batch_ordinal, state,
+             operation_id, result_json, created_at, completed_at
+           ) VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?)`
+        ).run(
+          batchId,
+          sessionId,
+          projectId,
+          batchOrdinal,
+          operationId,
+          JSON.stringify(result),
+          eligibility.preparedAt,
+          eligibility.preparedAt
+        );
+        const insertEvent = database.prepare(
+          `INSERT INTO distillation_batch_events(batch_id, event_id, event_ordinal)
+           VALUES (?, ?, ?)`
+        );
+        selectedEventIds.forEach((eventId, index) => {
+          insertEvent.run(batchId, eventId, index);
+        });
+        database.prepare(
+          `UPDATE capture_events SET state = 'completed', updated_at = ?
+           WHERE event_id IN (${placeholders})`
+        ).run(eligibility.preparedAt, ...selectedEventIds);
+        database.exec("COMMIT");
+        return {
+          state: "completed_without_model",
+          batchId,
+          operationId,
+          sessionId,
+          eventCount: selectedRows.length
+        };
+      }
       database
         .prepare(
           `INSERT INTO luna_operations(
@@ -396,6 +504,87 @@ export async function prepareNextDistillationBatch(request: {
         sessionId,
         eventCount: selectedRows.length
       };
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    database.close();
+  }
+}
+
+function selectBlockedLifecycleOnlyBatch(
+  database: Awaited<ReturnType<typeof openRuntimeDatabase>>,
+  operationId?: string
+): Record<string, unknown> | undefined {
+  return database.prepare(
+    `SELECT batch.batch_id, batch.operation_id
+     FROM distillation_batches AS batch
+     JOIN luna_operations AS operation ON operation.operation_id = batch.operation_id
+     WHERE operation.state = 'blocked'
+       AND operation.operation_kind = 'distill_batch'
+       ${operationId === undefined ? "" : "AND operation.operation_id = ?"}
+       AND EXISTS (
+         SELECT 1 FROM distillation_batch_events AS assigned
+         WHERE assigned.batch_id = batch.batch_id
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM distillation_batch_events AS assigned
+         JOIN capture_events AS capture ON capture.event_id = assigned.event_id
+         WHERE assigned.batch_id = batch.batch_id
+           AND capture.event_kind NOT IN ('SessionStart', 'SessionEnd')
+       )
+     ORDER BY operation.updated_at, operation.operation_id
+     LIMIT 1`
+  ).get(...(operationId === undefined ? [] : [operationId]));
+}
+
+export async function recoverNextBlockedLifecycleOnlyBatch(request: {
+  readonly runtimeRoot: string;
+  readonly recoveredAt: string;
+}): Promise<{ readonly state: "empty" | "completed"; readonly operationId?: string }> {
+  const recoveredAt = z.iso.datetime().parse(request.recoveredAt);
+  const preflight = await openRuntimeDatabase(request.runtimeRoot);
+  let selectedOperationId: string;
+  try {
+    const selected = selectBlockedLifecycleOnlyBatch(preflight);
+    if (selected === undefined) return { state: "empty" };
+    selectedOperationId = z.string().parse(selected.operation_id);
+  } finally {
+    preflight.close();
+  }
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = selectBlockedLifecycleOnlyBatch(database, selectedOperationId);
+      if (row === undefined) {
+        database.exec("COMMIT");
+        return { state: "empty" };
+      }
+      const batchId = z.string().parse(row.batch_id);
+      const operationId = z.string().parse(row.operation_id);
+      database.prepare(
+        `UPDATE distillation_batches
+         SET state = 'completed', result_json = ?, completed_at = ?
+         WHERE batch_id = ?`
+      ).run(JSON.stringify(lifecycleOnlyDistillationOutput()), recoveredAt, batchId);
+      database.prepare(
+        `UPDATE capture_events SET state = 'completed', updated_at = ?
+         WHERE event_id IN (
+           SELECT event_id FROM distillation_batch_events WHERE batch_id = ?
+         )`
+      ).run(recoveredAt, batchId);
+      database.prepare(
+        `UPDATE luna_operations
+         SET state = 'completed', lease_token = NULL, leased_by = NULL,
+             lease_until = NULL, next_retry_at = NULL, last_error_category = NULL,
+             last_error_diagnostic_json = NULL, updated_at = ?, completed_at = ?
+         WHERE operation_id = ? AND state = 'blocked'`
+      ).run(recoveredAt, recoveredAt, operationId);
+      database.exec("COMMIT");
+      return { state: "completed", operationId };
     } catch (error) {
       database.exec("ROLLBACK");
       throw error;
@@ -1078,6 +1267,7 @@ export async function runNextLunaWork(request: {
             : { kind: "project", projectId: batch.projectId },
         evidence: batch.evidence
       });
+      requireAccountedDistillationOutput(output);
       const completedAt = z.iso.datetime().parse(currentTime());
       await recordAdmissionAudit({
         runtimeRoot: request.runtimeRoot,
@@ -1186,7 +1376,7 @@ export async function runNextLunaWork(request: {
           )
         )
       );
-      const output = preserveUnrepresentedExplicitUserCandidates({
+      const output = preserveUnrepresentedPriorityCandidates({
         batchResults: batchResultsRequest.batchResults,
         output: modelOutput,
         evidence: sessionEvidence.flatMap((item) => item.evidence)

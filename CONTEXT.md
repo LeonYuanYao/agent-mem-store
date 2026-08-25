@@ -56,6 +56,14 @@ _Avoid_: Durable Memory、事实
 可能显著影响未来工作、值得更长等待和更严格验证的 Memory Candidate。Luna 只能根据受控类别提出 `importance_tags`、原因和证据引用；Promotion Gate 依据确定性规则确认分类，用户显式 pin 可以强制保护。高价值只改变治理优先级和保留期，不证明内容正确，也不提高内容权威。
 _Avoid_: 高置信度即高价值、自动晋升、人工知识权威
 
+**Consolidation-protected Candidate（合并保护候选）**:
+已经通过 Batch 准入、并由显式用户陈述或至少两个不同的证据关联重要性依据支撑的长期候选。Session Consolidation 必须保留其语义或明确记录处置，不能把缺少说明的遗漏当作成功；保护不提高权威，也不绕过 Promotion Gate。
+_Avoid_: 所有高价值候选无条件保留、合并后自动晋升、重复候选永久保留
+
+**Accounted Distillation Result（有处置的提炼结果）**:
+对非空 Batch 至少产生一个长期候选，或记录至少一个模型明确考虑过的拒绝、会话级、未知或来源回声处置。既没有候选也没有处置的空结果不代表“没有知识”，而是可重试的不完整结果。
+_Avoid_: 空 Candidate 列表即成功、未考虑输入即 no-memory、用处置统计证明完整召回
+
 **High-value Inflation（高价值膨胀）**:
 Luna 在有足够有效样本时，以显著高于项目历史基线的比例把候选标为高价值，或让单一 `importance_tag` 异常垄断分类的治理异常。它先进入 provisional，只有跨两个非重叠窗口或两次 Weekly Maintenance 持续存在才成为 persistent；异常本身不能删除、降级或否定候选。
 _Avoid_: 高价值数量硬上限、单次特殊 Session 即模型故障、比例异常即内容错误
@@ -259,6 +267,10 @@ _Avoid_: 无条件必注入、关闭 Memory 检索、模型自动改写用户策
 **Relevant Memory Pack（相关记忆包）**:
 在 UserPromptSubmit 根据当前问题从 Durable Memory 及其派生索引中检索出的有限上下文。普通非空包目标是 300–600 rendered tokens，最多六条、单条最多 192 tokens，整包硬上限 1,024 tokens；无关、短确认、纯延续、重复或已有知识返回空包。检索严格限时，失败时跳过，不在注入路径调用 Luna。
 _Avoid_: 生成式临时摘要、完整 Vault、Memory Candidate
+
+**Foreground Retrieval Endpoint（前台检索端点）**:
+由常驻 Distillation Worker 持有的机器本地 Unix socket。active SessionStart 或 UserPromptSubmit Hook 在完成 Capture 后，用 captured event、Project 和 Session identity 请求已经通过门禁的 Core/Relevant Memory Pack；端点复用常驻 E5 adapter 和同一套确定性检索、预算与 Receipt 逻辑。它不是网络服务、第二个 Worker、第二套索引或模型调用路径；不可用、超时或协议异常时 Hook 返回空上下文并继续当前 Turn。
+_Avoid_: Hook 内冷启动 embedding、lexical-only 生产旁路、独立 retrieval daemon、跨 Project fallback
 
 **Relevance Band（相关性档位）**:
 自动检索在硬安全和 lifecycle 过滤后对候选划分的 `high`、`probable` 或 `weak`。high 正常竞争，probable 只能以更紧凑、可按 ID 深读的形式有界参与，weak 不自动注入但仍可主动搜索；档位由混合检索信号决定，不要求词法与语义同时命中。

@@ -32,11 +32,26 @@ test("a transient Luna failure leaves evidence retryable and later produces one 
       eventId,
       deduplicationKey: "retry-session:turn-1",
       agent: "codex",
-      eventKind: "SessionEnd",
+      eventKind: "Stop",
       occurredAt: "2026-08-07T12:00:00.000Z",
       projectId: "msproj_123e4567-e89b-42d3-a456-426614174001",
       sessionId: "retry-session",
-      payload: { text: "Remember the bounded rule." }
+      turnId: "retry-turn",
+      payload: { assistantMessage: "Remember the bounded rule." }
+    }
+  });
+  await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent-retry-1-end",
+      deduplicationKey: "retry-session:end",
+      agent: "codex",
+      eventKind: "SessionEnd",
+      occurredAt: "2026-08-07T12:00:00.500Z",
+      projectId: "msproj_123e4567-e89b-42d3-a456-426614174001",
+      sessionId: "retry-session",
+      payload: { reason: "other" }
     }
   });
   await prepareNextDistillationBatch({
@@ -223,7 +238,17 @@ test("a large schema-invalid Batch is split once and its children are consolidat
   let consolidationCalls = 0;
   const recovered: LunaWorkerAdapter = {
     distillBatch() {
-      return Promise.resolve({ schemaVersion: 1, kind: "distillation", candidates: [] });
+      return Promise.resolve({
+        schemaVersion: 1,
+        kind: "distillation",
+        candidates: [],
+        rejectionSummary: {
+          schemaVersion: 1,
+          coverage: "considered_memory_shaped_rejections_only",
+          counts: { no_memory: 4, session_only: 0, uncertain: 0, source_echo: 0 },
+          samples: []
+        }
+      });
     },
     consolidateSession() {
       consolidationCalls += 1;
