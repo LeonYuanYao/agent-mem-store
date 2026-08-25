@@ -568,7 +568,10 @@ function codexHookIdentity(source: string, hookPath: string): {
   }).parse(JSON.parse(source));
   const stateKeys: string[] = [];
   const routes = Object.fromEntries(shadowHookEvents.map((event) => {
-    const marker = `memstore:gate5-shadow-v1:${event}:shadow`;
+    const markers = [
+      `memstore:gate5-shadow-v1:${event}:shadow`,
+      `memstore:gate5-shadow-v1:${event}:active`
+    ];
     const relevant = (document.hooks[event] ?? []).flatMap((routeValue, routeIndex) => {
       const route = z.record(z.string(), z.unknown()).parse(routeValue);
       const hooks = z.array(z.unknown()).parse(route.hooks);
@@ -577,14 +580,15 @@ function codexHookIdentity(source: string, hookPath: string): {
       );
       return hooks.flatMap((hookValue, hookIndex) => {
         const hook = z.record(z.string(), z.unknown()).parse(hookValue);
-        if (typeof hook.command !== "string" || !hook.command.includes(marker)) return [];
+        const command = hook.command;
+        if (typeof command !== "string" || !markers.some((marker) => command.includes(marker))) return [];
         const eventKey = event.replace(/([a-z0-9])([A-Z])/gu, "$1_$2").toLowerCase();
         stateKeys.push(`${hookPath}:${eventKey}:${String(routeIndex)}:${String(hookIndex)}`);
         return [{ route: canonicalize(routeIdentity), hook: canonicalize(hook) }];
       });
     });
     if (relevant.length !== 1) {
-      throw new Error(`Installed ${event} Shadow Hook must have exactly one managed route.`);
+      throw new Error(`Installed ${event} Hook must have exactly one managed MemStore route.`);
     }
     return [event, relevant];
   }));

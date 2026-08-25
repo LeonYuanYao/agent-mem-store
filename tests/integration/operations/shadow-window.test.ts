@@ -687,6 +687,25 @@ test("an official Shadow window requires a completed real-Hook probe and records
     gate6ReviewEligible: true,
     observedChanges: ["codex_config_changed", "hooks_changed"]
   });
+  for (const routes of Object.values(hooksWithManagedChange.hooks)) {
+    for (const hook of routes.flatMap((route) => route.hooks ?? [])) {
+      if (typeof hook.command !== "string" || !hook.command.includes("memstore:gate5-shadow-v1:")) continue;
+      hook.command = hook.command
+        .replace("MEMSTORE_INJECTION_MODE=shadow", "MEMSTORE_INJECTION_MODE=active")
+        .replace(/:shadow$/u, ":active");
+    }
+  }
+  await writeFile(hooksPath, JSON.stringify(hooksWithManagedChange));
+  await expect(inspectOfficialShadowWindow({
+    runtimeRoot,
+    repositoryRoot,
+    homeRoot,
+    now: "2026-08-16T03:00:07.500Z"
+  })).resolves.toMatchObject({
+    state: "active",
+    gate6ReviewEligible: true,
+    observedChanges: ["codex_config_changed", "hooks_changed"]
+  });
   await expect(startOfficialShadowWindow({
     ...request,
     startedAt: "2026-08-16T03:00:08.000Z"
