@@ -300,7 +300,7 @@ test("large Project scope is parsed before the semantic deadline", async () => {
     embed: () => new Promise((resolve) => {
       setTimeout(() => {
         resolve([[1, 0]]);
-      }, 150);
+      }, 100);
     })
   };
 

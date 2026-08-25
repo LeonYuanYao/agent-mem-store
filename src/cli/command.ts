@@ -81,10 +81,13 @@ import { runCodexHook } from "./codex-hook.js";
 import {
   applyManagedIntegration,
   applyManagedIntegrationUpgrade,
+  applyNativeMemoryCutover,
   previewManagedIntegration,
   previewManagedIntegrationUpgrade,
+  previewNativeMemoryCutover,
   rehearseNativeMemoryCutover,
   repairManagedIntegration,
+  rollbackNativeMemoryCutover,
   uninstallManagedIntegration
 } from "../integration/managed.js";
 import { applyReviewAction, type ReviewAction } from "../review/actions.js";
@@ -255,7 +258,40 @@ async function runIntegration(arguments_: readonly string[]): Promise<unknown> {
       rehearsedAt: new Date().toISOString()
     });
   }
-  throw new MemStoreCommandError("unknown_command", "Use integration prepare-model, preview, install, upgrade, repair, uninstall, or rehearse-cutover.");
+  if (action === "cutover") {
+    const preview = await previewNativeMemoryCutover({
+      configPath: join(homeRoot, ".codex", "config.toml"),
+      hooksPath: join(homeRoot, ".codex", "hooks.json"),
+      nativeStorePaths: (parsed.values["native-store"] ?? []).map((path) => resolve(path)),
+      preparedAt: new Date().toISOString()
+    });
+    if (parsed.values.preview) return preview;
+    if (parsed.values.gate === undefined) {
+      throw new MemStoreCommandError(
+        "cutover_approval_required",
+        "Run integration cutover --preview, obtain explicit Gate 6 approval, and pass its approvalDigest with --gate."
+      );
+    }
+    return applyNativeMemoryCutover({
+      runtimeRoot: location.runtimeRoot,
+      preview,
+      approvalDigest: parsed.values.gate,
+      appliedAt: new Date().toISOString()
+    });
+  }
+  if (action === "rollback-cutover") {
+    if (parsed.values.backup === undefined) {
+      throw new MemStoreCommandError(
+        "cutover_manifest_required",
+        "integration rollback-cutover requires --backup with the Cutover manifest path."
+      );
+    }
+    return rollbackNativeMemoryCutover({
+      manifestPath: resolve(parsed.values.backup),
+      rolledBackAt: new Date().toISOString()
+    });
+  }
+  throw new MemStoreCommandError("unknown_command", "Use integration prepare-model, preview, install, upgrade, repair, uninstall, rehearse-cutover, cutover, or rollback-cutover.");
 }
 
 async function readJsonFile(path: string | undefined): Promise<Record<string, unknown>> {

@@ -449,6 +449,36 @@ test("SessionStart pages lightweight bucket rows beyond the first sixteen candid
   });
 });
 
+test("SessionStart stops paging when no valid Memory item can fit the remaining token budget", async () => {
+  const roots = await createRoot();
+  const memories = Array.from({ length: 80 }, (_, index) => makeCanonicalMemory({
+    memoryId: `msmem_10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    revisionId: `msrev_10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    scope: { kind: "project", projectId },
+    body: `Durable startup rule ${String(index)} ${"constraint ".repeat(57)}`,
+    compact: `Durable startup rule ${String(index)} ${"constraint ".repeat(57)}`,
+    startup: "auto",
+    primaryCategory: "preference_constraint"
+  }));
+  await writeAll(roots, memories);
+
+  const pack = await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "token-saturated-session-start",
+    requestedAt: "2026-08-07T12:10:01.000Z"
+  });
+  const receipt = await inspectRetrievalReceipt(roots.runtimeRoot, pack.receiptId);
+
+  expect(pack.items.length).toBeGreaterThan(0);
+  expect(pack.items.length).toBeLessThan(12);
+  expect(pack.renderedTokenCount).toBeLessThanOrEqual(1200);
+  expect(receipt).toBeDefined();
+  if (receipt === undefined) throw new Error("Expected a SessionStart retrieval Receipt.");
+  expect(receipt.rowsExamined).toBeLessThan(memories.length);
+  expect(receipt.terminalStopReason).toBe("pack_limit_reached");
+});
+
 test("a high semantic baseline without a lexical or applicability anchor stays out of automatic recall", async () => {
   const roots = await createRoot();
   const unrelated = makeCanonicalMemory({

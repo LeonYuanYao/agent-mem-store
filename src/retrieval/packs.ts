@@ -19,6 +19,9 @@ const PROBABLE_ITEM_LIMIT = 2;
 const SESSION_BUCKET_PAGE_SIZE = 16;
 const RECEIPT_OMISSION_DETAIL_LIMIT = 128;
 const AUTOMATIC_SEMANTIC_DEADLINE_MS = 300;
+const MINIMUM_SESSION_ITEM_INCREMENT = tokenizer.encode(
+  "\n[M:msmem_00000000-0000-0000-0000-000000000000 S:G A:H R:compact] x"
+).length;
 
 type PriorityTier = "critical" | "strong" | "normal";
 type RelevanceBand = "high" | "probable" | "weak";
@@ -642,9 +645,14 @@ async function prepareSessionStartShadowPackCore(
   const examined: IndexedMemory[] = [];
   let identityCount = 0;
   let alwaysTokens = 0;
+  let selectedRenderedTokenCount = 0;
   const trySelect = (memory: IndexedMemory, always: boolean): boolean => {
-    examined.push(memory);
     if (selected.length >= SESSION_ITEM_LIMIT) return true;
+    if (selectedRenderedTokenCount > 0 &&
+        SESSION_TOKEN_LIMIT - selectedRenderedTokenCount < MINIMUM_SESSION_ITEM_INCREMENT) {
+      return true;
+    }
+    examined.push(memory);
     const tier = tierFor(memory, request.projectId);
     const representation = representationFor(memory, tier, always || tier !== "normal");
     if (representation === undefined) return false;
@@ -677,6 +685,7 @@ async function prepareSessionStartShadowPackCore(
       text,
       renderedTokenCount: itemTokens
     });
+    selectedRenderedTokenCount = trial.renderedTokenCount;
     if (always) alwaysTokens += itemTokens;
     if (representation.kind === "identity") identityCount += 1;
     return selected.length >= SESSION_ITEM_LIMIT;

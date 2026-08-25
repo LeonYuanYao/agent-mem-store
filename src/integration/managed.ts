@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   open,
+  readdir,
   readFile,
   readlink,
   realpath,
@@ -158,6 +159,75 @@ export interface ManagedIntegrationUpgradePreview {
   readonly observedDivergedTargetLabels: readonly string[];
   readonly explicitNoEffects: readonly string[];
 }
+
+interface NativeMemoryInventoryLocation {
+  readonly path: string;
+  readonly state: "absent" | "file" | "directory" | "symlink" | "other";
+  readonly fileCount: number;
+  readonly directoryCount: number;
+  readonly totalBytes: number;
+  readonly modifiedAt: string | null;
+}
+
+interface CutoverHookChange {
+  readonly event: Candidate["hookEvents"][number];
+  readonly injectionMode: { readonly before: "shadow"; readonly after: "active" };
+  readonly additionalContextLimit: {
+    readonly before: number | null;
+    readonly after: number | null;
+  };
+}
+
+export interface NativeMemoryCutoverPreview {
+  readonly schemaVersion: 1;
+  readonly state: "cutover_preview";
+  readonly dryRun: true;
+  readonly preparedAt: string;
+  readonly approvalDigest: string;
+  readonly source: {
+    readonly configPath: string;
+    readonly configSha256: string;
+    readonly hooksPath: string;
+    readonly hooksSha256: string;
+  };
+  readonly target: {
+    readonly configSha256: string;
+    readonly hooksSha256: string;
+    readonly nativeMemory: {
+      readonly generateMemories: false;
+      readonly useMemories: false;
+    };
+    readonly hookChanges: readonly CutoverHookChange[];
+  };
+  readonly rollback: {
+    readonly expectedConfigSha256: string;
+    readonly expectedHooksSha256: string;
+  };
+  readonly nativeData: {
+    readonly operation: "none";
+    readonly bodiesRead: 0;
+    readonly locations: readonly NativeMemoryInventoryLocation[];
+  };
+}
+
+const cutoverManifestSchema = z.object({
+  schemaVersion: z.literal(1),
+  backupId: z.string().min(1),
+  state: z.enum(["prepared", "active", "rolled_back"]),
+  appliedAt: z.iso.datetime(),
+  rolledBackAt: z.iso.datetime().optional(),
+  configPath: z.string().min(1),
+  hooksPath: z.string().min(1),
+  configBackupPath: z.string().min(1),
+  hooksBackupPath: z.string().min(1),
+  sourceConfigSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  sourceHooksSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  targetConfigSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  targetHooksSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  approvalDigest: z.string().regex(/^[0-9a-f]{64}$/u)
+});
+
+type CutoverManifest = z.infer<typeof cutoverManifestSchema>;
 
 interface OwnershipManifest {
   readonly schemaVersion: 1;
@@ -888,21 +958,336 @@ export async function uninstallManagedIntegration(request: {
 }
 
 function replaceMemorySetting(source: string, key: "generate_memories" | "use_memories", value: boolean): string {
-  const section = /^\[memories\]\s*$([\s\S]*?)(?=^\[[^\]]+\]\s*$|\s*$)/mu.exec(source);
+  const section = /^\[memories\][ \\t]*$/mu.exec(source);
   if (section === null) throw new Error("Codex config has no [memories] section.");
-  const body = section[1] ?? "";
-  const pattern = new RegExp(`^${key}\\s*=\\s*(?:true|false)\\s*$`, "mu");
+  const bodyStart = section.index + section[0].length;
+  const remainder = source.slice(bodyStart);
+  const nextSection = /^\[[^\]]+\][ \\t]*$/mu.exec(remainder);
+  const bodyEnd = nextSection === null ? source.length : bodyStart + nextSection.index;
+  const body = source.slice(bodyStart, bodyEnd);
+  const pattern = new RegExp(`^${key}[ \\t]*=[ \\t]*(?:true|false)[ \\t]*$`, "mu");
   const replacement = `${key} = ${String(value)}`;
+  if (pattern.exec(body)?.[0] === replacement) return source;
   const nextBody = pattern.test(body)
     ? body.replace(pattern, replacement)
     : `${body.trimEnd()}\n${replacement}\n`;
-  return `${source.slice(0, section.index)}[memories]${nextBody}${source.slice(section.index + section[0].length)}`;
+  return `${source.slice(0, bodyStart)}${nextBody}${source.slice(bodyEnd)}`;
 }
 
-function activateInjectionHooks(source: string): string {
-  return source
-    .replaceAll("MEMSTORE_INJECTION_MODE=shadow", "MEMSTORE_INJECTION_MODE=active")
-    .replaceAll(":shadow\"", ":active\"");
+function activateInjectionHooks(source: string): {
+  readonly source: string;
+  readonly changes: readonly CutoverHookChange[];
+} {
+  const document = z.record(z.string(), z.unknown()).parse(JSON.parse(source));
+  const hooks = z.record(z.string(), z.unknown()).parse(document.hooks);
+  const changes: CutoverHookChange[] = [];
+  const events = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"] as const;
+  for (const event of events) {
+    const routes = z.array(z.unknown()).default([]).parse(hooks[event]);
+    const marker = `memstore:gate5-shadow-v1:${event}:shadow`;
+    const routeIndexes = routes.flatMap((route, index) => JSON.stringify(route).includes(marker) ? [index] : []);
+    if (routeIndexes.length !== 1) {
+      throw new Error(`Owned Shadow ${event} Hook recipe is missing or ambiguous.`);
+    }
+    const routeIndex = routeIndexes[0];
+    if (routeIndex === undefined) throw new Error(`Owned Shadow ${event} Hook recipe is missing.`);
+    const route = z.record(z.string(), z.unknown()).parse(routes[routeIndex]);
+    const handlers = z.array(z.unknown()).parse(route.hooks);
+    const handlerIndexes = handlers.flatMap((handler, index) => JSON.stringify(handler).includes(marker) ? [index] : []);
+    if (handlerIndexes.length !== 1) {
+      throw new Error(`Owned Shadow ${event} Hook command is missing or ambiguous.`);
+    }
+    const handlerIndex = handlerIndexes[0];
+    if (handlerIndex === undefined) throw new Error(`Owned Shadow ${event} Hook command is missing.`);
+    const handler = z.record(z.string(), z.unknown()).parse(handlers[handlerIndex]);
+    const command = z.string().parse(handler.command);
+    if (!command.includes("MEMSTORE_INJECTION_MODE=shadow")) {
+      throw new Error(`Owned Shadow ${event} Hook has no Shadow injection mode.`);
+    }
+    const beforeLimit = typeof handler.additionalContextLimit === "number"
+      ? z.number().int().nonnegative().parse(handler.additionalContextLimit)
+      : null;
+    const afterLimit = event === "SessionStart" ? 1200 : event === "UserPromptSubmit" ? 1024 : null;
+    handler.command = command
+      .replace("MEMSTORE_INJECTION_MODE=shadow", "MEMSTORE_INJECTION_MODE=active")
+      .replace(marker, `memstore:gate5-shadow-v1:${event}:active`);
+    if (afterLimit === null) delete handler.additionalContextLimit;
+    else handler.additionalContextLimit = afterLimit;
+    const nextHandlers = [...handlers];
+    nextHandlers[handlerIndex] = handler;
+    route.hooks = nextHandlers;
+    const nextRoutes = [...routes];
+    nextRoutes[routeIndex] = route;
+    hooks[event] = nextRoutes;
+    changes.push({
+      event,
+      injectionMode: { before: "shadow", after: "active" },
+      additionalContextLimit: { before: beforeLimit, after: afterLimit }
+    });
+  }
+  document.hooks = hooks;
+  return { source: `${JSON.stringify(document, null, 2)}\n`, changes };
+}
+
+async function inspectNativeMemoryLocation(path: string): Promise<NativeMemoryInventoryLocation> {
+  const resolvedPath = resolve(path);
+  try {
+    const metadata = await lstat(resolvedPath);
+    if (metadata.isFile()) {
+      return {
+        path: resolvedPath,
+        state: "file",
+        fileCount: 1,
+        directoryCount: 0,
+        totalBytes: metadata.size,
+        modifiedAt: metadata.mtime.toISOString()
+      };
+    }
+    if (metadata.isSymbolicLink()) {
+      return {
+        path: resolvedPath,
+        state: "symlink",
+        fileCount: 0,
+        directoryCount: 0,
+        totalBytes: 0,
+        modifiedAt: metadata.mtime.toISOString()
+      };
+    }
+    if (!metadata.isDirectory()) {
+      return {
+        path: resolvedPath,
+        state: "other",
+        fileCount: 0,
+        directoryCount: 0,
+        totalBytes: metadata.size,
+        modifiedAt: metadata.mtime.toISOString()
+      };
+    }
+    const children = await readdir(resolvedPath);
+    const inventory = await Promise.all(children.map((child) => inspectNativeMemoryLocation(join(resolvedPath, child))));
+    const timestamps = inventory
+      .map((entry) => entry.modifiedAt)
+      .filter((value): value is string => value !== null)
+      .map((value) => Date.parse(value));
+    return {
+      path: resolvedPath,
+      state: "directory",
+      fileCount: inventory.reduce((total, entry) => total + entry.fileCount, 0),
+      directoryCount: 1 + inventory.reduce((total, entry) => total + entry.directoryCount, 0),
+      totalBytes: inventory.reduce((total, entry) => total + entry.totalBytes, 0),
+      modifiedAt: new Date(Math.max(metadata.mtimeMs, ...timestamps)).toISOString()
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        path: resolvedPath,
+        state: "absent",
+        fileCount: 0,
+        directoryCount: 0,
+        totalBytes: 0,
+        modifiedAt: null
+      };
+    }
+    throw error;
+  }
+}
+
+export async function previewNativeMemoryCutover(request: {
+  readonly configPath: string;
+  readonly hooksPath: string;
+  readonly nativeStorePaths: readonly string[];
+  readonly preparedAt: string;
+}): Promise<NativeMemoryCutoverPreview> {
+  const preparedAt = z.iso.datetime().parse(request.preparedAt);
+  const configPath = resolve(request.configPath);
+  const hooksPath = resolve(request.hooksPath);
+  const [configSource, hooksSource, locations] = await Promise.all([
+    readFile(configPath, "utf8"),
+    readFile(hooksPath, "utf8"),
+    Promise.all(request.nativeStorePaths.map(inspectNativeMemoryLocation))
+  ]);
+  const cutoverConfig = replaceMemorySetting(
+    replaceMemorySetting(configSource, "generate_memories", false),
+    "use_memories",
+    false
+  );
+  const cutoverHooks = activateInjectionHooks(hooksSource);
+  const sourceIdentity = {
+    configPath,
+    configSha256: sha256(configSource),
+    hooksPath,
+    hooksSha256: sha256(hooksSource)
+  };
+  const targetIdentity = {
+    configSha256: sha256(cutoverConfig),
+    hooksSha256: sha256(cutoverHooks.source)
+  };
+  const approvalDigest = sha256(JSON.stringify({ source: sourceIdentity, target: targetIdentity }));
+  return {
+    schemaVersion: 1,
+    state: "cutover_preview",
+    dryRun: true,
+    preparedAt,
+    approvalDigest,
+    source: sourceIdentity,
+    target: {
+      ...targetIdentity,
+      nativeMemory: { generateMemories: false, useMemories: false },
+      hookChanges: cutoverHooks.changes
+    },
+    rollback: {
+      expectedConfigSha256: sha256(configSource),
+      expectedHooksSha256: sha256(hooksSource)
+    },
+    nativeData: { operation: "none", bodiesRead: 0, locations }
+  };
+}
+
+async function writeCutoverManifest(path: string, manifest: CutoverManifest, expectedSha256?: string): Promise<void> {
+  await writeFileAtomically(path, `${JSON.stringify(manifest, null, 2)}\n`, 0o600, expectedSha256);
+}
+
+export async function applyNativeMemoryCutover(request: {
+  readonly runtimeRoot: string;
+  readonly preview: NativeMemoryCutoverPreview;
+  readonly approvalDigest: string;
+  readonly appliedAt: string;
+}): Promise<{
+  readonly state: "active";
+  readonly backupId: string;
+  readonly manifestPath: string;
+  readonly hooksSha256: string;
+}> {
+  const appliedAt = z.iso.datetime().parse(request.appliedAt);
+  if (request.approvalDigest !== request.preview.approvalDigest) {
+    throw new Error("Cutover approval digest does not match the reviewed preview.");
+  }
+  const [configSource, hooksSource] = await Promise.all([
+    readFile(request.preview.source.configPath, "utf8"),
+    readFile(request.preview.source.hooksPath, "utf8")
+  ]);
+  if (sha256(configSource) !== request.preview.source.configSha256 ||
+      sha256(hooksSource) !== request.preview.source.hooksSha256) {
+    throw new Error("Cutover source changed after Review; generate and approve a new preview.");
+  }
+  const cutoverConfig = replaceMemorySetting(
+    replaceMemorySetting(configSource, "generate_memories", false),
+    "use_memories",
+    false
+  );
+  const cutoverHooks = activateInjectionHooks(hooksSource).source;
+  if (sha256(cutoverConfig) !== request.preview.target.configSha256 ||
+      sha256(cutoverHooks) !== request.preview.target.hooksSha256) {
+    throw new Error("Cutover target no longer matches the reviewed preview.");
+  }
+
+  const backupId = `cutover-${appliedAt.replaceAll(":", "-")}-${randomUUID()}`;
+  const backupRoot = join(resolve(request.runtimeRoot), "cutover", backupId);
+  const configBackupPath = join(backupRoot, "config.toml.before");
+  const hooksBackupPath = join(backupRoot, "hooks.json.before");
+  const manifestPath = join(backupRoot, "manifest.json");
+  await mkdir(dirname(backupRoot), { recursive: true, mode: 0o700 });
+  await mkdir(backupRoot, { recursive: false, mode: 0o700 });
+  await Promise.all([
+    writeFileAtomically(configBackupPath, configSource, 0o600),
+    writeFileAtomically(hooksBackupPath, hooksSource, 0o600)
+  ]);
+  const prepared: CutoverManifest = {
+    schemaVersion: 1,
+    backupId,
+    state: "prepared",
+    appliedAt,
+    configPath: request.preview.source.configPath,
+    hooksPath: request.preview.source.hooksPath,
+    configBackupPath,
+    hooksBackupPath,
+    sourceConfigSha256: request.preview.source.configSha256,
+    sourceHooksSha256: request.preview.source.hooksSha256,
+    targetConfigSha256: request.preview.target.configSha256,
+    targetHooksSha256: request.preview.target.hooksSha256,
+    approvalDigest: request.approvalDigest
+  };
+  await writeCutoverManifest(manifestPath, prepared);
+  const preparedManifestSha256 = sha256(await readFile(manifestPath));
+  try {
+    if (cutoverConfig !== configSource) {
+      await writeFileAtomically(
+        request.preview.source.configPath,
+        cutoverConfig,
+        0o600,
+        request.preview.source.configSha256
+      );
+    }
+    await writeFileAtomically(
+      request.preview.source.hooksPath,
+      cutoverHooks,
+      0o600,
+      request.preview.source.hooksSha256
+    );
+  } catch (error) {
+    const currentHooks = await readFile(request.preview.source.hooksPath, "utf8");
+    if (sha256(currentHooks) === request.preview.target.hooksSha256) {
+      await writeFileAtomically(
+        request.preview.source.hooksPath,
+        hooksSource,
+        0o600,
+        request.preview.target.hooksSha256
+      );
+    }
+    const currentConfig = await readFile(request.preview.source.configPath, "utf8");
+    if (sha256(currentConfig) === request.preview.target.configSha256 && currentConfig !== configSource) {
+      await writeFileAtomically(
+        request.preview.source.configPath,
+        configSource,
+        0o600,
+        request.preview.target.configSha256
+      );
+    }
+    throw error;
+  }
+  const active: CutoverManifest = { ...prepared, state: "active" };
+  await writeCutoverManifest(manifestPath, active, preparedManifestSha256);
+  return {
+    state: "active",
+    backupId,
+    manifestPath,
+    hooksSha256: request.preview.target.hooksSha256
+  };
+}
+
+export async function rollbackNativeMemoryCutover(request: {
+  readonly manifestPath: string;
+  readonly rolledBackAt: string;
+}): Promise<{ readonly state: "rolled_back"; readonly backupId: string }> {
+  const rolledBackAt = z.iso.datetime().parse(request.rolledBackAt);
+  const manifestPath = resolve(request.manifestPath);
+  const manifestSource = await readFile(manifestPath, "utf8");
+  const manifest = cutoverManifestSchema.parse(JSON.parse(manifestSource));
+  if (manifest.state === "rolled_back") throw new Error("Cutover manifest is already rolled back.");
+  const [currentConfig, currentHooks, configBackup, hooksBackup] = await Promise.all([
+    readFile(manifest.configPath, "utf8"),
+    readFile(manifest.hooksPath, "utf8"),
+    readFile(manifest.configBackupPath, "utf8"),
+    readFile(manifest.hooksBackupPath, "utf8")
+  ]);
+  if (sha256(currentConfig) !== manifest.targetConfigSha256 ||
+      sha256(currentHooks) !== manifest.targetHooksSha256) {
+    throw new Error("Cutover targets diverged; refusing automatic rollback.");
+  }
+  if (sha256(configBackup) !== manifest.sourceConfigSha256 ||
+      sha256(hooksBackup) !== manifest.sourceHooksSha256) {
+    throw new Error("Cutover backup integrity check failed.");
+  }
+  await writeFileAtomically(manifest.hooksPath, hooksBackup, 0o600, manifest.targetHooksSha256);
+  if (configBackup !== currentConfig) {
+    await writeFileAtomically(manifest.configPath, configBackup, 0o600, manifest.targetConfigSha256);
+  }
+  await writeCutoverManifest(
+    manifestPath,
+    { ...manifest, state: "rolled_back", rolledBackAt },
+    sha256(manifestSource)
+  );
+  return { state: "rolled_back", backupId: manifest.backupId };
 }
 
 export async function rehearseNativeMemoryCutover(request: {
@@ -925,8 +1310,7 @@ export async function rehearseNativeMemoryCutover(request: {
     "use_memories",
     false
   );
-  const cutoverHooks = activateInjectionHooks(hooksSource);
-  if (cutoverHooks === hooksSource) throw new Error("No frozen MemStore Shadow Hook is available for cutover rehearsal.");
+  const cutoverHooks = activateInjectionHooks(hooksSource).source;
   const locations = await Promise.all(request.nativeStorePaths.map(async (path) => ({
     path: resolve(path),
     state: (await identity(resolve(path))).state === "absent" ? "absent" as const : "present" as const
