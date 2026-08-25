@@ -55,6 +55,52 @@ test("doctor and Vault validation expose stable read-only JSON envelopes", async
   });
 }, 15_000);
 
+test("Sensitivity status and exact body-free assessment are reachable through the CLI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-cli-sensitivity-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  const capture = await captureEvent({
+    runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: "msevent_cli_sensitivity",
+      deduplicationKey: "codex:cli-sensitivity:stop",
+      agent: "codex",
+      eventKind: "Stop",
+      occurredAt: "2026-08-25T21:00:00.000Z",
+      payload: { note: "credential AbCdEf0123456789+/ZyxWv9876543210==" }
+    }
+  });
+  if (capture.state !== "quarantined") throw new Error("Expected quarantine fixture.");
+  const common = ["--runtime", runtimeRoot, "--vault", vaultRoot, "--json"];
+
+  await expect(cli(["sensitivity", "status", ...common])).resolves.toMatchObject({
+    schema_version: 1,
+    ok: true,
+    command: "sensitivity.status",
+    result: {
+      bodyPolicy: "never_retained",
+      summaries: [
+        { state: "quarantined", findingCount: 1, bodyRetainedCount: 0 },
+        { state: "blocked_secret", findingCount: 0, bodyRetainedCount: 0 }
+      ]
+    }
+  });
+  await expect(cli(["sensitivity", "inspect", capture.findingId, ...common]))
+    .resolves.toMatchObject({
+      schema_version: 1,
+      ok: true,
+      command: "sensitivity.inspect",
+      result: {
+        findingId: capture.findingId,
+        bodyRetained: false,
+        reviewability: "safe_resubmission_or_readable_source_required"
+      }
+    });
+}, 15_000);
+
 test("mutation previews do not create Review Inbox or backup files", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-cli-preview-"));
   roots.push(root);

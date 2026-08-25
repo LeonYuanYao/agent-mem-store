@@ -147,10 +147,10 @@ async function recordSensitivityFinding(
       const observation = database
         .prepare(
           `INSERT OR IGNORE INTO sensitivity_observations(
-             fingerprint, source_identity, observed_at
-           ) VALUES (?, ?, ?)`
+             fingerprint, source_identity, observed_at, source_kind
+           ) VALUES (?, ?, ?, ?)`
         )
-        .run(fingerprint, sourceIdentity, event.occurredAt);
+        .run(fingerprint, sourceIdentity, event.occurredAt, `${event.agent}:${event.eventKind}`);
       if (existing !== undefined && observation.changes === 1) {
         database
           .prepare(

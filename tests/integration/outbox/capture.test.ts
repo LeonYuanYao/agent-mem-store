@@ -8,6 +8,10 @@ import {
   inspectSensitivityFinding,
   readCapturedEvent
 } from "../../../src/capture/index.js";
+import {
+  inspectSensitivityAssessment,
+  summarizeSensitivityFindings
+} from "../../../src/sensitivity/summary.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -150,6 +154,25 @@ test("credential-shaped uncertainty is quarantined body-free while a commit hash
   expect(quarantined).toMatchObject({
     state: "quarantined",
     category: "contextual_credential"
+  });
+  if (quarantined.state !== "quarantined") throw new Error("Expected body-free quarantine.");
+  await expect(summarizeSensitivityFindings({
+    runtimeRoot,
+    state: "quarantined"
+  })).resolves.toMatchObject({
+    findingCount: 1,
+    occurrenceCount: 1,
+    bodyRetainedCount: 0,
+    groups: [{ sourceKind: "codex:Stop", findingCount: 1, occurrenceCount: 1 }]
+  });
+  await expect(inspectSensitivityAssessment({
+    runtimeRoot,
+    findingId: quarantined.findingId
+  })).resolves.toMatchObject({
+    findingId: quarantined.findingId,
+    bodyRetained: false,
+    sourceKinds: [{ sourceKind: "codex:Stop", occurrenceCount: 1 }],
+    reviewability: "safe_resubmission_or_readable_source_required"
   });
   expect(benign.state).toBe("captured");
   const runtimeBodies = await collectFileBodies(runtimeRoot);

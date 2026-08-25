@@ -254,6 +254,11 @@ const migrations: readonly Migration[] = [
     version: 48,
     name: "knowledge_verification_runs",
     path: new URL("../../migrations/0048-knowledge-verification-runs.sql", import.meta.url)
+  },
+  {
+    version: 49,
+    name: "sensitivity_observation_source_kind",
+    path: new URL("../../migrations/0049-sensitivity-observation-source-kind.sql", import.meta.url)
   }
 ];
 

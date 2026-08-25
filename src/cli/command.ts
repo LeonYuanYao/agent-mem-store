@@ -72,6 +72,10 @@ import { inspectOperation, inspectStatus, waitForOperation } from "../operations
 import { SwiftNotifierAdapter } from "../adapters/macos/notifier.js";
 import { CodexLunaAdapter } from "../luna/index.js";
 import { CodexTerraRetrievalJudge } from "../retrieval/judge.js";
+import {
+  inspectSensitivityAssessment,
+  inspectSensitivityStatus
+} from "../sensitivity/summary.js";
 import { startForegroundRetrievalServer } from "../retrieval/foreground-ipc.js";
 import { runCodexHook } from "./codex-hook.js";
 import {
@@ -1211,6 +1215,35 @@ async function run(arguments_: readonly string[]): Promise<void> {
     const result = await inspectStatus(location);
     if (parsed.values.json) process.stdout.write(`${JSON.stringify(successEnvelope("status", result))}\n`);
     else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (command === "sensitivity") {
+    const parsed = parseCommon(arguments_);
+    const runtimeRoot = roots(parsed.values).runtimeRoot;
+    const action = parsed.positionals[1];
+    let result: unknown;
+    if (action === "status") {
+      result = await inspectSensitivityStatus(runtimeRoot);
+    } else if (action === "inspect") {
+      const findingId = parsed.positionals[2];
+      if (findingId === undefined) {
+        throw new MemStoreCommandError(
+          "sensitivity_finding_required",
+          "sensitivity inspect requires a Finding identity."
+        );
+      }
+      result = await inspectSensitivityAssessment({ runtimeRoot, findingId });
+    } else {
+      throw new MemStoreCommandError(
+        "unknown_command",
+        "Use sensitivity status or sensitivity inspect <finding-id>."
+      );
+    }
+    if (parsed.values.json) {
+      process.stdout.write(`${JSON.stringify(successEnvelope(commandIdentity(arguments_), result))}\n`);
+    } else {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    }
     return;
   }
   if (["doctor", "vault", "worker", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command ?? "") ||

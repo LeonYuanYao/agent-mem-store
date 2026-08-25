@@ -6,6 +6,7 @@ import { z } from "zod";
 import { writeFileAtomically } from "../contracts/atomic-file.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
+import { summarizeSensitivityFindings } from "../sensitivity/summary.js";
 
 const countsSchema = z.object({
   reviewSuggestions: z.number().int().nonnegative(),
@@ -62,7 +63,6 @@ export async function generateReviewInbox(request: {
   let conflicts: readonly Record<string, unknown>[];
   let verificationRequests: readonly Record<string, unknown>[];
   let incidents: readonly Record<string, unknown>[];
-  let findings: readonly Record<string, unknown>[];
   let deadLetters: readonly Record<string, unknown>[];
   try {
     suggestions = database.prepare(
@@ -93,11 +93,6 @@ export async function generateReviewInbox(request: {
        FROM model_health_incidents WHERE state != 'recovered'
        ORDER BY started_at, incident_id`
     ).all();
-    findings = database.prepare(
-      `SELECT finding_id, state, category, first_seen_at, last_seen_at, occurrence_count
-       FROM sensitivity_findings WHERE state = 'quarantined'
-       ORDER BY first_seen_at, finding_id`
-    ).all();
     deadLetters = database.prepare(
       `SELECT event_id, last_error_code, updated_at
        FROM capture_events WHERE state = 'dead_letter'
@@ -106,12 +101,17 @@ export async function generateReviewInbox(request: {
   } finally {
     database.close();
   }
+  const findingSummary = await summarizeSensitivityFindings({
+    runtimeRoot,
+    state: "quarantined",
+    recentIdentityLimit: 3
+  });
   const counts = {
     reviewSuggestions: suggestions.length,
     humanConflicts: conflicts.length,
     verificationRequests: verificationRequests.length,
     modelHealthIncidents: incidents.length,
-    sensitivityFindings: findings.length,
+    sensitivityFindings: findingSummary.findingCount,
     deadLetters: deadLetters.length
   };
   const lines = [
@@ -160,13 +160,36 @@ export async function generateReviewInbox(request: {
     );
   }
   lines.push("", "## Operational Incidents", "");
-  const operational = [...incidents, ...findings, ...deadLetters];
-  if (operational.length === 0) lines.push("_None._", "");
+  const operationalCount = incidents.length + findingSummary.findingCount + deadLetters.length;
+  if (operationalCount === 0) lines.push("_None._", "");
   for (const row of incidents) {
     lines.push(`- Model incident \`${safeBounded(row.incident_id, 128)}\`: ${safeBounded(row.state, 32)} / ${safeBounded(row.reason_category, 64)}`);
   }
-  for (const row of findings) {
-    lines.push(`- Sensitivity finding \`${safeBounded(row.finding_id, 128)}\`: ${safeBounded(row.category, 64)} (body not retained)`);
+  if (findingSummary.findingCount > 0) {
+    lines.push(
+      "",
+      "### Sensitivity Quarantine Summary",
+      "",
+      `_${findingSummary.findingCount.toLocaleString("en-US")} body-free findings / ${findingSummary.occurrenceCount.toLocaleString("en-US")} occurrences. Detection and quarantine remain strict; this view is aggregated._`,
+      ""
+    );
+  }
+  for (const group of findingSummary.groups) {
+    lines.push(
+      `- **${safeBounded(group.category, 64)}** from \`${safeBounded(group.sourceKind, 96)}\`: ${group.findingCount.toLocaleString("en-US")} findings / ${group.occurrenceCount.toLocaleString("en-US")} occurrences`,
+      `  - First / last seen: ${safeBounded(group.firstSeenAt, 64)} / ${safeBounded(group.lastSeenAt, 64)}`,
+      "  - Suspected values retained: 0"
+    );
+    if (group.recentFindingIds.length > 0) {
+      lines.push(
+        `  - Recent identities: ${group.recentFindingIds.map((findingId) => `\`${safeBounded(findingId, 128)}\``).join(", ")}`
+      );
+    }
+  }
+  if (findingSummary.findingCount > 0) {
+    lines.push(
+      "  - Exact false-positive review requires the unchanged readable source or explicit safe resubmission; body-free metadata alone cannot approve an override."
+    );
   }
   for (const row of deadLetters) {
     lines.push(`- Dead letter \`${safeBounded(row.event_id, 128)}\`: ${safeBounded(row.last_error_code, 64)}`);

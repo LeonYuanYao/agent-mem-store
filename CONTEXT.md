@@ -108,6 +108,10 @@ _Avoid_: 未完成敏感分类、Secret Content、Private Memory
 保存无法安全确定分类、不会参与正常回忆且不会发送给 Luna 的本地隔离状态。它用于后续确定性处理或显式复核，不是 Durable Memory。
 _Avoid_: Governance Queue、正常索引、模型分类输入
 
+**Sensitivity Quarantine Aggregate（敏感隔离聚合）**:
+按风险类别和 body-free 来源种类汇总精确 Sensitivity Finding 的人工复核视图。它保留总量、发生次数、时间范围和少量近期 Finding identity，但不是独立 Finding、误报裁决或安全规则豁免。
+_Avoid_: 每条审计记录都是人工待办、Suspect 正文摘要、批量误报批准
+
 **False-positive Secret Override（Secret 误报豁免）**:
 用户显式确认某次 Secret 检测是误报的窄范围授权。它绑定非可逆内容 fingerprint、检测规则 identity/version 和当前内容 revision；正文或规则发生相关变化后必须重新检测。它不能全局关闭检测，也不能授权保存真实凭据。
 _Avoid_: Secret allowlist、强制存储凭据、明文豁免记录
@@ -201,7 +205,7 @@ _Avoid_: 每条即时通知、强制审批队列、Durable Memory
 _Avoid_: Obsidian Plugin、Agent 对话注入、模型通知器
 
 **Review Inbox（复核收件箱）**:
-Memory Vault 中可由 Obsidian 打开的、可重建的治理视图，默认路径为 `_MemStore/Review Inbox.md`。它链接到原始 Memory、展示问题分类和证据引用，但不复制知识正文，也不是第二份权威知识。
+Memory Vault 中可由 Obsidian 打开的、可重建的治理视图，默认路径为 `_MemStore/Review Inbox.md`。它链接到原始 Memory、展示问题分类和证据引用，并把高容量安全账本呈现为有界聚合而非逐行镜像；它不复制知识正文，也不是第二份权威知识。
 _Avoid_: Canonical Memory Data 副本、用户知识正文、不可重建状态
 
 **Reminder Obligation（提醒义务）**:
