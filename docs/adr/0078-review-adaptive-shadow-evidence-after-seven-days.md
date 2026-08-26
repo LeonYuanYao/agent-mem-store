@@ -8,7 +8,7 @@ Shadow Mode runs for at least seven consecutive calendar days before Full Cutove
 
 During the window, MemStore records Sessions, retrieval opportunities, non-empty packs, selected candidates, explicit deep reads, irrelevant observations, latency, failures, and recovery evidence. At the end, the Readiness Report uses the observed data distribution to propose quality thresholds and targeted additional observation. Sparse evidence may be reviewed in full; abundant evidence is sampled across Project, scope, authority, Relevance Band, and anomaly type. Configuration comparisons need not claim formal statistical significance.
 
-Ordinary irrelevant-rate, recall-rate, and sample-count thresholds therefore remain adaptive until the Review. Existing p95 300-millisecond and 500-millisecond fail-open product targets remain observable without a minimum request-count fiction.
+Ordinary irrelevant-rate, recall-rate, and sample-count thresholds therefore remain adaptive until the Review. The p95 300-millisecond SLO and the current one-second fail-open product target from ADR-0114 remain observable without a minimum request-count fiction.
 
 Safety and correctness are not adaptive: any confirmed Secret body leakage; unauthorized, wrong-Project, cross-Project Private, Candidate, unresolved-conflict, expired, or rejected automatic injection; silent acknowledged-event loss; duplicate Canonical or governance effect from replay; or foreground blocking instead of fail-open prevents cutover.
 

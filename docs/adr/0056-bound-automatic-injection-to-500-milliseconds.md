@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0114
 ---
 
 # Bound automatic injection to 500 milliseconds

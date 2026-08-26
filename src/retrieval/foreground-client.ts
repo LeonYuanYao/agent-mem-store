@@ -12,7 +12,7 @@ import {
   type ForegroundRetrievalResult
 } from "./foreground-protocol.js";
 
-const defaultClientTimeoutMilliseconds = 350;
+const defaultClientTimeoutMilliseconds = 1_000;
 const emptySignals = { files: [], symbols: [], errors: [], commands: [] } as const;
 
 export { foregroundRetrievalSocketPath } from "./foreground-protocol.js";

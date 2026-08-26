@@ -87,8 +87,16 @@ test("cutover preview is read-only, inventory-only, and changes only owned hook 
     target: {
       nativeMemory: { generateMemories: false, useMemories: false },
       hookChanges: [
-        { event: "SessionStart", additionalContextLimit: { before: null, after: 1200 } },
-        { event: "UserPromptSubmit", additionalContextLimit: { before: null, after: 1024 } },
+        {
+          event: "SessionStart",
+          hostTimeoutSeconds: { before: 1, after: 2 },
+          additionalContextLimit: { before: null, after: 1200 }
+        },
+        {
+          event: "UserPromptSubmit",
+          hostTimeoutSeconds: { before: 1, after: 2 },
+          additionalContextLimit: { before: null, after: 1024 }
+        },
         { event: "PostToolUse", additionalContextLimit: { before: null, after: null } },
         { event: "Stop", additionalContextLimit: { before: null, after: null } },
         { event: "SessionEnd", additionalContextLimit: { before: null, after: null } }
@@ -141,8 +149,13 @@ test("approved cutover writes exact reviewed targets and restores exact bytes th
     const owned = handlers.find((handler) => String(handler.command).includes(`memstore:gate5-shadow-v1:${event}:active`));
     expect(owned).toBeDefined();
     expect(handlers.some((handler) => handler.command === `keep-${event}`)).toBe(true);
-    if (event === "SessionStart") expect(owned?.additionalContextLimit).toBe(1200);
-    else if (event === "UserPromptSubmit") expect(owned?.additionalContextLimit).toBe(1024);
+    if (event === "SessionStart") {
+      expect(owned?.additionalContextLimit).toBe(1200);
+      expect(owned?.timeout).toBe(2);
+    } else if (event === "UserPromptSubmit") {
+      expect(owned?.additionalContextLimit).toBe(1024);
+      expect(owned?.timeout).toBe(2);
+    }
     else expect(owned).not.toHaveProperty("additionalContextLimit");
   }
 
@@ -153,4 +166,114 @@ test("approved cutover writes exact reviewed targets and restores exact bytes th
   expect(await readFile(configPath, "utf8")).toBe(originalConfig);
   expect(await readFile(hooksPath, "utf8")).toBe(originalHooks);
   expect(JSON.parse(await readFile(applied.manifestPath, "utf8"))).toMatchObject({ state: "rolled_back" });
+});
+
+test("rollback preserves Codex Hook trust updates while restoring Memory settings and Hooks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-cutover-trust-rollback-"));
+  roots.push(root);
+  const configPath = join(root, "config.toml");
+  const hooksPath = join(root, "hooks.json");
+  const runtimeRoot = join(root, "runtime");
+  const originalConfig = [
+    "[memories]",
+    "generate_memories = true",
+    "use_memories = true",
+    "",
+    "[hooks.state.\"managed-hook\"]",
+    "trusted_hash = \"sha256:shadow\"",
+    ""
+  ].join("\n");
+  const originalHooks = hookSource();
+  await writeFile(configPath, originalConfig);
+  await writeFile(hooksPath, originalHooks);
+  const preview = await previewNativeMemoryCutover({
+    configPath,
+    hooksPath,
+    nativeStorePaths: [],
+    preparedAt: "2026-08-26T01:00:00.000Z"
+  });
+  const applied = await applyNativeMemoryCutover({
+    runtimeRoot,
+    preview,
+    approvalDigest: preview.approvalDigest,
+    appliedAt: "2026-08-26T01:01:00.000Z"
+  });
+  const trustedActiveConfig = (await readFile(configPath, "utf8"))
+    .replace("trusted_hash = \"sha256:shadow\"", "trusted_hash = \"sha256:active\"");
+  await writeFile(configPath, trustedActiveConfig);
+
+  await rollbackNativeMemoryCutover({
+    manifestPath: applied.manifestPath,
+    rolledBackAt: "2026-08-26T01:02:00.000Z"
+  });
+
+  const rolledBackConfig = await readFile(configPath, "utf8");
+  expect(rolledBackConfig).toContain("generate_memories = true\nuse_memories = true");
+  expect(rolledBackConfig).toContain("trusted_hash = \"sha256:active\"");
+  expect(await readFile(hooksPath, "utf8")).toBe(originalHooks);
+});
+
+test("rollback still rejects configuration drift outside Codex Hook trust state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-cutover-config-drift-"));
+  roots.push(root);
+  const configPath = join(root, "config.toml");
+  const hooksPath = join(root, "hooks.json");
+  const runtimeRoot = join(root, "runtime");
+  await writeFile(configPath, "model = \"before\"\n\n[memories]\ngenerate_memories = true\nuse_memories = true\n");
+  await writeFile(hooksPath, hookSource());
+  const preview = await previewNativeMemoryCutover({
+    configPath,
+    hooksPath,
+    nativeStorePaths: [],
+    preparedAt: "2026-08-26T02:00:00.000Z"
+  });
+  const applied = await applyNativeMemoryCutover({
+    runtimeRoot,
+    preview,
+    approvalDigest: preview.approvalDigest,
+    appliedAt: "2026-08-26T02:01:00.000Z"
+  });
+  await writeFile(configPath, (await readFile(configPath, "utf8")).replace("model = \"before\"", "model = \"changed\""));
+
+  await expect(rollbackNativeMemoryCutover({
+    manifestPath: applied.manifestPath,
+    rolledBackAt: "2026-08-26T02:02:00.000Z"
+  })).rejects.toThrow("diverged beyond Hook trust state");
+});
+
+test("rollback rejects non-hash changes inside Codex Hook state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-cutover-hook-state-drift-"));
+  roots.push(root);
+  const configPath = join(root, "config.toml");
+  const hooksPath = join(root, "hooks.json");
+  const runtimeRoot = join(root, "runtime");
+  await writeFile(configPath, [
+    "[memories]",
+    "generate_memories = true",
+    "use_memories = true",
+    "",
+    "[hooks.state.\"managed-hook\"]",
+    "trusted_hash = \"sha256:shadow\"",
+    "enabled = true",
+    ""
+  ].join("\n"));
+  await writeFile(hooksPath, hookSource());
+  const preview = await previewNativeMemoryCutover({
+    configPath,
+    hooksPath,
+    nativeStorePaths: [],
+    preparedAt: "2026-08-26T03:00:00.000Z"
+  });
+  const applied = await applyNativeMemoryCutover({
+    runtimeRoot,
+    preview,
+    approvalDigest: preview.approvalDigest,
+    appliedAt: "2026-08-26T03:01:00.000Z"
+  });
+  await writeFile(configPath, (await readFile(configPath, "utf8")).replace("enabled = true", "enabled = false"));
+
+  await expect(rollbackNativeMemoryCutover({
+    manifestPath: applied.manifestPath,
+    rolledBackAt: "2026-08-26T03:02:00.000Z"
+  })).rejects.toThrow("diverged beyond Hook trust state");
 });

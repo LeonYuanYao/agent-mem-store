@@ -16,7 +16,7 @@ An unavailable or invalid judge fails the explicit request visibly rather than
 silently claiming a judged result.
 
 Automatic SessionStart and UserPromptSubmit injection never invokes Terra. It
-remains deterministic, local, and governed by the existing 500-millisecond
-deadline. Every Terra process explicitly selects `service_tier="default"`,
+remains deterministic, local, and governed by the one-second deadline in ADR-0114.
+Every Terra process explicitly selects `service_tier="default"`,
 `model_reasoning_effort="low"`, an isolated read-only working directory, and
 disabled tools, skills, plugins, and memories.

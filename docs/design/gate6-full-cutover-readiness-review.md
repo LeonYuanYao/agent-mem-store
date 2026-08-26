@@ -31,16 +31,25 @@ The approved digest remained unchanged, so the single Cutover activated at
 - Final `doctor --deep` remained healthy, the emergency spool remained empty,
   the Worker remained running, and the foreground socket remained owner-only.
 
-The host-level Codex trust confirmation remains a Human action on the next new
-or resumed Codex Session. Until that confirmation occurs, the exact active Hook
-files and direct Hook probes are verified, but that host Session may decline to
-run the changed definitions.
+Codex subsequently wrote the five active Hook trust hashes into its host-owned
+`hooks.state`; this existing Session also received MemStore context. Host trust
+is therefore confirmed rather than pending.
+
+### Post-Cutover timeout and rollback adjustment
+
+Production receipts later showed one useful UserPromptSubmit pack completing in
+807.7 milliseconds. The Human approved a one-second foreground wait, with a
+two-second Codex command-Hook timeout so the client can still serialize or fail
+open after retrieval. Codex also rewrote the five expected `hooks.state` trust
+hashes after activation; rollback now preserves only those host-owned hash values while
+restoring the reviewed Memory flags and Hook document, and still rejects every
+other configuration change.
 
 ## Recommendation
 
 MemStore is ready for a reviewed Full Cutover if the Human accepts one explicit
-performance tradeoff: the current-scale active path stays below the accepted
-500-millisecond deadline, but UserPromptSubmit does not yet meet the aspirational
+performance tradeoff: the current-scale active path stayed below the former
+500-millisecond deadline in the reviewed benchmark, but UserPromptSubmit did not meet the aspirational
 300-millisecond p95 target. The proposed Cutover therefore includes immediate
 production verification and an identity-checked rollback path.
 
@@ -212,7 +221,7 @@ Rollback is immediate for any secret body injection, cross-Project scope leak,
 malformed Hook output that disrupts a Session, or repeated Capture/Receipt
 failure after one Worker restart. A single irrelevant Memory is recorded as a
 Bad Case rather than forcing rollback; repeated confirmed noise is reviewed
-against the active repair policy. Performance exceeding 500 milliseconds or
+against the active repair policy. Performance exceeding one second or
 returning deadline failures in production triggers rollback review. The
 rollback command refuses to overwrite files that diverged after Cutover,
 restores Hooks before native-memory configuration, verifies both backup hashes,

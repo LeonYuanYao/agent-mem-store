@@ -154,12 +154,12 @@ try {
       userPromptSubmit: summarize(userPrompt)
     };
     const passed = Object.values(metrics).every((metric) => metric.p95Milliseconds <= 300 &&
-      metric.p99Milliseconds <= 500);
+      metric.p99Milliseconds <= 1_000);
     const artifact = {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
       passed,
-      targets: { p95Milliseconds: 300, hardDeadlineMilliseconds: 500 },
+      targets: { p95Milliseconds: 300, hardDeadlineMilliseconds: 1_000 },
       environment: {
         node: process.version,
         platform: process.platform,

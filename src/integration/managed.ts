@@ -15,6 +15,7 @@ import {
   unlink
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
 
 import { writeFileAtomically } from "../contracts/atomic-file.js";
@@ -172,6 +173,7 @@ interface NativeMemoryInventoryLocation {
 interface CutoverHookChange {
   readonly event: Candidate["hookEvents"][number];
   readonly injectionMode: { readonly before: "shadow"; readonly after: "active" };
+  readonly hostTimeoutSeconds: { readonly before: number | null; readonly after: number | null };
   readonly additionalContextLimit: {
     readonly before: number | null;
     readonly after: number | null;
@@ -333,7 +335,9 @@ function managedHookGroup(request: ManagedRequest, event: Candidate["hookEvents"
     hooks: [{
       type: "command",
       command,
-      timeout: event === "SessionEnd" ? 3 : event === "PostToolUse" ? 2 : 1,
+      timeout: event === "SessionEnd" ? 3
+        : event === "PostToolUse" || event === "SessionStart" || event === "UserPromptSubmit" ? 2
+          : 1,
       ...((event === "SessionStart" || event === "UserPromptSubmit")
         ? { additionalContextLimit: event === "SessionStart" ? 1200 : 1024 }
         : {})
@@ -974,6 +978,30 @@ function replaceMemorySetting(source: string, key: "generate_memories" | "use_me
   return `${source.slice(0, bodyStart)}${nextBody}${source.slice(bodyEnd)}`;
 }
 
+function memorySetting(source: string, key: "generate_memories" | "use_memories"): boolean {
+  const document = z.record(z.string(), z.unknown()).parse(parseToml(source));
+  const memories = z.record(z.string(), z.unknown()).parse(document.memories);
+  return z.boolean().parse(memories[key]);
+}
+
+function configIdentityWithoutHookTrustHashes(source: string): string {
+  const document = z.record(z.string(), z.unknown()).parse(parseToml(source));
+  if (document.hooks !== undefined) {
+    const hooks = z.record(z.string(), z.unknown()).parse(document.hooks);
+    if (hooks.state !== undefined) {
+      const state = z.record(z.string(), z.unknown()).parse(hooks.state);
+      for (const [key, value] of Object.entries(state)) {
+        const hookState = z.record(z.string(), z.unknown()).parse(value);
+        delete hookState.trusted_hash;
+        state[key] = hookState;
+      }
+      hooks.state = state;
+    }
+    document.hooks = hooks;
+  }
+  return JSON.stringify(document);
+}
+
 function activateInjectionHooks(source: string): {
   readonly source: string;
   readonly changes: readonly CutoverHookChange[];
@@ -1007,10 +1035,16 @@ function activateInjectionHooks(source: string): {
     const beforeLimit = typeof handler.additionalContextLimit === "number"
       ? z.number().int().nonnegative().parse(handler.additionalContextLimit)
       : null;
+    const beforeTimeout = typeof handler.timeout === "number"
+      ? z.number().int().positive().parse(handler.timeout)
+      : null;
     const afterLimit = event === "SessionStart" ? 1200 : event === "UserPromptSubmit" ? 1024 : null;
+    const afterTimeout = event === "SessionStart" || event === "UserPromptSubmit" ? 2 : beforeTimeout;
     handler.command = command
       .replace("MEMSTORE_INJECTION_MODE=shadow", "MEMSTORE_INJECTION_MODE=active")
       .replace(marker, `memstore:gate5-shadow-v1:${event}:active`);
+    if (afterTimeout === null) delete handler.timeout;
+    else handler.timeout = afterTimeout;
     if (afterLimit === null) delete handler.additionalContextLimit;
     else handler.additionalContextLimit = afterLimit;
     const nextHandlers = [...handlers];
@@ -1022,6 +1056,7 @@ function activateInjectionHooks(source: string): {
     changes.push({
       event,
       injectionMode: { before: "shadow", after: "active" },
+      hostTimeoutSeconds: { before: beforeTimeout, after: afterTimeout },
       additionalContextLimit: { before: beforeLimit, after: afterLimit }
     });
   }
@@ -1270,17 +1305,37 @@ export async function rollbackNativeMemoryCutover(request: {
     readFile(manifest.configBackupPath, "utf8"),
     readFile(manifest.hooksBackupPath, "utf8")
   ]);
-  if (sha256(currentConfig) !== manifest.targetConfigSha256 ||
-      sha256(currentHooks) !== manifest.targetHooksSha256) {
-    throw new Error("Cutover targets diverged; refusing automatic rollback.");
-  }
   if (sha256(configBackup) !== manifest.sourceConfigSha256 ||
       sha256(hooksBackup) !== manifest.sourceHooksSha256) {
     throw new Error("Cutover backup integrity check failed.");
   }
+  if (sha256(currentHooks) !== manifest.targetHooksSha256) {
+    throw new Error("Cutover Hooks diverged; refusing automatic rollback.");
+  }
+  const expectedTargetConfig = replaceMemorySetting(
+    replaceMemorySetting(configBackup, "generate_memories", false),
+    "use_memories",
+    false
+  );
+  if (sha256(currentConfig) !== manifest.targetConfigSha256 &&
+      configIdentityWithoutHookTrustHashes(currentConfig) !== configIdentityWithoutHookTrustHashes(expectedTargetConfig)) {
+    throw new Error("Cutover configuration diverged beyond Hook trust state; refusing automatic rollback.");
+  }
+  const rollbackConfig = replaceMemorySetting(
+    replaceMemorySetting(
+      currentConfig,
+      "generate_memories",
+      memorySetting(configBackup, "generate_memories")
+    ),
+    "use_memories",
+    memorySetting(configBackup, "use_memories")
+  );
+  if (configIdentityWithoutHookTrustHashes(rollbackConfig) !== configIdentityWithoutHookTrustHashes(configBackup)) {
+    throw new Error("Rollback configuration does not match the reviewed source outside Hook trust state.");
+  }
   await writeFileAtomically(manifest.hooksPath, hooksBackup, 0o600, manifest.targetHooksSha256);
-  if (configBackup !== currentConfig) {
-    await writeFileAtomically(manifest.configPath, configBackup, 0o600, manifest.targetConfigSha256);
+  if (rollbackConfig !== currentConfig) {
+    await writeFileAtomically(manifest.configPath, rollbackConfig, 0o600, sha256(currentConfig));
   }
   await writeCutoverManifest(
     manifestPath,

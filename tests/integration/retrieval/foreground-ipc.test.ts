@@ -124,6 +124,52 @@ test("the foreground client fails open when the Worker socket is unavailable", a
   expect(performance.now() - started).toBeLessThan(250);
 });
 
+test("the default foreground deadline accepts a valid response within one second", async () => {
+  const root = await mkdtemp("/tmp/memstore-foreground-one-second-");
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const socketPath = join(runtimeRoot, "state", "foreground-retrieval.sock");
+  await mkdir(join(runtimeRoot, "state"), { recursive: true });
+  const server = createServer((socket) => {
+    let source = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      source += chunk;
+      if (!source.includes("\n")) return;
+      const request = JSON.parse(source.split("\n", 1)[0] ?? "{}") as { requestId?: string };
+      setTimeout(() => {
+        socket.end(`${JSON.stringify({
+          schemaVersion: 1,
+          requestId: request.requestId,
+          state: "completed",
+          event: "SessionStart",
+          text: "<memstore-context>response inside one second</memstore-context>",
+          receiptId: "msreceipt_one_second",
+          renderedTokenCount: 8
+        })}\n`);
+      }, 600);
+    });
+  });
+  await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
+  const started = performance.now();
+  try {
+    await expect(requestForegroundRetrieval({
+      runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId: "one-second-deadline",
+      requestedAt: "2026-08-26T01:00:00.000Z"
+    })).resolves.toMatchObject({ state: "completed", receiptId: "msreceipt_one_second" });
+    expect(performance.now() - started).toBeGreaterThanOrEqual(500);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  } finally {
+    await new Promise<void>((resolveClose, rejectClose) => server.close((error) => {
+      if (error === undefined) resolveClose();
+      else rejectClose(error);
+    }));
+  }
+});
+
 test("the foreground server never returns a different Project's memory", async () => {
   const roots = await fixture();
   const server = await startForegroundRetrievalServer({ ...roots, adapter });
