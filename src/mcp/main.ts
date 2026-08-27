@@ -16,7 +16,15 @@ if (runtimeRoot === undefined || vaultRoot === undefined) {
   );
   process.exitCode = 2;
 } else {
-  const embedding = await loadConfiguredEmbeddingAdapter(resolve(runtimeRoot));
+  let embedding: Awaited<ReturnType<typeof loadConfiguredEmbeddingAdapter>>;
+  try {
+    embedding = await loadConfiguredEmbeddingAdapter(resolve(runtimeRoot));
+  } catch {
+    embedding = undefined;
+    process.stderr.write(
+      "memstore-mcp: embedding_unavailable; continuing with lexical retrieval.\n"
+    );
+  }
   const codexHome = process.env.MEMSTORE_TERRA_CODEX_HOME ??
     process.env.MEMSTORE_LUNA_CODEX_HOME;
   const retrievalJudge = codexHome === undefined

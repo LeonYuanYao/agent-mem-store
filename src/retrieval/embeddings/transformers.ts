@@ -63,9 +63,12 @@ export async function loadTransformersEmbeddingAdapter(request: {
   dispose(): Promise<void>;
 }> {
   const started = performance.now();
+  const modelReference = request.localFilesOnly === true
+    ? resolve(request.cacheDirectory, request.modelIdentity)
+    : request.modelIdentity;
   const extractor: FeatureExtractionPipeline = await pipeline(
     "feature-extraction",
-    request.modelIdentity,
+    modelReference,
     {
       cache_dir: resolve(request.cacheDirectory),
       local_files_only: request.localFilesOnly ?? false,
