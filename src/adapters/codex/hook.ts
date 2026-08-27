@@ -2,12 +2,14 @@ import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
-  captureEvent,
   type CaptureEvent,
-  recordHookSqliteBusyDiagnostic,
-  recordCaptureHealthIncident
+  recordCaptureHealthIncident,
+  recoverCaptureHealthIncident
 } from "../../capture/index.js";
-import { spoolCaptureEvent } from "../../capture/emergency-spool.js";
+import {
+  appendCaptureDisposition,
+  prepareCaptureDisposition
+} from "../../capture/inbox.js";
 import { classifyLocalSensitivity } from "../../contracts/sensitivity.js";
 import { resolveProject } from "../../projects/index.js";
 
@@ -67,7 +69,7 @@ export type CodexHookResult =
     };
 
 const maximumToolFieldBytes = 16 * 1024;
-const hookSqliteBusyTimeoutMilliseconds = 100;
+const hookSqliteBusyTimeoutMilliseconds = 25;
 
 function boundedStructuredValue(value: unknown): unknown {
   if (value === undefined) {
@@ -185,14 +187,12 @@ export async function handleCodexHook(
   let eventKind = "unknown";
   let occurredAt = new Date().toISOString();
   let emergencyEvent: CaptureEvent | undefined;
-  let emergencyProjectPath: string | undefined;
   let resolvedProjectId: string | undefined;
   try {
     const input = hookInputSchema.parse(request.input);
     eventKind = input.hook_event_name;
     occurredAt = z.iso.datetime().parse(request.receivedAt ?? occurredAt);
     const identity = hookIdentity(input);
-    emergencyProjectPath = input.cwd;
     emergencyEvent = {
       schemaVersion: 1,
       eventId: identity.eventId,
@@ -208,81 +208,54 @@ export async function handleCodexHook(
       path: input.cwd,
       runtimeRoot: request.runtimeRoot,
       busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds
-    });
-    resolvedProjectId = project.status === "resolved" ? project.projectId : undefined;
+    }).catch(() => undefined);
+    resolvedProjectId = project?.status === "resolved" ? project.projectId : undefined;
     emergencyEvent = {
       ...emergencyEvent,
       ...(resolvedProjectId === undefined ? {} : { projectId: resolvedProjectId })
     };
-    const captured = await captureEvent({
+    const disposition = await prepareCaptureDisposition({
       runtimeRoot: request.runtimeRoot,
-      recoverHealthCategory: "hook_capture",
-      busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds,
       event: emergencyEvent
     });
-    if (captured.state === "blocked_secret" || captured.state === "quarantined") {
+    const captured = await appendCaptureDisposition({
+      runtimeRoot: request.runtimeRoot,
+      projectPath: input.cwd,
+      capturedAt: occurredAt,
+      disposition
+    });
+    if (project !== undefined) {
+      await recoverCaptureHealthIncident({
+        runtimeRoot: request.runtimeRoot,
+        category: "hook_capture",
+        recoveredAt: occurredAt
+      }).catch(() => undefined);
+    }
+    if (disposition.state !== "event") {
       return {
         continue: true,
         captured: false,
-        state: captured.state,
-        findingId: captured.findingId
+        state: disposition.state,
+        findingId: disposition.finding.findingId
       };
     }
     return {
       continue: true,
       captured: true,
-      state: captured.state,
+      state: "captured",
       eventId: captured.eventId,
       ...(resolvedProjectId === undefined ? {} : { projectId: resolvedProjectId })
     };
   } catch (error) {
-    const systemCode = (error as NodeJS.ErrnoException).code;
-    const message = error instanceof Error ? error.message : "";
-    const runtimeIsBusy =
-      systemCode === "SQLITE_BUSY" || /database is locked|SQLITE_BUSY/iu.test(message);
-    if (runtimeIsBusy) {
-      if (emergencyEvent !== undefined && emergencyProjectPath !== undefined) {
-        try {
-          const spooled = await spoolCaptureEvent({
-            runtimeRoot: request.runtimeRoot,
-            projectPath: emergencyProjectPath,
-            spooledAt: new Date().toISOString(),
-            event: emergencyEvent
-          });
-          await recordHookSqliteBusyDiagnostic({
-            runtimeRoot: request.runtimeRoot,
-            occurredAt,
-            eventKind,
-            outcome: "spooled"
-          }).catch(() => undefined);
-          return {
-            continue: true,
-            captured: true,
-            state: spooled.state,
-            eventId: spooled.eventId,
-            ...(resolvedProjectId === undefined ? {} : { projectId: resolvedProjectId })
-          };
-        } catch {
-          // The active Agent session remains fail-open when both durable paths fail.
-        }
-      }
-      await recordHookSqliteBusyDiagnostic({
-        runtimeRoot: request.runtimeRoot,
-        occurredAt,
-        eventKind,
-        outcome: "lost"
-      }).catch(() => undefined);
-    } else {
-      const errorCode = error instanceof z.ZodError
-        ? "invalid_hook_input"
-        : "capture_unavailable";
-      await recordCaptureHealthIncident({
-        runtimeRoot: request.runtimeRoot,
-        category: "hook_capture",
-        errorCode,
-        occurredAt: new Date().toISOString()
-      }).catch(() => undefined);
-    }
+    const errorCode = error instanceof z.ZodError
+      ? "invalid_hook_input"
+      : "capture_unavailable";
+    await recordCaptureHealthIncident({
+      runtimeRoot: request.runtimeRoot,
+      category: "hook_capture",
+      errorCode,
+      occurredAt: new Date().toISOString()
+    }).catch(() => undefined);
     return {
       continue: true,
       captured: false,

@@ -74,7 +74,7 @@ test("the Worker builds the index and evaluates official Codex Shadow events asy
     adapters: { embedding }
   })).resolves.toMatchObject({
     state: "worked",
-    activities: ["retrieval-index:published", "shadow:completed"]
+    activities: ["capture-inbox:imported:2", "retrieval-index:published", "shadow:completed"]
   });
   await expect(inspectShadowEvaluation(runtimeRoot, start.eventId)).resolves.toMatchObject({
     state: "completed",

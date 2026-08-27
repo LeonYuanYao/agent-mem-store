@@ -65,7 +65,7 @@ for (const event of ["SessionStart", "UserPromptSubmit"] as const) {
         if (!source.includes("\n")) return;
         const request = JSON.parse(source.split("\n", 1)[0] ?? "{}") as { requestId?: string };
         socket.end(`${JSON.stringify({
-          schemaVersion: 1,
+          schemaVersion: 2,
           requestId: request.requestId,
           state: "completed",
           event,

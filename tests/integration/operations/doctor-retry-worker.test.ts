@@ -29,7 +29,9 @@ test("doctor diagnoses an initialized isolated installation without repairing it
   expect(result.repaired).toBe(false);
   expect(result.checks.map((check) => [check.name, check.state])).toEqual([
     ["configuration", "ok"],
-    ["emergency_spool", "ok"],
+    ["foreground_retrieval", "ok"],
+    ["retrieval_catalog_generation", "ok"],
+    ["capture_inbox", "ok"],
     ["sqlite_integrity", "ok"],
     ["candidate_pipeline", "ok"],
     ["luna_operations", "ok"],

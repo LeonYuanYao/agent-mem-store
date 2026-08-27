@@ -6,6 +6,13 @@ import { z } from "zod";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import type { EmbeddingAdapter } from "./index.js";
 import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
+import type { ForegroundExecutionControl } from "./foreground-lane.js";
+import {
+  rowToIndexedMemory,
+  snapshotMemoriesForProject,
+  type IndexedMemory,
+  type RetrievalSnapshot
+} from "./snapshot.js";
 
 const tokenizer = getEncoding("o200k_base");
 const SESSION_TOKEN_LIMIT = 1200;
@@ -49,65 +56,6 @@ const retrievalStageTimingsSchema = z.object({
   totalMs: z.number().nonnegative()
 });
 
-interface IndexedMemory {
-  readonly indexRevisionId: string;
-  readonly memoryId: string;
-  readonly revisionId: string;
-  readonly scope: { readonly kind: "global" } | { readonly kind: "project"; readonly projectId: string };
-  readonly authority: "human_authored" | "agent_derived";
-  readonly category: string;
-  readonly basePriorityTier: PriorityTier;
-  readonly sessionOrderKey: string;
-  readonly importanceTags: readonly string[];
-  readonly startup: "auto" | "always" | "never";
-  readonly applicabilitySummary: string;
-  readonly applicabilityConditions: readonly string[];
-  readonly validFrom?: string;
-  readonly validUntil?: string;
-  readonly validityState: "valid" | "review_due";
-  readonly identityLabel?: string;
-  readonly identityValidated: boolean;
-  readonly identityTokenCount: number;
-  readonly compactText: string;
-  readonly compactValidated: boolean;
-  readonly compactTokenCount: number;
-  readonly standardText: string;
-  readonly standardValidated: boolean;
-  readonly standardTokenCount: number;
-  readonly searchableText: string;
-  readonly vectorOrdinal: number;
-}
-
-const indexedMemoryRowSchema = z.object({
-  index_revision_id: z.string(),
-  memory_id: z.string(),
-  revision_id: z.string(),
-  scope_kind: z.enum(["global", "project"]),
-  project_id: z.string().nullable(),
-  authority: z.enum(["human_authored", "agent_derived"]),
-  category: z.string(),
-  base_priority_tier: z.enum(["critical", "strong", "normal"]),
-  session_order_key: z.string().min(1),
-  importance_tags_json: z.string(),
-  startup: z.enum(["auto", "always", "never"]),
-  applicability_summary: z.string(),
-  applicability_conditions_json: z.string(),
-  valid_from: z.string().nullable(),
-  valid_until: z.string().nullable(),
-  validity_state: z.enum(["valid", "review_due"]),
-  identity_label: z.string().nullable(),
-  identity_validated: z.union([z.literal(0), z.literal(1)]),
-  identity_token_count: z.number().int().nonnegative(),
-  compact_text: z.string(),
-  compact_validated: z.union([z.literal(0), z.literal(1)]),
-  compact_token_count: z.number().int().nonnegative(),
-  standard_text: z.string(),
-  standard_validated: z.union([z.literal(0), z.literal(1)]),
-  standard_token_count: z.number().int().nonnegative(),
-  searchable_text: z.string(),
-  vector_ordinal: z.number().int().nonnegative()
-});
-
 export interface ShadowPackItem {
   readonly memoryId: string;
   readonly revisionId: string;
@@ -130,45 +78,10 @@ export interface ShadowPack {
   readonly items: readonly ShadowPackItem[];
   readonly renderedTokenCount: number;
   readonly receiptId: string;
+  readonly receiptCommitMs: number;
   readonly epochId: string;
   readonly emptyReason?: string;
   readonly semanticStage: "complete" | "lexical_only" | "not_applicable";
-}
-
-function rowToMemory(row: Record<string, unknown>): IndexedMemory {
-  const parsed = indexedMemoryRowSchema.parse(row);
-  return {
-    indexRevisionId: parsed.index_revision_id,
-    memoryId: parsed.memory_id,
-    revisionId: parsed.revision_id,
-    scope: parsed.scope_kind === "global"
-      ? { kind: "global" }
-      : { kind: "project", projectId: z.string().parse(parsed.project_id) },
-    authority: parsed.authority,
-    category: parsed.category,
-    basePriorityTier: parsed.base_priority_tier,
-    sessionOrderKey: parsed.session_order_key,
-    importanceTags: z.array(z.string()).parse(JSON.parse(parsed.importance_tags_json)),
-    startup: parsed.startup,
-    applicabilitySummary: parsed.applicability_summary,
-    applicabilityConditions: z.array(z.string()).parse(
-      JSON.parse(parsed.applicability_conditions_json)
-    ),
-    ...(parsed.valid_from === null ? {} : { validFrom: parsed.valid_from }),
-    ...(parsed.valid_until === null ? {} : { validUntil: parsed.valid_until }),
-    validityState: parsed.validity_state,
-    ...(parsed.identity_label === null ? {} : { identityLabel: parsed.identity_label }),
-    identityValidated: parsed.identity_validated === 1,
-    identityTokenCount: parsed.identity_token_count,
-    compactText: parsed.compact_text,
-    compactValidated: parsed.compact_validated === 1,
-    compactTokenCount: parsed.compact_token_count,
-    standardText: parsed.standard_text,
-    standardValidated: parsed.standard_validated === 1,
-    standardTokenCount: parsed.standard_token_count,
-    searchableText: parsed.searchable_text,
-    vectorOrdinal: parsed.vector_ordinal
-  };
 }
 
 function eligibleForAutomaticRecall(memory: IndexedMemory): boolean {
@@ -209,7 +122,45 @@ async function visitPagedSessionCandidates(request: {
   readonly deadlineAt: number;
   readonly startup: "always" | "auto";
   readonly visit: (memory: IndexedMemory) => boolean;
+  readonly snapshot?: RetrievalSnapshot;
 }): Promise<SessionPageStats> {
+  if (request.snapshot !== undefined) {
+    const orderedBuckets = request.snapshot.sessionBuckets
+      .filter((bucket) => bucket.startup === request.startup &&
+        (bucket.projectId === null || bucket.projectId === request.projectId))
+      .map((bucket) => ({
+        tier: bucket.tier,
+        category: bucket.category,
+        candidates: bucket.ordinals
+          .map((ordinal) => request.snapshot?.documents[ordinal])
+          .filter((memory): memory is IndexedMemory => memory !== undefined)
+          .filter((memory) => eligibleForAutomaticRecall(memory) &&
+            (memory.validFrom === undefined || memory.validFrom <= request.requestedAt) &&
+            (memory.validUntil === undefined || memory.validUntil >= request.requestedAt)),
+        cursor: 0
+      }))
+      .sort((left, right) =>
+        (["critical", "strong", "normal"].indexOf(left.tier) -
+          ["critical", "strong", "normal"].indexOf(right.tier)) ||
+        left.category.localeCompare(right.category)
+      );
+    let rowsExamined = 0;
+    for (const tier of ["critical", "strong", "normal"] as const) {
+      const tierBuckets = orderedBuckets.filter((bucket) => bucket.tier === tier);
+      while (tierBuckets.some((bucket) => bucket.cursor < bucket.candidates.length)) {
+        for (const bucket of tierBuckets) {
+          const memory = bucket.candidates[bucket.cursor];
+          if (memory === undefined) continue;
+          bucket.cursor += 1;
+          rowsExamined += 1;
+          if (request.visit(memory)) {
+            return { rowsExamined, bucketPageCount: 0, terminalStopReason: "pack_limit_reached" };
+          }
+        }
+      }
+    }
+    return { rowsExamined, bucketPageCount: 0, terminalStopReason: "candidates_exhausted" };
+  }
   const database = await openRuntimeDatabase(request.runtimeRoot);
   let rowsExamined = 0;
   let bucketPageCount = 0;
@@ -276,7 +227,9 @@ async function visitPagedSessionCandidates(request: {
             );
             bucketPageCount += 1;
             rowsExamined += pageRows.length;
-            bucket.queue.push(...pageRows.map((row) => rowToMemory(row)).filter(eligibleForAutomaticRecall));
+            bucket.queue.push(...pageRows.map((row) =>
+              rowToIndexedMemory(row)
+            ).filter(eligibleForAutomaticRecall));
             bucket.exhausted = pageRows.length < SESSION_BUCKET_PAGE_SIZE;
             const last = pageRows.at(-1);
             if (last !== undefined) bucket.cursor = z.string().parse(last.session_order_key);
@@ -354,10 +307,28 @@ async function loadActiveScope(request: {
   readonly runtimeRoot: string;
   readonly projectId: string;
   readonly requestedAt: string;
+  readonly snapshot?: RetrievalSnapshot;
 }): Promise<{
   readonly active: Record<string, unknown>;
   readonly memories: readonly IndexedMemory[];
 }> {
+  if (request.snapshot !== undefined) {
+    return {
+      active: {
+        index_revision_id: request.snapshot.indexRevisionId,
+        directory_path: request.snapshot.directoryPath,
+        adapter_version: request.snapshot.adapterVersion,
+        model_identity: request.snapshot.modelIdentity,
+        artifact_sha256: request.snapshot.artifactSha256,
+        dimensions: request.snapshot.dimensions
+      },
+      memories: snapshotMemoriesForProject({
+        snapshot: request.snapshot,
+        projectId: request.projectId,
+        requestedAt: request.requestedAt
+      })
+    };
+  }
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     const active = database.prepare(
@@ -374,7 +345,7 @@ async function loadActiveScope(request: {
          (scope_kind = 'global' OR (scope_kind = 'project' AND project_id = ?))
        ORDER BY memory_id`
     ).all(indexRevisionId, request.projectId);
-    const memories = rows.map((row) => rowToMemory(row)).filter((memory) =>
+    const memories = rows.map((row) => rowToIndexedMemory(row)).filter((memory) =>
       eligibleForAutomaticRecall(memory) &&
       (memory.validFrom === undefined || memory.validFrom <= request.requestedAt) &&
       (memory.validUntil === undefined || memory.validUntil >= request.requestedAt)
@@ -385,7 +356,13 @@ async function loadActiveScope(request: {
   }
 }
 
-async function loadActiveIndex(runtimeRoot: string): Promise<Record<string, unknown>> {
+async function loadActiveIndex(
+  runtimeRoot: string,
+  snapshot?: RetrievalSnapshot
+): Promise<Record<string, unknown>> {
+  if (snapshot !== undefined) {
+    return { index_revision_id: snapshot.indexRevisionId };
+  }
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     const active = database.prepare(
@@ -406,11 +383,16 @@ async function startEpoch(request: {
   readonly sessionId: string;
   readonly projectId: string;
   readonly requestedAt: string;
+  readonly foregroundControl?: ForegroundExecutionControl;
 }): Promise<string> {
   const epochId = `msepoch_${randomUUID()}`;
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRuntimeDatabase(
+    request.runtimeRoot,
+    request.foregroundControl === undefined ? {} : { busyTimeoutMilliseconds: 50 }
+  );
   try {
     database.exec("BEGIN IMMEDIATE");
+    await request.foregroundControl?.checkpoint("before_session_epoch_commit");
     database.prepare(
       "UPDATE context_epochs SET state = 'closed', closed_at = ? WHERE session_id = ? AND state = 'active'"
     ).run(request.requestedAt, request.sessionId);
@@ -487,12 +469,20 @@ async function recordAutomaticReceipt(request: {
   readonly timingStartedAt?: number;
   readonly preReceiptTimings?: RetrievalPreReceiptTimings;
   readonly requestedAt: string;
-}): Promise<{ readonly receiptId: string; readonly epochTotal: number }> {
+  readonly foregroundControl?: ForegroundExecutionControl;
+}): Promise<{
+  readonly receiptId: string;
+  readonly epochTotal: number;
+  readonly receiptCommitMs: number;
+}> {
   const receiptId = `msreceipt_${randomUUID()}`;
   const receiptStarted = performance.now();
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRuntimeDatabase(request.runtimeRoot, {
+    busyTimeoutMilliseconds: 50
+  });
   try {
     database.exec("BEGIN IMMEDIATE");
+    await request.foregroundControl?.checkpoint("receipt_transaction_started");
     const epoch = database.prepare(
       "SELECT automatic_token_total FROM context_epochs WHERE epoch_id = ? AND state = 'active'"
     ).get(request.epochId);
@@ -586,7 +576,11 @@ async function recordAutomaticReceipt(request: {
       ).run(totalMs, JSON.stringify(timings), receiptId);
     }
     database.exec("COMMIT");
-    return { receiptId, epochTotal };
+    return {
+      receiptId,
+      epochTotal,
+      receiptCommitMs: Math.max(0, performance.now() - receiptStarted)
+    };
   } catch (error) {
     database.exec("ROLLBACK");
     throw error;
@@ -601,6 +595,8 @@ export interface SessionStartShadowPackRequest {
   readonly projectId: string;
   readonly sessionId: string;
   readonly requestedAt: string;
+  readonly snapshot?: RetrievalSnapshot;
+  readonly foregroundControl?: ForegroundExecutionControl;
 }
 
 async function prepareSessionStartShadowPackCore(
@@ -609,9 +605,10 @@ async function prepareSessionStartShadowPackCore(
   const started = performance.now();
   const requestedAt = z.iso.datetime().parse(request.requestedAt);
   const epochId = await startEpoch({ ...request, requestedAt });
+  await request.foregroundControl?.checkpoint("session_epoch_loaded");
   let active: Record<string, unknown>;
   try {
-    active = await loadActiveIndex(request.runtimeRoot);
+    active = await loadActiveIndex(request.runtimeRoot, request.snapshot);
   } catch {
     const receipt = await recordAutomaticReceipt({
       runtimeRoot: request.runtimeRoot,
@@ -626,7 +623,10 @@ async function prepareSessionStartShadowPackCore(
       semanticStage: "not_applicable",
       emptyReason: "index_unavailable",
       latencyMs: Math.max(0, performance.now() - started),
-      requestedAt
+      requestedAt,
+      ...(request.foregroundControl === undefined
+        ? {}
+        : { foregroundControl: request.foregroundControl })
     });
     return {
       mode: "shadow",
@@ -636,6 +636,7 @@ async function prepareSessionStartShadowPackCore(
       items: [],
       renderedTokenCount: 0,
       receiptId: receipt.receiptId,
+      receiptCommitMs: receipt.receiptCommitMs,
       epochId,
       emptyReason: "index_unavailable",
       semanticStage: "not_applicable"
@@ -698,7 +699,8 @@ async function prepareSessionStartShadowPackCore(
     requestedAt,
     deadlineAt: started + 450,
     startup: "always",
-    visit: (memory) => trySelect(memory, true)
+    visit: (memory) => trySelect(memory, true),
+    ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot })
   });
   const dynamicStats = selected.length >= SESSION_ITEM_LIMIT
     ? { rowsExamined: 0, bucketPageCount: 0, terminalStopReason: "pack_limit_reached" }
@@ -709,7 +711,8 @@ async function prepareSessionStartShadowPackCore(
         requestedAt,
         deadlineAt: started + 450,
         startup: "auto",
-        visit: (memory) => trySelect(memory, false)
+        visit: (memory) => trySelect(memory, false),
+        ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot })
       });
   const rendered = renderPack(selected);
   const selectedIds = new Set(selected.map((item) => item.memoryId));
@@ -727,6 +730,7 @@ async function prepareSessionStartShadowPackCore(
           : "budget_or_item_limit"
     };
   });
+  await request.foregroundControl?.checkpoint("before_session_receipt");
   const receipt = await recordAutomaticReceipt({
     runtimeRoot: request.runtimeRoot,
     callerKind: "session_start",
@@ -745,7 +749,10 @@ async function prepareSessionStartShadowPackCore(
     terminalStopReason: dynamicStats.terminalStopReason,
     ...(selected.length === 0 ? { emptyReason: "no_eligible_memory" } : {}),
     latencyMs: Math.max(0, performance.now() - started),
-    requestedAt
+    requestedAt,
+    ...(request.foregroundControl === undefined
+      ? {}
+      : { foregroundControl: request.foregroundControl })
   });
   return {
     mode: "shadow",
@@ -755,6 +762,7 @@ async function prepareSessionStartShadowPackCore(
     items: selected,
     renderedTokenCount: rendered.renderedTokenCount,
     receiptId: receipt.receiptId,
+    receiptCommitMs: receipt.receiptCommitMs,
     epochId,
     ...(selected.length === 0 ? { emptyReason: "no_eligible_memory" } : {}),
     semanticStage: "not_applicable"
@@ -797,6 +805,7 @@ async function semanticScores(request: {
   readonly query: string;
   readonly adapter?: EmbeddingAdapter;
   readonly deadlineAt: number;
+  readonly snapshot?: RetrievalSnapshot;
 }): Promise<{
   readonly stage: "complete" | "lexical_only";
   readonly scores: ReadonlyMap<string, number>;
@@ -835,8 +844,12 @@ async function semanticScores(request: {
     return { stage: "lexical_only", scores: new Map(), embeddingMs, vectorScanMs: 0 };
   }
   const vectorScanStarted = performance.now();
-  const bytes = await readFile(`${String(request.active.directory_path)}/vectors.f32`);
-  const values = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  let resolvedValues: Float32Array;
+  if (request.snapshot !== undefined) resolvedValues = request.snapshot.vectors;
+  else {
+    const bytes = await readFile(`${String(request.active.directory_path)}/vectors.f32`);
+    resolvedValues = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  }
   const dimensions = z.number().int().positive().parse(request.active.dimensions);
   return {
     stage: "complete",
@@ -844,7 +857,10 @@ async function semanticScores(request: {
     vectorScanMs: Math.max(0, performance.now() - vectorScanStarted),
     scores: new Map(request.memories.map((memory) => {
       const start = memory.vectorOrdinal * dimensions;
-      return [memory.memoryId, dot(normalized, Array.from(values.subarray(start, start + dimensions)))] as const;
+      return [memory.memoryId, dot(
+        normalized,
+        Array.from(resolvedValues.subarray(start, start + dimensions))
+      )] as const;
     }))
   };
 }
@@ -856,10 +872,23 @@ function isContinuationOnly(prompt: string): boolean {
 
 async function relationshipBoosts(
   runtimeRoot: string,
-  seedMemoryIds: readonly string[]
+  seedMemoryIds: readonly string[],
+  snapshot?: RetrievalSnapshot
 ): Promise<ReadonlySet<string>> {
   if (seedMemoryIds.length === 0) return new Set();
   const seeds = new Set(seedMemoryIds);
+  if (snapshot !== undefined) {
+    const adjacent = new Set<string>();
+    for (const relationship of snapshot.relationships) {
+      if (seeds.has(relationship.sourceMemoryId) && !seeds.has(relationship.targetMemoryId)) {
+        adjacent.add(relationship.targetMemoryId);
+      }
+      if (seeds.has(relationship.targetMemoryId) && !seeds.has(relationship.sourceMemoryId)) {
+        adjacent.add(relationship.sourceMemoryId);
+      }
+    }
+    return adjacent;
+  }
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     const rows = database.prepare(
@@ -892,6 +921,8 @@ export interface UserPromptShadowPackRequest {
   };
   readonly adapter?: EmbeddingAdapter;
   readonly requestedAt: string;
+  readonly snapshot?: RetrievalSnapshot;
+  readonly foregroundControl?: ForegroundExecutionControl;
   readonly policy?: {
     readonly epochSoftTarget?: number;
     readonly epochHardLimit?: number;
@@ -906,6 +937,7 @@ async function prepareUserPromptShadowPackCore(
   const normalizedPrompt = request.prompt.trim().replace(/\s+/gu, " ");
   const epochLoadStarted = performance.now();
   const epoch = await loadEpoch(request.runtimeRoot, request.sessionId);
+  await request.foregroundControl?.checkpoint("prompt_epoch_loaded");
   const epochLoadMs = Math.max(0, performance.now() - epochLoadStarted);
   let loaded: Awaited<ReturnType<typeof loadActiveScope>>;
   const scopeLoadStarted = performance.now();
@@ -934,7 +966,10 @@ async function prepareUserPromptShadowPackCore(
         vectorScanMs: 0,
         rankingAndRelationshipMs: 0
       },
-      requestedAt
+      requestedAt,
+      ...(request.foregroundControl === undefined
+        ? {}
+        : { foregroundControl: request.foregroundControl })
     });
     return {
       mode: "shadow",
@@ -944,6 +979,7 @@ async function prepareUserPromptShadowPackCore(
       items: [],
       renderedTokenCount: 0,
       receiptId: receipt.receiptId,
+      receiptCommitMs: receipt.receiptCommitMs,
       epochId: epoch.epochId,
       emptyReason: "index_unavailable",
       semanticStage: "not_applicable"
@@ -951,6 +987,7 @@ async function prepareUserPromptShadowPackCore(
   }
   const scopeLoadMs = Math.max(0, performance.now() - scopeLoadStarted);
   const { active, memories } = loaded;
+  await request.foregroundControl?.checkpoint("prompt_scope_loaded");
   const softTarget = z.number().int().positive().parse(request.policy?.epochSoftTarget ?? 8192);
   const hardLimit = z.number().int().positive().parse(request.policy?.epochHardLimit ?? 12288);
   const postSoft = epoch.tokenTotal >= softTarget;
@@ -968,8 +1005,10 @@ async function prepareUserPromptShadowPackCore(
         memories,
         query,
         deadlineAt: started + AUTOMATIC_SEMANTIC_DEADLINE_MS,
+        ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot }),
         ...(request.adapter === undefined ? {} : { adapter: request.adapter })
       });
+  await request.foregroundControl?.checkpoint("prompt_semantic_complete");
   const rankingAndRelationshipStarted = performance.now();
   const terms = queryTerms(normalizedPrompt);
   const lexical = memories.map((memory) => ({ memory, coverage: lexicalCoverage(terms, memory.searchableText) }))
@@ -1028,7 +1067,8 @@ async function prepareUserPromptShadowPackCore(
   });
   const boostedMemoryIds = await relationshipBoosts(
     request.runtimeRoot,
-    baseScored.filter((item) => item.score >= 4).map((item) => item.memory.memoryId)
+    baseScored.filter((item) => item.score >= 4).map((item) => item.memory.memoryId),
+    request.snapshot
   );
   const scored = baseScored.map((item) => {
     if (!boostedMemoryIds.has(item.memory.memoryId) || item.score < 2) return item;
@@ -1135,6 +1175,7 @@ async function prepareUserPromptShadowPackCore(
       : relevantBeforeRepeat && epoch.injectedRevisions.size > 0
         ? "already_present"
         : postSoft ? "soft_target_restricted" : "no_relevant_memory";
+  await request.foregroundControl?.checkpoint("before_prompt_receipt");
   const receipt = await recordAutomaticReceipt({
     runtimeRoot: request.runtimeRoot,
     callerKind: "user_prompt",
@@ -1164,7 +1205,10 @@ async function prepareUserPromptShadowPackCore(
       vectorScanMs: semantic.vectorScanMs,
       rankingAndRelationshipMs: Math.max(0, performance.now() - rankingAndRelationshipStarted)
     },
-    requestedAt
+    requestedAt,
+    ...(request.foregroundControl === undefined
+      ? {}
+      : { foregroundControl: request.foregroundControl })
   });
   return {
     mode: "shadow",
@@ -1174,6 +1218,7 @@ async function prepareUserPromptShadowPackCore(
     items: selected,
     renderedTokenCount: rendered.renderedTokenCount,
     receiptId: receipt.receiptId,
+    receiptCommitMs: receipt.receiptCommitMs,
     epochId: epoch.epochId,
     ...(emptyReason === undefined ? {} : { emptyReason }),
     semanticStage: semantic.stage
@@ -1192,6 +1237,7 @@ function failOpenPack(
     items: [],
     renderedTokenCount: 0,
     receiptId: `msreceipt_unrecorded_${randomUUID()}`,
+    receiptCommitMs: 0,
     epochId: `msepoch_unrecorded_${randomUUID()}`,
     emptyReason: reason,
     semanticStage: "not_applicable"

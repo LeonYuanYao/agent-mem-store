@@ -11,6 +11,10 @@ import {
   listOpenCaptureHealthIncidents,
   readCapturedEvent
 } from "../../src/capture/index.js";
+import {
+  importCaptureInboxBatch,
+  inspectCaptureInbox
+} from "../../src/capture/inbox.js";
 import { inspectStatus } from "../../src/operations/status.js";
 
 const temporaryDirectories: string[] = [];
@@ -49,6 +53,15 @@ test("an unknown PostToolUse kind is captured through the generic envelope", asy
   if (!result.captured) throw new Error("Expected the official Hook payload to be captured.");
   const eventId = result.eventId;
   const projectId = result.projectId;
+  await expect(inspectCaptureInbox(runtimeRoot)).resolves.toMatchObject({
+    pendingCount: 1
+  });
+  await importCaptureInboxBatch({
+    runtimeRoot,
+    importedAt: "2026-08-07T04:00:00.100Z",
+    maximumEntries: 64,
+    maximumMilliseconds: 25
+  });
   const stored = await readCapturedEvent(runtimeRoot, eventId);
 
   expect(stored).toMatchObject({
@@ -84,7 +97,7 @@ test("an unknown PostToolUse kind is captured through the generic envelope", asy
   })).resolves.toEqual({
     continue: true,
     captured: true,
-    state: "duplicate",
+    state: "captured",
     eventId,
     projectId
   });
@@ -166,7 +179,7 @@ test("a Hook validation failure records a body-free health incident when Runtime
   await expect(listOpenCaptureHealthIncidents(runtimeRoot)).resolves.toEqual([]);
 });
 
-test("a busy Runtime database gets a bounded retry and spools a body-free recovery diagnostic", async () => {
+test("a busy Runtime database leaves a normal event durable in the Capture Inbox", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-codex-hook-busy-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -202,22 +215,25 @@ test("a busy Runtime database gets a bounded retry and spools a body-free recove
     expect(result).toMatchObject({
       continue: true,
       captured: true,
-      state: "spooled"
+      state: "captured"
     });
-    expect(elapsedMilliseconds).toBeGreaterThanOrEqual(75);
-    expect(elapsedMilliseconds).toBeLessThan(250);
+    expect(elapsedMilliseconds).toBeLessThan(300);
   } finally {
     database.exec("ROLLBACK");
     database.close();
   }
+  await expect(inspectCaptureInbox(runtimeRoot)).resolves.toMatchObject({
+    pendingCount: 2,
+    dispositionCount: 0
+  });
   const status = await inspectStatus({ runtimeRoot, vaultRoot: join(root, "vault") });
   expect(status.pipelines.capture).toMatchObject({
-    sqlite_busy_count: 1,
-    sqlite_busy_recovered_count: 1,
+    sqlite_busy_count: 0,
+    sqlite_busy_recovered_count: 0,
     sqlite_busy_lost_count: 0,
-    last_sqlite_busy_outcome: "spooled",
-    last_sqlite_busy_at: "2026-08-07T04:03:00.000Z",
-    last_sqlite_busy_event_kind: "Stop"
+    last_sqlite_busy_outcome: null,
+    last_sqlite_busy_at: null,
+    last_sqlite_busy_event_kind: null
   });
   expect(JSON.stringify(status.pipelines.capture)).not.toContain("second");
 });

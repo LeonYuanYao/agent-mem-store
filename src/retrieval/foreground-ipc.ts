@@ -4,6 +4,11 @@ import { resolve } from "node:path";
 
 import type { EmbeddingAdapter } from "./index.js";
 import {
+  createForegroundRetrievalLane,
+  type ForegroundExecutionControl
+} from "./foreground-lane.js";
+import type { ForegroundAttemptRecord } from "./foreground-attempts.js";
+import {
   prepareSessionStartShadowPack,
   prepareUserPromptShadowPack
 } from "./packs.js";
@@ -19,6 +24,8 @@ import {
   type ForegroundRequest,
   type ForegroundWireResponse
 } from "./foreground-protocol.js";
+import { loadRetrievalSnapshot, type RetrievalSnapshot } from "./snapshot.js";
+import { validateRetrievalSnapshot } from "./snapshot.js";
 
 function writeResponse(socket: Socket, response: ForegroundWireResponse): void {
   if (!socket.destroyed) socket.end(`${JSON.stringify(response)}\n`);
@@ -28,7 +35,11 @@ async function prepareResponse(request: ForegroundRequest, options: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
   readonly adapter: EmbeddingAdapter;
+  readonly snapshot: RetrievalSnapshot;
+  readonly control: ForegroundExecutionControl;
+  readonly onReceiptCommitted: (receiptCommitMs: number) => void;
 }): Promise<ForegroundWireResponse> {
+  await options.control.checkpoint("before_reservation");
   const reserved = request.eventId === undefined || await reserveForegroundEvaluation({
     runtimeRoot: options.runtimeRoot,
     eventId: request.eventId,
@@ -45,13 +56,16 @@ async function prepareResponse(request: ForegroundRequest, options: {
     };
   }
   try {
+    await options.control.checkpoint("after_reservation");
     const pack = request.event === "SessionStart"
       ? await prepareSessionStartShadowPack({
           runtimeRoot: options.runtimeRoot,
           vaultRoot: options.vaultRoot,
           projectId: request.projectId,
           sessionId: request.sessionId,
-          requestedAt: request.requestedAt
+          requestedAt: request.requestedAt,
+          snapshot: options.snapshot,
+          foregroundControl: options.control
         })
       : await prepareUserPromptShadowPack({
           runtimeRoot: options.runtimeRoot,
@@ -61,8 +75,12 @@ async function prepareResponse(request: ForegroundRequest, options: {
           prompt: request.prompt,
           signals: request.signals,
           adapter: options.adapter,
-          requestedAt: request.requestedAt
+          requestedAt: request.requestedAt,
+          snapshot: options.snapshot,
+          foregroundControl: options.control
         });
+    options.onReceiptCommitted(pack.receiptCommitMs);
+    await options.control.checkpoint("after_pack");
     if (pack.receiptId.startsWith("msreceipt_unrecorded_")) {
       throw new Error("Foreground retrieval receipt was not recorded.");
     }
@@ -108,12 +126,15 @@ async function prepareResponse(request: ForegroundRequest, options: {
 }
 
 function serveConnection(socket: Socket, options: {
-  readonly runtimeRoot: string;
-  readonly vaultRoot: string;
-  readonly adapter: EmbeddingAdapter;
+  readonly lane: ReturnType<typeof createForegroundRetrievalLane<
+    ForegroundRequest,
+    ForegroundWireResponse
+  >>;
+  readonly onPressure?: () => void;
 }): void {
   let source = Buffer.alloc(0);
   let handled = false;
+  const disconnect = new AbortController();
   socket.on("data", (chunk: Buffer) => {
     if (handled) return;
     source = Buffer.concat([source, chunk]);
@@ -122,7 +143,7 @@ function serveConnection(socket: Socket, options: {
       writeResponse(socket, {
         schemaVersion: foregroundProtocolVersion,
         requestId: "oversized",
-        state: "error",
+        state: "unavailable",
         code: "request_too_large"
       });
       return;
@@ -137,7 +158,7 @@ function serveConnection(socket: Socket, options: {
       writeResponse(socket, {
         schemaVersion: foregroundProtocolVersion,
         requestId: "malformed",
-        state: "error",
+        state: "unavailable",
         code: "malformed_request"
       });
       return;
@@ -147,24 +168,36 @@ function serveConnection(socket: Socket, options: {
       writeResponse(socket, {
         schemaVersion: foregroundProtocolVersion,
         requestId: "malformed",
-        state: "error",
+        state: "unavailable",
         code: "malformed_request"
       });
       return;
     }
-    void prepareResponse(parsed.data, options).then(
-      (response) => { writeResponse(socket, response); },
-      () => {
+    options.onPressure?.();
+    void options.lane.run(parsed.data, { signal: disconnect.signal }).then((response) => {
+      if (response.state === "cancelled") return;
+      if (response.state === "busy" || response.state === "deadline_exceeded") {
         writeResponse(socket, {
           schemaVersion: foregroundProtocolVersion,
-          requestId: parsed.data.requestId,
-          state: "error",
+          requestId: response.requestId,
+          state: response.state
+        });
+        return;
+      }
+      if (response.state === "unavailable") {
+        writeResponse(socket, {
+          schemaVersion: foregroundProtocolVersion,
+          requestId: response.requestId,
+          state: "unavailable",
           code: "retrieval_unavailable"
         });
+        return;
       }
-    );
+      writeResponse(socket, response);
+    });
   });
-  socket.on("error", () => undefined);
+  socket.on("error", () => { disconnect.abort(); });
+  socket.on("close", () => { disconnect.abort(); });
 }
 
 async function socketAcceptsConnections(socketPath: string): Promise<boolean> {
@@ -198,14 +231,84 @@ export async function startForegroundRetrievalServer(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
   readonly adapter: EmbeddingAdapter;
+  readonly snapshot?: RetrievalSnapshot;
+  readonly allowUnavailableSnapshot?: boolean;
+  readonly onAttempt?: (attempt: ForegroundAttemptRecord) => void;
+  readonly onPressure?: () => void;
 }): Promise<{
   readonly socketPath: string;
+  publishSnapshot(snapshot: RetrievalSnapshot): void;
   close(): Promise<void>;
 }> {
   const socketPath = foregroundRetrievalSocketPath(request.runtimeRoot);
   await mkdir(resolve(request.runtimeRoot, "state"), { recursive: true, mode: 0o700 });
   await removeStaleSocket(socketPath);
-  const server = createServer((socket) => { serveConnection(socket, request); });
+  let activeSnapshot = request.snapshot;
+  if (activeSnapshot === undefined) {
+    try {
+      activeSnapshot = await loadRetrievalSnapshot({ runtimeRoot: request.runtimeRoot });
+    } catch (error) {
+      if (request.allowUnavailableSnapshot !== true) throw error;
+    }
+  }
+  const requestSnapshotIds = new Map<string, string>();
+  const requestReceiptCommitMs = new Map<string, number>();
+  const lane = createForegroundRetrievalLane<ForegroundRequest, ForegroundWireResponse>({
+    execute: (foregroundRequest, control) => {
+      const snapshot = activeSnapshot;
+      if (snapshot !== undefined) {
+        requestSnapshotIds.set(foregroundRequest.requestId, snapshot.indexRevisionId);
+      }
+      return snapshot === undefined
+      ? Promise.resolve({
+          schemaVersion: foregroundProtocolVersion,
+          requestId: foregroundRequest.requestId,
+          state: "unavailable" as const,
+          code: "snapshot_unavailable"
+        })
+      : prepareResponse(foregroundRequest, {
+          ...request,
+          snapshot,
+          control,
+          onReceiptCommitted: (receiptCommitMs) => {
+            requestReceiptCommitMs.set(foregroundRequest.requestId, receiptCommitMs);
+          }
+        });
+    },
+    onAttempt: (attempt, foregroundRequest, result) => {
+      const indexRevisionId = requestSnapshotIds.get(foregroundRequest.requestId);
+      const receiptCommitMs = requestReceiptCommitMs.get(foregroundRequest.requestId) ?? 0;
+      requestSnapshotIds.delete(foregroundRequest.requestId);
+      requestReceiptCommitMs.delete(foregroundRequest.requestId);
+      request.onAttempt?.({
+        requestId: foregroundRequest.requestId,
+        eventKind: foregroundRequest.event,
+        ...(foregroundRequest.eventId === undefined
+          ? {}
+          : { eventId: foregroundRequest.eventId }),
+        projectId: foregroundRequest.projectId,
+        ...(result.state === "completed" ? { receiptId: result.receiptId } : {}),
+        ...(indexRevisionId === undefined ? {} : { indexRevisionId }),
+        outcome: attempt.outcome,
+        admissionDelayMs: attempt.admissionDelayMs,
+        computeMs: attempt.computeMs,
+        receiptCommitMs,
+        observedClientElapsedMs: attempt.computeMs,
+        ...(attempt.outcome === "cancelled"
+          ? { cancellationObservedMs: attempt.computeMs }
+          : {}),
+        postDeadlineWorkMs: attempt.postDeadlineWorkMs,
+        createdAt: attempt.createdAt,
+        completedAt: attempt.completedAt
+      });
+    }
+  });
+  const server = createServer((socket) => {
+    serveConnection(socket, {
+      lane,
+      ...(request.onPressure === undefined ? {} : { onPressure: request.onPressure })
+    });
+  });
   await new Promise<void>((resolveListen, rejectListen) => {
     const onError = (error: Error): void => { rejectListen(error); };
     server.once("error", onError);
@@ -218,6 +321,9 @@ export async function startForegroundRetrievalServer(request: {
   let closed = false;
   return {
     socketPath,
+    publishSnapshot: (snapshot) => {
+      activeSnapshot = validateRetrievalSnapshot(snapshot);
+    },
     close: async () => {
       if (closed) return;
       closed = true;

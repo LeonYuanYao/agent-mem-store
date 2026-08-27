@@ -24,6 +24,7 @@
     "evidence:gate4": "tsx scripts/evidence-gate4.ts",
     "evidence:gate5": "tsx scripts/evidence-gate5.ts",
     "evidence:purge": "tsx scripts/evidence-purge.ts",
+    "evidence:foreground-reliability": "tsx scripts/evidence-foreground-reliability.ts",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",

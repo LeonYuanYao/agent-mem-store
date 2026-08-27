@@ -166,15 +166,18 @@ test("the uninstalled Shadow loop reaches review without injecting or touching g
   } satisfies NonNullable<WorkerAdapters["governance"]>;
   const adapters = { luna, governance, notifier };
 
-  await expect(runWorkerOnce({
-    runtimeRoot,
-    vaultRoot,
-    workerId: "gate4-worker",
-    now: "2026-08-09T01:01:00.000Z",
-    workerStartedAt: "2026-08-09T01:00:00.000Z",
-    adapters
-  })).resolves.toMatchObject({ state: "worked" });
-  const candidates = await listSessionCandidates(runtimeRoot, "gate4-session");
+  let candidates = await listSessionCandidates(runtimeRoot, "gate4-session");
+  for (let iteration = 0; iteration < 4 && candidates.length === 0; iteration += 1) {
+    await expect(runWorkerOnce({
+      runtimeRoot,
+      vaultRoot,
+      workerId: "gate4-worker",
+      now: `2026-08-09T01:01:0${String(iteration)}.000Z`,
+      workerStartedAt: "2026-08-09T01:00:00.000Z",
+      adapters
+    })).resolves.toMatchObject({ state: "worked" });
+    candidates = await listSessionCandidates(runtimeRoot, "gate4-session");
+  }
   expect(candidates).toHaveLength(1);
   expect(await listSessionCandidates(runtimeRoot, "gate4-session")).toEqual([
     { candidateId: candidates[0]?.candidateId, state: "promoted" }

@@ -259,6 +259,16 @@ const migrations: readonly Migration[] = [
     version: 49,
     name: "sensitivity_observation_source_kind",
     path: new URL("../../migrations/0049-sensitivity-observation-source-kind.sql", import.meta.url)
+  },
+  {
+    version: 50,
+    name: "foreground_attempts",
+    path: new URL("../../migrations/0050-foreground-attempts.sql", import.meta.url)
+  },
+  {
+    version: 51,
+    name: "retrieval_catalog_generations",
+    path: new URL("../../migrations/0051-retrieval-catalog-generations.sql", import.meta.url)
   }
 ];
 

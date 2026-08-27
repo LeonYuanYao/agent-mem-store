@@ -23,10 +23,10 @@ export async function reserveForegroundEvaluation(request: {
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     const result = database.prepare(
-      `INSERT OR IGNORE INTO shadow_event_evaluations(
+      `INSERT OR IGNORE INTO foreground_event_reservations(
          event_id, event_kind, state, receipt_id, attempt_count, last_error_code,
          next_retry_at, created_at, updated_at
-       ) VALUES (?, ?, 'processing', NULL, 1, 'foreground_reserved', NULL, ?, ?)`
+       ) VALUES (?, ?, 'processing', NULL, 1, NULL, NULL, ?, ?)`
     ).run(
       request.eventId,
       request.eventKind,
@@ -50,9 +50,9 @@ export async function finishForegroundEvaluation(request: {
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     database.prepare(
-      `UPDATE shadow_event_evaluations
+      `UPDATE foreground_event_reservations
        SET state = ?, receipt_id = ?, last_error_code = ?, next_retry_at = ?, updated_at = ?
-       WHERE event_id = ? AND state = 'processing' AND last_error_code = 'foreground_reserved'`
+       WHERE event_id = ? AND state = 'processing'`
     ).run(
       request.state,
       request.receiptId ?? null,
@@ -74,21 +74,27 @@ async function claimNextShadowEvent(runtimeRoot: string, now: string): Promise<s
     FROM capture_events AS capture
     LEFT JOIN shadow_event_evaluations AS evaluation
       ON evaluation.event_id = capture.event_id
+    LEFT JOIN foreground_event_reservations AS foreground
+      ON foreground.event_id = capture.event_id
     WHERE capture.event_kind IN ('SessionStart', 'UserPromptSubmit')
       AND (
         evaluation.event_id IS NULL OR
         (evaluation.state = 'retrying' AND evaluation.next_retry_at <= ?) OR
         (evaluation.state = 'processing' AND evaluation.updated_at <= ?)
       )
+      AND (
+        foreground.event_id IS NULL OR
+        (foreground.state = 'retrying' AND foreground.next_retry_at <= ?)
+      )
     ORDER BY capture.created_at, capture.event_id
     LIMIT 1`;
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
-    if (database.prepare(selectionSql).get(now, staleBefore) === undefined) {
+    if (database.prepare(selectionSql).get(now, staleBefore, now) === undefined) {
       return undefined;
     }
     database.exec("BEGIN IMMEDIATE");
-    const row = database.prepare(selectionSql).get(now, staleBefore);
+    const row = database.prepare(selectionSql).get(now, staleBefore, now);
     if (row === undefined) {
       database.exec("COMMIT");
       return undefined;
@@ -260,9 +266,13 @@ export async function inspectShadowEvaluation(runtimeRoot: string, eventId: stri
 } | undefined> {
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
-    const row = database.prepare(
+    const shadow = database.prepare(
       `SELECT state, receipt_id, attempt_count, last_error_code
        FROM shadow_event_evaluations WHERE event_id = ?`
+    ).get(eventId);
+    const row = shadow ?? database.prepare(
+      `SELECT state, receipt_id, attempt_count, last_error_code
+       FROM foreground_event_reservations WHERE event_id = ?`
     ).get(eventId);
     if (row === undefined) return undefined;
     return {

@@ -38,7 +38,13 @@ const runtimeRoot = join(root, "runtime");
 const vaultRoot = join(root, "vault");
 const projectRoot = join(root, "project");
 const projectId = "msproj_123e4567-e89b-42d3-a456-426614175601";
-const hookEntrypoint = resolve("dist", "cli", "hook.js");
+const hookEntrypointIndex = process.argv.indexOf("--hook-entrypoint");
+const hookEntrypoint = resolve(
+  hookEntrypointIndex >= 0 && process.argv[hookEntrypointIndex + 1] !== undefined
+    ? process.argv[hookEntrypointIndex + 1] as string
+    : join("dist", "cli", "hook.js")
+);
+const observedAttempts: unknown[] = [];
 
 function percentile(values: readonly number[], fraction: number): number {
   const sorted = [...values].sort((left, right) => left - right);
@@ -81,7 +87,10 @@ async function invokeHook(event: "SessionStart" | "UserPromptSubmit", input: Rec
   if (output.hookSpecificOutput?.hookEventName !== event ||
       typeof output.hookSpecificOutput.additionalContext !== "string" ||
       output.hookSpecificOutput.additionalContext.length === 0) {
-    throw new Error(`Active ${event} did not return additionalContext.`);
+    throw new Error(
+      `Active ${event} did not return additionalContext; output=${stdout.trim()}; ` +
+      `lastAttempt=${JSON.stringify(observedAttempts.at(-1) ?? null)}.`
+    );
   }
   return latencyMilliseconds;
 }
@@ -130,7 +139,8 @@ try {
   const server = await startForegroundRetrievalServer({
     runtimeRoot,
     vaultRoot,
-    adapter: loaded.adapter
+    adapter: loaded.adapter,
+    onAttempt: (attempt) => { observedAttempts.push(attempt); }
   });
   try {
     const sessionStart: number[] = [];

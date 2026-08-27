@@ -9,7 +9,7 @@ import {
   recordCaptureHealthIncident,
   recoverCaptureHealthIncident
 } from "../capture/index.js";
-import { importNextEmergencySpoolEvent } from "../capture/emergency-spool.js";
+import { importCaptureInboxBatch } from "../capture/inbox.js";
 import type { NotifierPort } from "../adapters/macos/notifier.js";
 import { dispatchNextReminder } from "../review/reminders.js";
 import { prepareNextModelHealthReminder } from "../review/reminders.js";
@@ -18,10 +18,17 @@ import { generateReviewInbox } from "../review/inbox.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import {
   buildRetrievalIndex,
+  inspectActiveRetrievalIndex,
   pruneRetiredRetrievalSnapshots,
-  retrievalIndexNeedsRebuild,
   type EmbeddingAdapter
 } from "../retrieval/index.js";
+import {
+  beginRetrievalIndexBuild,
+  completeRetrievalIndexBuild,
+  failRetrievalIndexBuild
+} from "../retrieval/index-coordinator.js";
+import { loadRetrievalSnapshot, type RetrievalSnapshot } from "../retrieval/snapshot.js";
+import { pruneForegroundAttempts } from "../retrieval/foreground-attempts.js";
 import { runNextShadowEvaluation } from "../retrieval/shadow-worker.js";
 import {
   advanceCandidateReevaluationBackfill,
@@ -63,6 +70,8 @@ export interface WorkerAdapters {
   readonly governance?: GovernanceAdapter;
   readonly notifier?: NotifierPort;
   readonly embedding?: EmbeddingAdapter;
+  readonly publishRetrievalSnapshot?: (snapshot: RetrievalSnapshot) => Promise<void>;
+  readonly foregroundPressure?: () => boolean;
 }
 
 async function foregroundMemoryWorkExists(runtimeRoot: string, now: string): Promise<boolean> {
@@ -146,6 +155,7 @@ export async function runWorkerOnce(request: {
   let paused = false;
   let scheduleExists = false;
   let admissionPruningDue = false;
+  let foregroundAttemptPruningDue = false;
   let timeZone = "UTC";
   try {
     paused = database.prepare(
@@ -163,6 +173,12 @@ export async function runWorkerOnce(request: {
     ).get();
     admissionPruningDue = typeof admissionMaintenance?.next_prune_at === "string" &&
       admissionMaintenance.next_prune_at <= now;
+    const foregroundAttemptMaintenance = database.prepare(
+      "SELECT next_prune_at FROM foreground_attempt_maintenance WHERE singleton = 1"
+    ).get();
+    foregroundAttemptPruningDue =
+      typeof foregroundAttemptMaintenance?.next_prune_at === "string" &&
+      foregroundAttemptMaintenance.next_prune_at <= now;
   } finally {
     database.close();
   }
@@ -178,15 +194,30 @@ export async function runWorkerOnce(request: {
       activities.push(`admission-audit:pruned:${String(pruned.deletedCount)}`);
     }
   }
+  if (foregroundAttemptPruningDue) {
+    const pruned = await pruneForegroundAttempts({
+      runtimeRoot: request.runtimeRoot,
+      now
+    });
+    if (pruned.deletedCount > 0) {
+      activities.push(`foreground-attempts:pruned:${String(pruned.deletedCount)}`);
+    }
+  }
   let shouldRefreshReview = false;
-  const emergencySpool = await importNextEmergencySpoolEvent({
+  const captureInbox = await importCaptureInboxBatch({
     runtimeRoot: request.runtimeRoot,
-    importedAt: now
+    importedAt: now,
+    maximumEntries: 64,
+    maximumMilliseconds: 25
   });
-  if (emergencySpool.state === "imported") {
-    activities.push("emergency-spool:imported");
-  } else if (emergencySpool.state === "quarantined") {
-    activities.push("emergency-spool:quarantined");
+  if (captureInbox.importedCount > 0) {
+    activities.push(`capture-inbox:imported:${String(captureInbox.importedCount)}`);
+  }
+  if (captureInbox.quarantinedCount > 0) {
+    activities.push(`capture-inbox:quarantined:${String(captureInbox.quarantinedCount)}`);
+  }
+  if (captureInbox.remainingCount > 0 && activities.length > 0) {
+    return { state: "worked", activities };
   }
   const lifecycleRecovery = await recoverNextBlockedLifecycleOnlyBatch({
     runtimeRoot: request.runtimeRoot,
@@ -216,11 +247,21 @@ export async function runWorkerOnce(request: {
     activities.push("session-end:catch-up");
   }
   if (request.adapters?.embedding !== undefined) {
-    if (!(await retrievalIndexBuildIsCoolingDown(request.runtimeRoot, now)) &&
-      await retrievalIndexNeedsRebuild({
-      runtimeRoot: request.runtimeRoot,
-      adapter: request.adapters.embedding
-    })) {
+    const foregroundPressure = request.adapters.foregroundPressure?.() === true;
+    const activeIndex = await inspectActiveRetrievalIndex(request.runtimeRoot);
+    const identity = request.adapters.embedding.identity;
+    const adapterMatches = activeIndex !== undefined &&
+      JSON.stringify(activeIndex.adapterIdentity) === JSON.stringify(identity);
+    const indexBuild = await retrievalIndexBuildIsCoolingDown(request.runtimeRoot, now)
+      ? { state: "not_due" as const, reason: "failure_cooldown" as const }
+      : await beginRetrievalIndexBuild({
+          runtimeRoot: request.runtimeRoot,
+          now,
+          activeIndexExists: activeIndex !== undefined,
+          adapterMatches,
+          foregroundPressure
+        });
+    if (indexBuild.state === "started") {
       try {
         const index = await buildRetrievalIndex({
           runtimeRoot: request.runtimeRoot,
@@ -228,18 +269,40 @@ export async function runWorkerOnce(request: {
           adapter: request.adapters.embedding,
           builtAt: now
         });
+        if (request.adapters.publishRetrievalSnapshot !== undefined) {
+          await request.adapters.publishRetrievalSnapshot(
+            await loadRetrievalSnapshot({ runtimeRoot: request.runtimeRoot })
+          );
+        }
+        await completeRetrievalIndexBuild({
+          runtimeRoot: request.runtimeRoot,
+          targetGeneration: indexBuild.targetGeneration,
+          completedAt: now
+        });
         activities.push(`retrieval-index:${index.state}`);
       } catch {
+        await failRetrievalIndexBuild({
+          runtimeRoot: request.runtimeRoot,
+          targetGeneration: indexBuild.targetGeneration,
+          failedAt: now
+        }).catch(() => undefined);
         activities.push("retrieval-index:failed");
       }
     }
-    const shadow = await runNextShadowEvaluation({
-      runtimeRoot: request.runtimeRoot,
-      vaultRoot: request.vaultRoot,
-      adapter: request.adapters.embedding,
-      now
-    });
-    if (shadow.state !== "empty") activities.push(`shadow:${shadow.state}`);
+    if (!foregroundPressure) {
+      const shadow = await runNextShadowEvaluation({
+        runtimeRoot: request.runtimeRoot,
+        vaultRoot: request.vaultRoot,
+        adapter: request.adapters.embedding,
+        now
+      });
+      if (shadow.state !== "empty") activities.push(`shadow:${shadow.state}`);
+    }
+  }
+  if (request.adapters?.foregroundPressure?.() === true) {
+    return activities.length === 0
+      ? { state: "idle" }
+      : { state: "worked", activities };
   }
   if (request.adapters?.luna !== undefined) {
     const prepared = await prepareNextDistillationBatch({

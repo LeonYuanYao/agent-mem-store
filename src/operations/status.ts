@@ -1,11 +1,15 @@
 import { access } from "node:fs/promises";
 import { join } from "node:path";
+import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { inspectHookSqliteBusyDiagnostics } from "../capture/index.js";
-import { inspectEmergencySpool } from "../capture/emergency-spool.js";
+import { inspectCaptureInbox } from "../capture/inbox.js";
+import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
+import { inspectRetrievalCatalogGeneration } from "../retrieval/index-coordinator.js";
+import { foregroundRetrievalSocketPath } from "../retrieval/foreground-protocol.js";
 
 async function databasePath(runtimeRoot: string): Promise<string> {
   const path = join(runtimeRoot, "state", "memstore.sqlite");
@@ -15,6 +19,20 @@ async function databasePath(runtimeRoot: string): Promise<string> {
   } catch {
     throw new MemStoreCommandError("runtime_uninitialized", "MemStore Runtime is not initialized.");
   }
+}
+
+async function foregroundEndpointAcceptsConnections(runtimeRoot: string): Promise<boolean> {
+  return new Promise<boolean>((resolveProbe) => {
+    const socket = createConnection(foregroundRetrievalSocketPath(runtimeRoot));
+    const finish = (available: boolean): void => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolveProbe(available);
+    };
+    const timer = setTimeout(() => { finish(false); }, 50);
+    socket.once("connect", () => { finish(true); });
+    socket.once("error", () => { finish(false); });
+  });
 }
 
 export async function inspectOperation(runtimeRoot: string, operationId: string) {
@@ -74,7 +92,12 @@ export async function inspectStatus(request: {
   readonly vaultRoot: string;
 }) {
   const hookSqliteBusy = await inspectHookSqliteBusyDiagnostics(request.runtimeRoot);
-  const emergencySpool = await inspectEmergencySpool(request.runtimeRoot);
+  const captureInbox = await inspectCaptureInbox(request.runtimeRoot);
+  const [foregroundAttempts, catalogGeneration, foregroundSocketAvailable] = await Promise.all([
+    inspectForegroundAttempts(request.runtimeRoot),
+    inspectRetrievalCatalogGeneration(request.runtimeRoot),
+    foregroundEndpointAcceptsConnections(request.runtimeRoot)
+  ]);
   const database = new DatabaseSync(await databasePath(request.runtimeRoot), { readOnly: true });
   try {
     const health = database.prepare("SELECT * FROM luna_health_state WHERE singleton = 1").get();
@@ -218,14 +241,39 @@ export async function inspectStatus(request: {
           last_sqlite_busy_at: hookSqliteBusy.lastOccurredAt,
           last_sqlite_busy_event_kind: hookSqliteBusy.lastEventKind,
           last_sqlite_busy_outcome: hookSqliteBusy.lastOutcome,
-          emergency_spool: {
-            pending_count: emergencySpool.pendingCount,
-            maximum_pending_count: emergencySpool.maximumPendingCount,
-            capacity_state: emergencySpool.capacityState,
-            oldest_pending_at: emergencySpool.oldestPendingAt,
-            quarantine_count: emergencySpool.quarantineCount,
-            total_bytes: emergencySpool.totalBytes
+          capture_inbox: {
+            pending_count: captureInbox.pendingCount,
+            normal_event_count: captureInbox.normalEventCount,
+            disposition_count: captureInbox.dispositionCount,
+            maximum_pending_count: captureInbox.maximumPendingCount,
+            maximum_pending_bytes: captureInbox.maximumPendingBytes,
+            capacity_state: captureInbox.capacityState,
+            pending_bytes: captureInbox.pendingBytes,
+            oldest_pending_at: captureInbox.oldestPendingAt,
+            quarantine_count: captureInbox.quarantineCount,
+            total_bytes: captureInbox.totalBytes
           }
+        },
+        foreground_retrieval: {
+          socket_state: foregroundSocketAvailable ? "available" : "unavailable",
+          attempt_count: foregroundAttempts.totalCount,
+          outcomes: foregroundAttempts.outcomes,
+          deadline_count: foregroundAttempts.deadlineCount,
+          cancellation_count: foregroundAttempts.cancellationCount,
+          post_deadline_count: foregroundAttempts.postDeadlineCount,
+          maximum_post_deadline_work_ms: foregroundAttempts.maximumPostDeadlineWorkMs,
+          active_snapshot_id: activeIndex?.index_revision_id ?? null
+        },
+        retrieval_index: {
+          dirty_generation: catalogGeneration.dirtyGeneration,
+          published_generation: catalogGeneration.publishedGeneration,
+          building_generation: catalogGeneration.buildingGeneration,
+          quiet_period_ms: catalogGeneration.quietPeriodMilliseconds,
+          maximum_staleness_ms: catalogGeneration.maximumStalenessMilliseconds,
+          dirty_at: catalogGeneration.dirtyAt,
+          force_due_at: catalogGeneration.forceDueAt,
+          last_completed_at: catalogGeneration.lastCompletedAt,
+          last_failed_at: catalogGeneration.lastFailedAt
         },
         distillation: pipeline("distill_batch"),
         session_consolidation: pipeline("consolidate_session"),

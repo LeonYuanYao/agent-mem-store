@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { z } from "zod";
 
-export const foregroundProtocolVersion = 1;
+export const foregroundProtocolVersion = 2;
 export const maximumForegroundRequestBytes = 64 * 1024;
 export const maximumForegroundResponseBytes = 64 * 1024;
 
@@ -11,6 +11,7 @@ const commonRequestSchema = z.object({
   projectId: z.string().min(1),
   sessionId: z.string().min(1),
   requestedAt: z.iso.datetime(),
+  deadlineAt: z.iso.datetime(),
   eventId: z.string().min(1).optional()
 });
 
@@ -48,7 +49,17 @@ export const foregroundResponseSchema = z.discriminatedUnion("state", [
   z.object({
     schemaVersion: z.literal(foregroundProtocolVersion),
     requestId: z.string().min(1),
-    state: z.literal("error"),
+    state: z.literal("busy")
+  }),
+  z.object({
+    schemaVersion: z.literal(foregroundProtocolVersion),
+    requestId: z.string().min(1),
+    state: z.literal("deadline_exceeded")
+  }),
+  z.object({
+    schemaVersion: z.literal(foregroundProtocolVersion),
+    requestId: z.string().min(1),
+    state: z.literal("unavailable"),
     code: z.string().min(1)
   })
 ]);
@@ -58,7 +69,11 @@ export type ForegroundWireResponse = z.infer<typeof foregroundResponseSchema>;
 
 export type ForegroundRetrievalResult = ForegroundWireResponse | {
   readonly state: "unavailable";
-  readonly code: "socket_unavailable" | "deadline_exceeded" | "malformed_response";
+  readonly requestId: string;
+  readonly code: "socket_unavailable" | "malformed_response";
+} | {
+  readonly state: "deadline_exceeded";
+  readonly requestId: string;
 };
 
 export function foregroundRetrievalSocketPath(runtimeRoot: string): string {

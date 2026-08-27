@@ -178,6 +178,89 @@ async function recordSensitivityFinding(
   }
 }
 
+export async function recordBodyFreeSensitivityDisposition(request: {
+  readonly runtimeRoot: string;
+  readonly findingId: string;
+  readonly fingerprint: string;
+  readonly sourceIdentity: string;
+  readonly state: "blocked_secret" | "quarantined";
+  readonly category: "authorization_header" | "private_key" | "credential_field" | "contextual_credential";
+  readonly observedAt: string;
+  readonly sourceKind: string;
+  readonly busyTimeoutMilliseconds?: number;
+}): Promise<Extract<CaptureResult, { readonly state: "blocked_secret" | "quarantined" }>> {
+  const findingId = z.string().regex(/^msfinding_[0-9a-f-]+$/u).parse(request.findingId);
+  const fingerprint = z.string().regex(/^[0-9a-f]{64}$/u).parse(request.fingerprint);
+  const sourceIdentity = z.string().regex(/^[0-9a-f]{64}$/u).parse(request.sourceIdentity);
+  const observedAt = z.iso.datetime().parse(request.observedAt);
+  const sourceKind = z.string().min(1).max(128).parse(request.sourceKind);
+  const database = await openRuntimeDatabase(
+    request.runtimeRoot,
+    request.busyTimeoutMilliseconds === undefined
+      ? {}
+      : { busyTimeoutMilliseconds: request.busyTimeoutMilliseconds }
+  );
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = database.prepare(
+        "SELECT finding_id FROM sensitivity_findings WHERE fingerprint = ?"
+      ).get(fingerprint);
+      const durableFindingId = existing === undefined
+        ? findingId
+        : z.string().parse(existing.finding_id);
+      if (existing === undefined) {
+        database.prepare(
+          `INSERT INTO sensitivity_findings(
+             finding_id, fingerprint, state, category, first_seen_at,
+             last_seen_at, occurrence_count, body_retained
+           ) VALUES (?, ?, ?, ?, ?, ?, 1, 0)`
+        ).run(
+          durableFindingId,
+          fingerprint,
+          request.state,
+          request.category,
+          observedAt,
+          observedAt
+        );
+      }
+      const observation = database.prepare(
+        `INSERT OR IGNORE INTO sensitivity_observations(
+           fingerprint, source_identity, observed_at, source_kind
+         ) VALUES (?, ?, ?, ?)`
+      ).run(fingerprint, sourceIdentity, observedAt, sourceKind);
+      if (existing !== undefined && observation.changes === 1) {
+        database.prepare(
+          `UPDATE sensitivity_findings
+           SET last_seen_at = ?, occurrence_count = occurrence_count + 1
+           WHERE fingerprint = ?`
+        ).run(observedAt, fingerprint);
+      }
+      database.exec("COMMIT");
+      return request.state === "blocked_secret"
+        ? {
+            state: "blocked_secret",
+            findingId: durableFindingId,
+            category: z.enum([
+              "authorization_header",
+              "private_key",
+              "credential_field"
+            ]).parse(request.category)
+          }
+        : {
+            state: "quarantined",
+            findingId: durableFindingId,
+            category: z.literal("contextual_credential").parse(request.category)
+          };
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    database.close();
+  }
+}
+
 function segment(value: Uint8Array): readonly Uint8Array[] {
   const segments: Uint8Array[] = [];
   for (let offset = 0; offset < value.byteLength; offset += segmentBytes) {

@@ -35,6 +35,8 @@ export async function requestForegroundRetrieval(request: {
   readonly timeoutMilliseconds?: number;
 }): Promise<ForegroundRetrievalResult> {
   const requestId = `msforeground_${randomUUID()}`;
+  const timeoutMilliseconds = request.timeoutMilliseconds ?? defaultClientTimeoutMilliseconds;
+  const deadlineAt = new Date(Date.now() + timeoutMilliseconds).toISOString();
   const payload: ForegroundRequest = request.event === "SessionStart"
     ? {
         schemaVersion: foregroundProtocolVersion,
@@ -43,6 +45,7 @@ export async function requestForegroundRetrieval(request: {
         projectId: request.projectId,
         sessionId: request.sessionId,
         requestedAt: request.requestedAt,
+        deadlineAt,
         ...(request.eventId === undefined ? {} : { eventId: request.eventId })
       }
     : {
@@ -59,12 +62,13 @@ export async function requestForegroundRetrieval(request: {
           errors: [...(request.signals?.errors ?? emptySignals.errors)],
           commands: [...(request.signals?.commands ?? emptySignals.commands)]
         },
-        requestedAt: request.requestedAt
+        requestedAt: request.requestedAt,
+        deadlineAt
       };
   foregroundRequestSchema.parse(payload);
   const source = Buffer.from(`${JSON.stringify(payload)}\n`, "utf8");
   if (source.byteLength > maximumForegroundRequestBytes) {
-    return { state: "unavailable", code: "malformed_response" };
+    return { state: "unavailable", requestId, code: "malformed_response" };
   }
   return new Promise<ForegroundRetrievalResult>((resolveResult) => {
     const socket = createConnection(foregroundRetrievalSocketPath(request.runtimeRoot));
@@ -78,14 +82,14 @@ export async function requestForegroundRetrieval(request: {
       resolveResult(result);
     };
     const timer = setTimeout(
-      () => { finish({ state: "unavailable", code: "deadline_exceeded" }); },
-      request.timeoutMilliseconds ?? defaultClientTimeoutMilliseconds
+      () => { finish({ state: "deadline_exceeded", requestId }); },
+      Math.max(1, Date.parse(deadlineAt) - Date.now())
     );
     socket.once("connect", () => { socket.write(source); });
     socket.on("data", (chunk: Buffer) => {
       response = Buffer.concat([response, chunk]);
       if (response.byteLength > maximumForegroundResponseBytes) {
-        finish({ state: "unavailable", code: "malformed_response" });
+        finish({ state: "unavailable", requestId, code: "malformed_response" });
         return;
       }
       const newline = response.indexOf(0x0a);
@@ -95,17 +99,19 @@ export async function requestForegroundRetrieval(request: {
           JSON.parse(response.subarray(0, newline).toString("utf8"))
         );
         if (!parsed.success || parsed.data.requestId !== requestId) {
-          finish({ state: "unavailable", code: "malformed_response" });
+          finish({ state: "unavailable", requestId, code: "malformed_response" });
           return;
         }
         finish(parsed.data);
       } catch {
-        finish({ state: "unavailable", code: "malformed_response" });
+        finish({ state: "unavailable", requestId, code: "malformed_response" });
       }
     });
-    socket.once("error", () => { finish({ state: "unavailable", code: "socket_unavailable" }); });
+    socket.once("error", () => {
+      finish({ state: "unavailable", requestId, code: "socket_unavailable" });
+    });
     socket.once("end", () => {
-      if (!settled) finish({ state: "unavailable", code: "malformed_response" });
+      if (!settled) finish({ state: "unavailable", requestId, code: "malformed_response" });
     });
   });
 }

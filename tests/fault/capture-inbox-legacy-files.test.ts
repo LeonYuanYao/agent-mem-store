@@ -14,11 +14,11 @@ import { initializeMemStore } from "../../src/operations/initialize.js";
 import { inspectStatus } from "../../src/operations/status.js";
 import { inspectDoctor } from "../../src/operations/maintenance.js";
 import {
-  emergencySpoolMaximumPendingEntries,
-  importNextEmergencySpoolEvent,
-  inspectEmergencySpool,
-  spoolCaptureEvent
-} from "../../src/capture/emergency-spool.js";
+  captureInboxFileMaximumPendingEntries,
+  appendCaptureInboxEventFile,
+  importNextCaptureInboxEventFile,
+  inspectCaptureInboxFiles
+} from "../../src/capture/inbox-files.js";
 
 const roots: string[] = [];
 
@@ -28,7 +28,7 @@ afterEach(async () => {
   );
 });
 
-test("a Stop event survives Runtime SQLite contention through the emergency spool", async () => {
+test("a Stop event survives Runtime SQLite contention through the Capture Inbox", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-emergency-spool-"));
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -56,21 +56,9 @@ test("a Stop event survives Runtime SQLite contention through the emergency spoo
   expect(result).toMatchObject({
     continue: true,
     captured: true,
-    state: "spooled"
+    state: "captured"
   });
   if (!result.captured) throw new Error("Expected the Stop event to be durably captured.");
-
-  await expect(inspectStatus({ runtimeRoot, vaultRoot: join(root, "vault") }))
-    .resolves.toMatchObject({
-      pipelines: {
-        capture: {
-          sqlite_busy_count: 1,
-          sqlite_busy_recovered_count: 1,
-          sqlite_busy_lost_count: 0,
-          last_sqlite_busy_outcome: "spooled"
-        }
-      }
-    });
 
   await expect(runWorkerOnce({
     runtimeRoot,
@@ -80,7 +68,7 @@ test("a Stop event survives Runtime SQLite contention through the emergency spoo
     workerStartedAt: "2026-08-22T00:59:00.000Z"
   })).resolves.toMatchObject({
     state: "worked",
-    activities: ["emergency-spool:imported"]
+    activities: ["capture-inbox:imported:1"]
   });
 
   await expect(
@@ -91,7 +79,7 @@ test("a Stop event survives Runtime SQLite contention through the emergency spoo
   });
 });
 
-test("the emergency spool preserves bounded-event truncation for a large Stop", async () => {
+test("the Capture Inbox preserves bounded-event truncation for a large Stop", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-emergency-spool-large-"));
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -116,7 +104,7 @@ test("the emergency spool preserves bounded-event truncation for a large Stop", 
     database.close();
   }
 
-  expect(result).toMatchObject({ captured: true, state: "spooled" });
+  expect(result).toMatchObject({ captured: true, state: "captured" });
   if (!result.captured) throw new Error("Expected the large Stop event to be durably captured.");
   await runWorkerOnce({
     runtimeRoot,
@@ -140,7 +128,7 @@ test("status and doctor expose a body-free emergency spool backlog", async () =>
   const vaultRoot = join(root, "vault");
   await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
 
-  await spoolCaptureEvent({
+  await appendCaptureInboxEventFile({
     runtimeRoot,
     projectPath: root,
     spooledAt: "2026-01-01T00:00:00.000Z",
@@ -158,18 +146,18 @@ test("status and doctor expose a body-free emergency spool backlog", async () =>
   });
 
   const status = await inspectStatus({ runtimeRoot, vaultRoot });
-  expect(status.pipelines.capture.emergency_spool).toMatchObject({
+  expect(status.pipelines.capture.capture_inbox).toMatchObject({
     pending_count: 1,
     oldest_pending_at: "2026-01-01T00:00:00.000Z",
     quarantine_count: 0
   });
-  expect(status.pipelines.capture.emergency_spool.total_bytes).toBeGreaterThan(0);
-  expect(JSON.stringify(status.pipelines.capture.emergency_spool))
+  expect(status.pipelines.capture.capture_inbox.total_bytes).toBeGreaterThan(0);
+  expect(JSON.stringify(status.pipelines.capture.capture_inbox))
     .not.toContain("This body must not appear");
 
   const doctor = await inspectDoctor({ runtimeRoot, vaultRoot, deep: false });
   expect(doctor.state).toBe("degraded");
-  expect(doctor.checks.find((check) => check.name === "emergency_spool"))
+  expect(doctor.checks.find((check) => check.name === "capture_inbox"))
     .toMatchObject({ state: "warning" });
 });
 
@@ -181,11 +169,11 @@ test("the emergency spool quarantines malformed entries without blocking later i
   await mkdir(pendingRoot, { recursive: true });
   await writeFile(join(pendingRoot, "000-invalid.json"), "not-json\n", "utf8");
 
-  await expect(importNextEmergencySpoolEvent({
+  await expect(importNextCaptureInboxEventFile({
     runtimeRoot,
     importedAt: "2026-08-22T01:20:00.000Z"
   })).resolves.toEqual({ state: "quarantined", fileName: "000-invalid.json" });
-  await expect(inspectEmergencySpool(runtimeRoot)).resolves.toMatchObject({
+  await expect(inspectCaptureInboxFiles(runtimeRoot)).resolves.toMatchObject({
     pendingCount: 0,
     quarantineCount: 1
   });
@@ -200,7 +188,7 @@ test("the emergency spool refuses new events after reaching its bounded capacity
   const pendingRoot = join(runtimeRoot, "spool", "capture", "pending");
   await mkdir(pendingRoot, { recursive: true });
   await Promise.all(Array.from(
-    { length: emergencySpoolMaximumPendingEntries },
+    { length: captureInboxFileMaximumPendingEntries },
     (_, index) => writeFile(
       join(pendingRoot, `${String(index).padStart(4, "0")}.json`),
       "{}\n",
@@ -208,7 +196,7 @@ test("the emergency spool refuses new events after reaching its bounded capacity
     )
   ));
 
-  await expect(spoolCaptureEvent({
+  await expect(appendCaptureInboxEventFile({
     runtimeRoot,
     projectPath: root,
     spooledAt: "2026-08-22T01:30:00.000Z",
@@ -223,10 +211,10 @@ test("the emergency spool refuses new events after reaching its bounded capacity
       turnId: "turn-emergency-capacity",
       payload: { assistantMessage: "Capacity overflow must be explicit." }
     }
-  })).rejects.toThrow("Emergency spool capacity exceeded");
-  await expect(inspectEmergencySpool(runtimeRoot)).resolves.toMatchObject({
-    pendingCount: emergencySpoolMaximumPendingEntries,
-    maximumPendingCount: emergencySpoolMaximumPendingEntries,
+  })).rejects.toThrow("Capture Inbox capacity exceeded");
+  await expect(inspectCaptureInboxFiles(runtimeRoot)).resolves.toMatchObject({
+    pendingCount: captureInboxFileMaximumPendingEntries,
+    maximumPendingCount: captureInboxFileMaximumPendingEntries,
     capacityState: "full"
   });
 });

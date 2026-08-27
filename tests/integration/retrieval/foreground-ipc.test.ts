@@ -15,6 +15,7 @@ import {
   runNextShadowEvaluation
 } from "../../../src/retrieval/shadow-worker.js";
 import { writeCanonicalMemory } from "../../../src/vault/index.js";
+import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
 
 const roots: string[] = [];
@@ -139,7 +140,7 @@ test("the default foreground deadline accepts a valid response within one second
       const request = JSON.parse(source.split("\n", 1)[0] ?? "{}") as { requestId?: string };
       setTimeout(() => {
         socket.end(`${JSON.stringify({
-          schemaVersion: 1,
+          schemaVersion: 2,
           requestId: request.requestId,
           state: "completed",
           event: "SessionStart",
@@ -228,6 +229,47 @@ test("an active foreground result consumes its captured event exactly once", asy
   }
 });
 
+test("foreground reservation succeeds before a Capture Inbox event reaches SQLite", async () => {
+  const roots = await fixture();
+  const eventId = "msevent_foreground_inbox_pending";
+  const server = await startForegroundRetrievalServer({ ...roots, adapter });
+  try {
+    await expect(requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      eventId,
+      projectId,
+      sessionId: "foreground-inbox-pending",
+      requestedAt: "2026-08-25T12:03:00.000Z"
+    })).resolves.toMatchObject({ state: "completed" });
+    await expect(inspectShadowEvaluation(roots.runtimeRoot, eventId)).resolves.toMatchObject({
+      state: "completed",
+      attemptCount: 1
+    });
+    await captureEvent({
+      runtimeRoot: roots.runtimeRoot,
+      event: {
+        schemaVersion: 1,
+        eventId,
+        deduplicationKey: "foreground:inbox-pending",
+        agent: "codex",
+        eventKind: "SessionStart",
+        occurredAt: "2026-08-25T12:03:00.000Z",
+        sessionId: "foreground-inbox-pending",
+        projectId,
+        payload: { source: "startup" }
+      }
+    });
+    await expect(runNextShadowEvaluation({
+      ...roots,
+      adapter,
+      now: "2026-08-25T12:04:00.000Z"
+    })).resolves.toEqual({ state: "empty" });
+  } finally {
+    await server.close();
+  }
+});
+
 async function rawSocketRequest(socketPath: string, source: string | Buffer): Promise<Record<string, unknown>> {
   return new Promise<Record<string, unknown>>((resolveResponse, rejectResponse) => {
     const socket = createConnection(socketPath);
@@ -247,11 +289,11 @@ test("malformed and oversized socket messages are rejected without reaching retr
   const server = await startForegroundRetrievalServer({ ...roots, adapter });
   try {
     await expect(rawSocketRequest(server.socketPath, "not-json\n")).resolves.toMatchObject({
-      state: "error",
+      state: "unavailable",
       code: "malformed_request"
     });
     await expect(rawSocketRequest(server.socketPath, `${"x".repeat(65 * 1024)}\n`)).resolves.toMatchObject({
-      state: "error",
+      state: "unavailable",
       code: "request_too_large"
     });
   } finally {
@@ -293,22 +335,107 @@ test("the client rejects malformed responses and enforces its deadline", async (
     });
     await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
     try {
-      await expect(requestForegroundRetrieval({
+      const response = await requestForegroundRetrieval({
         runtimeRoot,
         event: "SessionStart",
         projectId,
         sessionId: `client-fault-${behavior}`,
         requestedAt: "2026-08-25T12:01:00.000Z",
         timeoutMilliseconds: 50
-      })).resolves.toEqual({
-        state: "unavailable",
-        code: behavior === "malformed" ? "malformed_response" : "deadline_exceeded"
       });
+      expect(response).toMatchObject({
+        state: behavior === "malformed" ? "unavailable" : "deadline_exceeded",
+        ...(behavior === "malformed" ? { code: "malformed_response" } : {})
+      });
+      expect(response.requestId).toMatch(/^msforeground_/u);
     } finally {
       await new Promise<void>((resolveClose, rejectClose) => server.close((error) => {
         if (error === undefined) resolveClose();
         else rejectClose(error);
       }));
     }
+  }
+});
+
+test("an abandoned prompt holds one bounded embedding, rejects queued work, and writes no Receipt", async () => {
+  const roots = await fixture();
+  let releaseEmbedding: (() => void) | undefined;
+  let notifyEmbeddingStarted: (() => void) | undefined;
+  const embeddingStarted = new Promise<void>((resolve) => { notifyEmbeddingStarted = resolve; });
+  const embeddingReleased = new Promise<void>((resolve) => { releaseEmbedding = resolve; });
+  let blockNextQuery = true;
+  const controlledAdapter: EmbeddingAdapter = {
+    ...adapter,
+    embedQuery: async (texts) => {
+      if (blockNextQuery) {
+        blockNextQuery = false;
+        notifyEmbeddingStarted?.();
+        await embeddingReleased;
+      }
+      return texts.map(() => [1, 0]);
+    }
+  };
+  const server = await startForegroundRetrievalServer({ ...roots, adapter: controlledAdapter });
+  try {
+    await expect(requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId: "foreground-cancellation-session",
+      requestedAt: "2026-08-25T12:10:00.000Z"
+    })).resolves.toMatchObject({ state: "completed" });
+    const beforeCancellation = await openRuntimeDatabase(roots.runtimeRoot);
+    const epochTokensBefore = beforeCancellation.prepare(
+      `SELECT automatic_token_total FROM context_epochs
+       WHERE session_id = ? AND state = 'active'`
+    ).get("foreground-cancellation-session")?.automatic_token_total;
+    beforeCancellation.close();
+
+    const abandoned = requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "foreground-cancellation-session",
+      prompt: "How should SQLite WAL recover the durable queue?",
+      requestedAt: "2026-08-25T12:11:00.000Z",
+      timeoutMilliseconds: 50
+    });
+    await embeddingStarted;
+    await expect(requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "foreground-cancellation-session",
+      prompt: "A later caller must not wait behind abandoned work.",
+      requestedAt: "2026-08-25T12:11:01.000Z",
+      timeoutMilliseconds: 200
+    })).resolves.toMatchObject({ state: "busy" });
+    await expect(abandoned).resolves.toMatchObject({ state: "deadline_exceeded" });
+    releaseEmbedding?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const database = await openRuntimeDatabase(roots.runtimeRoot);
+    try {
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM retrieval_receipts WHERE caller_kind = 'user_prompt'"
+      ).get()?.count).toBe(0);
+      expect(database.prepare(
+        `SELECT automatic_token_total FROM context_epochs
+         WHERE session_id = ? AND state = 'active'`
+      ).get("foreground-cancellation-session")?.automatic_token_total).toBe(epochTokensBefore);
+    } finally {
+      database.close();
+    }
+    await expect(requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "foreground-cancellation-session",
+      prompt: "How should SQLite WAL recover the durable queue?",
+      requestedAt: "2026-08-25T12:12:00.000Z"
+    })).resolves.toMatchObject({ state: "completed" });
+  } finally {
+    releaseEmbedding?.();
+    await server.close();
   }
 });

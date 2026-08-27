@@ -29,7 +29,8 @@ const spoolEntrySchema = spoolEntryContentSchema.extend({
 
 type SpoolEntryContent = z.infer<typeof spoolEntryContentSchema>;
 
-export const emergencySpoolMaximumPendingEntries = 256;
+export const captureInboxFileMaximumPendingEntries = 2_048;
+export const captureInboxFileMaximumPendingBytes = 512 * 1024 * 1024;
 
 function captureSpoolRoot(runtimeRoot: string): string {
   return join(runtimeRoot, "spool", "capture");
@@ -47,9 +48,9 @@ function contentIdentity(content: SpoolEntryContent): string {
   return createHash("sha256").update(JSON.stringify(content)).digest("hex");
 }
 
-function spoolFileName(eventId: string): string {
+function spoolFileName(eventId: string, capturedAt: string): string {
   const identity = createHash("sha256").update(eventId).digest("hex");
-  return `${identity}.json`;
+  return `${capturedAt}-${identity}.json`;
 }
 
 function sqliteIsBusy(error: unknown): boolean {
@@ -74,20 +75,22 @@ async function validateExistingSpoolEntry(path: string, eventId: string): Promis
   }
 }
 
-export async function spoolCaptureEvent(request: {
+export async function appendCaptureInboxEventFile(request: {
   readonly runtimeRoot: string;
   readonly projectPath: string;
   readonly spooledAt: string;
   readonly event: CaptureEvent;
+  readonly reservedPendingEntries?: number;
+  readonly reservedPendingBytes?: number;
 }): Promise<{ readonly state: "spooled"; readonly eventId: string }> {
   const event = captureEventSchema.parse(request.event);
   const prepared = prepareCaptureEventForPersistence(event);
   if (prepared.state !== "normal") {
-    throw new Error("Emergency spool refuses sensitive or uncertain content.");
+    throw new Error("Capture Inbox refuses sensitive or uncertain normal-event content.");
   }
   const retainedPayload = JSON.parse(prepared.retainedPayload.toString("utf8")) as unknown;
   if (classifyLocalSensitivity(JSON.stringify(retainedPayload)).state !== "normal") {
-    throw new Error("Emergency spool bounded content did not pass sensitivity classification.");
+    throw new Error("Capture Inbox bounded content did not pass sensitivity classification.");
   }
   const content = spoolEntryContentSchema.parse({
     schemaVersion: 1,
@@ -104,19 +107,34 @@ export async function spoolCaptureEvent(request: {
   });
   const directory = pendingRoot(request.runtimeRoot);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const targetPath = join(directory, spoolFileName(event.eventId));
+  const targetPath = join(directory, spoolFileName(event.eventId, request.spooledAt));
   if (await validateExistingSpoolEntry(targetPath, event.eventId)) {
     return { state: "spooled", eventId: event.eventId };
   }
-  if ((await jsonFileNames(directory)).length >= emergencySpoolMaximumPendingEntries) {
+  const pendingFiles = await jsonFileNames(directory);
+  const reservedPendingEntries = request.reservedPendingEntries ?? 0;
+  const reservedPendingBytes = request.reservedPendingBytes ?? 0;
+  if (pendingFiles.length + reservedPendingEntries >= captureInboxFileMaximumPendingEntries) {
     throw new Error(
-      `Emergency spool capacity exceeded (${String(emergencySpoolMaximumPendingEntries)} pending events).`
+      `Capture Inbox capacity exceeded (${String(captureInboxFileMaximumPendingEntries)} pending events).`
+    );
+  }
+  const serializedEntry = `${JSON.stringify(entry)}\n`;
+  const pendingBytes = (await Promise.all(pendingFiles.map(async (fileName) =>
+    (await stat(join(directory, fileName))).size
+  ))).reduce((total, bytes) => total + bytes, 0);
+  if (
+    pendingBytes + reservedPendingBytes + Buffer.byteLength(serializedEntry, "utf8") >
+      captureInboxFileMaximumPendingBytes
+  ) {
+    throw new Error(
+      `Capture Inbox byte capacity exceeded (${String(captureInboxFileMaximumPendingBytes)} bytes).`
     );
   }
   try {
     await writeFileAtomicallyExclusive(
       targetPath,
-      `${JSON.stringify(entry)}\n`,
+      serializedEntry,
       0o600
     );
   } catch (error) {
@@ -126,13 +144,13 @@ export async function spoolCaptureEvent(request: {
   return { state: "spooled", eventId: event.eventId };
 }
 
-export type EmergencySpoolImportResult =
+export type CaptureInboxFileImportResult =
   | { readonly state: "empty" }
   | { readonly state: "imported"; readonly eventId: string }
   | { readonly state: "deferred" }
   | { readonly state: "quarantined"; readonly fileName: string };
 
-export interface EmergencySpoolSummary {
+export interface CaptureInboxFileSummary {
   readonly pendingCount: number;
   readonly maximumPendingCount: number;
   readonly capacityState: "available" | "full";
@@ -145,16 +163,21 @@ async function jsonFileNames(directory: string): Promise<readonly string[]> {
   try {
     return (await readdir(directory))
       .filter((fileName) => fileName.endsWith(".json"))
-      .sort();
+      .sort((left, right) => {
+        const leftIsTimestamped = /^\d{4}-\d{2}-/u.test(left);
+        const rightIsTimestamped = /^\d{4}-\d{2}-/u.test(right);
+        if (leftIsTimestamped !== rightIsTimestamped) return leftIsTimestamped ? 1 : -1;
+        return left.localeCompare(right);
+      });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
 }
 
-export async function inspectEmergencySpool(
+export async function inspectCaptureInboxFiles(
   runtimeRoot: string
-): Promise<EmergencySpoolSummary> {
+): Promise<CaptureInboxFileSummary> {
   const pendingDirectory = pendingRoot(runtimeRoot);
   const quarantineDirectory = quarantineRoot(runtimeRoot);
   const [pendingFiles, quarantineFiles] = await Promise.all([
@@ -178,8 +201,8 @@ export async function inspectEmergencySpool(
   ));
   return {
     pendingCount: pendingFiles.length,
-    maximumPendingCount: emergencySpoolMaximumPendingEntries,
-    capacityState: pendingFiles.length >= emergencySpoolMaximumPendingEntries
+    maximumPendingCount: captureInboxFileMaximumPendingEntries,
+    capacityState: pendingFiles.length >= captureInboxFileMaximumPendingEntries
       ? "full"
       : "available",
     oldestPendingAt: pendingMetadata
@@ -192,10 +215,10 @@ export async function inspectEmergencySpool(
   };
 }
 
-export async function importNextEmergencySpoolEvent(request: {
+export async function importNextCaptureInboxEventFile(request: {
   readonly runtimeRoot: string;
   readonly importedAt: string;
-}): Promise<EmergencySpoolImportResult> {
+}): Promise<CaptureInboxFileImportResult> {
   const directory = pendingRoot(request.runtimeRoot);
   let files: string[];
   try {
@@ -211,7 +234,7 @@ export async function importNextEmergencySpoolEvent(request: {
     const parsed = spoolEntrySchema.parse(JSON.parse(await readFile(sourcePath, "utf8")));
     const { contentSha256, ...content } = parsed;
     if (contentIdentity(content) !== contentSha256) {
-      throw new Error("Emergency spool content identity does not match.");
+      throw new Error("Capture Inbox content identity does not match.");
     }
     const project = parsed.event.projectId === undefined
       ? await resolveProject({
@@ -232,7 +255,7 @@ export async function importNextEmergencySpoolEvent(request: {
       sourceTruncated: parsed.sourceTruncated
     });
     if (captured.state !== "captured" && captured.state !== "duplicate") {
-      throw new Error(`Emergency spool import was rejected with state ${captured.state}.`);
+      throw new Error(`Capture Inbox import was rejected with state ${captured.state}.`);
     }
     await unlink(sourcePath);
     return { state: "imported", eventId: captured.eventId };

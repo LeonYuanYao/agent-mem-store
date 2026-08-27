@@ -241,12 +241,16 @@ _Avoid_: 完整 Vault 加载、候选回忆
 _Avoid_: 长期记忆、模型摘要
 
 **Durable Outbox（可靠投递箱）**:
-保存尚待后台处理的 Capture Event 的机器本地、可恢复操作日志。Hook 在确认事件已经原子写入后才视为捕获成功；它不是 Canonical Memory Data，也不是 Memory Vault 的副本。
-_Avoid_: Memory Vault、治理队列、第二份权威知识库
+保存已从 Capture Inbox 导入、尚待后台处理的 Capture Event 的机器本地、可恢复处理账本。它拥有事件生命周期、重试和批处理状态，但不是 Hook 的文件入口、Canonical Memory Data 或 Memory Vault 的副本。
+_Avoid_: Capture Inbox、Memory Vault、治理队列、第二份权威知识库
 
-**Emergency Capture Spool（紧急捕获缓冲区）**:
-当正常 SQLite Outbox 因短暂写锁竞争无法在 Hook 时限内接收事件时，保存已完成脱敏与大小限制的 Capture Event 的机器本地、有界恢复区。Worker 会把它幂等导回 Outbox；损坏文件进入隔离区。它只处理异常路径，不是日常队列，也不在 Obsidian Vault 中。
-_Avoid_: 第二个普通 Outbox、无限积压、Canonical Memory、Vault 同步数据
+**Capture Inbox（捕获收件箱）**:
+Coding Agent Hook 在报告捕获成功前写入的机器本地、有界可靠入口。每个文件保存一个已经完成校验、敏感性处置和大小限制的 Capture disposition，Worker 会将其幂等导入 Durable Outbox。
+_Avoid_: Durable Outbox、Emergency Capture Spool、无限积压、Canonical Memory、Vault 同步数据
+
+**Capture Disposition（捕获处置）**:
+Hook 对一次捕获尝试持久记录的结果，取值至少包括可处理事件、无正文 Secret 阻止和无正文敏感隔离。只有某个处置已经进入 Capture Inbox 后，Hook 才能把该次捕获报告为成功。
+_Avoid_: Memory Candidate、Capture Event 正文副本、仅内存结果
 
 **Distillation Worker（提炼工作进程）**:
 独立于前台 Hook 运行的后台处理器。它幂等消费 Capture Event、合并同一 Turn 或 Session 的输入、调用 Luna，并把结果送入 Memory Candidate 生命周期。
@@ -273,8 +277,16 @@ _Avoid_: 无条件必注入、关闭 Memory 检索、模型自动改写用户策
 _Avoid_: 生成式临时摘要、完整 Vault、Memory Candidate
 
 **Foreground Retrieval Endpoint（前台检索端点）**:
-由常驻 Distillation Worker 持有的机器本地 Unix socket。active SessionStart 或 UserPromptSubmit Hook 在完成 Capture 后，用 captured event、Project 和 Session identity 请求已经通过门禁的 Core/Relevant Memory Pack；端点复用常驻 E5 adapter 和同一套确定性检索、预算与 Receipt 逻辑。它不是网络服务、第二个 Worker、第二套索引或模型调用路径；不可用、超时或协议异常时 Hook 返回空上下文并继续当前 Turn。
-_Avoid_: Hook 内冷启动 embedding、lexical-only 生产旁路、独立 retrieval daemon、跨 Project fallback
+Foreground Retrieval Lane 暴露给 active SessionStart 和 UserPromptSubmit Hook 的机器本地、owner-only Unix socket。端点只传输有界请求和 completed、empty、busy、deadline 或 unavailable 结果；它不是网络服务、第二套检索器或跨 Project fallback。
+_Avoid_: Foreground Retrieval Lane、Hook 内冷启动 embedding、独立 retrieval daemon、跨 Project fallback
+
+**Foreground Retrieval Lane（前台检索通道）**:
+在一个客户端可见截止时间内独占执行自动 Memory Injection 的高优先级路径。它不在后台工作后排队过期请求，并统一拥有准入、取消、Retrieval Snapshot、确定性选择和最终 Receipt 结果。
+_Avoid_: Foreground Retrieval Endpoint、Distillation Worker、Explicit Deep Retrieval、普通任务队列
+
+**Retrieval Snapshot（检索快照）**:
+绑定一个已完成 Retrieval Index revision、有效配置和 Memory content identity 集合的不可变派生状态。Foreground Retrieval Lane 在请求开始时固定使用一个快照，新快照只能原子替换，不能在一次检索中混用版本。
+_Avoid_: Retrieval Index 构建过程、Memory Vault、Canonical Memory Data、运行中查询拼装
 
 **Relevance Band（相关性档位）**:
 自动检索在硬安全和 lifecycle 过滤后对候选划分的 `high`、`probable` 或 `weak`。high 正常竞争，probable 只能以更紧凑、可按 ID 深读的形式有界参与，weak 不自动注入但仍可主动搜索；档位由混合检索信号决定，不要求词法与语义同时命中。

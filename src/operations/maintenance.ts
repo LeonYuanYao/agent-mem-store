@@ -6,7 +6,9 @@ import { z } from "zod";
 
 import { loadConfiguration } from "../configuration/index.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
-import { inspectEmergencySpool } from "../capture/emergency-spool.js";
+import { inspectCaptureInbox } from "../capture/inbox.js";
+import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
+import { inspectRetrievalCatalogGeneration } from "../retrieval/index-coordinator.js";
 
 export interface DoctorCheck {
   readonly name: string;
@@ -81,23 +83,55 @@ export async function inspectDoctor(request: {
   }
 
   try {
-    const spool = await inspectEmergencySpool(runtimeRoot);
-    const stale = spool.oldestPendingAt !== null &&
-      Date.now() - Date.parse(spool.oldestPendingAt) >= 15 * 60 * 1_000;
-    const nearingCapacity = spool.pendingCount >= Math.floor(
-      spool.maximumPendingCount * 0.8
-    );
-    const warning = spool.quarantineCount > 0 || stale || nearingCapacity;
+    const attempts = await inspectForegroundAttempts(runtimeRoot);
+    const warning = attempts.deadlineCount >= 3 || attempts.postDeadlineCount > 0;
     checks.push({
-      name: "emergency_spool",
+      name: "foreground_retrieval",
       state: warning ? "warning" : "ok",
-      detail: `${String(spool.pendingCount)}/${String(spool.maximumPendingCount)} pending Capture Events; ${String(spool.quarantineCount)} quarantined; oldest pending: ${spool.oldestPendingAt ?? "none"}.`
+      detail: `${String(attempts.totalCount)} foreground attempts; ${String(attempts.deadlineCount)} deadlines; ${String(attempts.cancellationCount)} cancellations; ${String(attempts.postDeadlineCount)} with post-deadline work.`
     });
   } catch (error) {
     checks.push({
-      name: "emergency_spool",
+      name: "foreground_retrieval",
       state: "error",
-      detail: error instanceof Error ? error.message : "Emergency spool inspection failed."
+      detail: error instanceof Error ? error.message : "Foreground retrieval inspection failed."
+    });
+  }
+
+  try {
+    const generation = await inspectRetrievalCatalogGeneration(runtimeRoot);
+    const forceOverdue = generation.forceDueAt !== null &&
+      Date.parse(generation.forceDueAt) <= Date.now() &&
+      generation.dirtyGeneration > generation.publishedGeneration;
+    checks.push({
+      name: "retrieval_catalog_generation",
+      state: forceOverdue ? "warning" : "ok",
+      detail: `Retrieval catalog generation ${String(generation.publishedGeneration)}/${String(generation.dirtyGeneration)} published; building: ${generation.buildingGeneration === null ? "none" : String(generation.buildingGeneration)}.`
+    });
+  } catch (error) {
+    checks.push({
+      name: "retrieval_catalog_generation",
+      state: "error",
+      detail: error instanceof Error ? error.message : "Retrieval catalog generation inspection failed."
+    });
+  }
+
+  try {
+    const inbox = await inspectCaptureInbox(runtimeRoot);
+    const stale = inbox.oldestPendingAt !== null &&
+      Date.now() - Date.parse(inbox.oldestPendingAt) >= 15 * 60 * 1_000;
+    const warning = inbox.quarantineCount > 0 || stale ||
+      inbox.capacityState !== "available";
+    checks.push({
+      name: "capture_inbox",
+      state: warning ? "warning" : "ok",
+      detail: `${String(inbox.pendingCount)}/${String(inbox.maximumPendingCount)} pending Capture dispositions using ${String(inbox.pendingBytes)}/${String(inbox.maximumPendingBytes)} bytes; ${String(inbox.quarantineCount)} quarantined; oldest pending: ${inbox.oldestPendingAt ?? "none"}.`
+    });
+  } catch (error) {
+    checks.push({
+      name: "capture_inbox",
+      state: "error",
+      detail: error instanceof Error ? error.message : "Capture Inbox inspection failed."
     });
   }
 

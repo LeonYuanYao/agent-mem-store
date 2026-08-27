@@ -13,6 +13,11 @@ import {
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { writeCanonicalMemory } from "../../../src/vault/index.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
+import {
+  beginRetrievalIndexBuild,
+  completeRetrievalIndexBuild,
+  inspectRetrievalCatalogGeneration
+} from "../../../src/retrieval/index-coordinator.js";
 
 const roots: string[] = [];
 
@@ -150,6 +155,112 @@ test("a new index revision embeds only Canonical Memory missing from the compati
     builtAt: "2026-08-07T10:02:00.000Z"
   });
   expect(incompatibleEmbeddingCount).toBe(3);
+});
+
+test("retrieval index document embeddings are submitted in batches of at most sixteen", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-index-batch16-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const batchSizes: number[] = [];
+  const batchAdapter: EmbeddingAdapter = {
+    ...adapter,
+    identity: { ...adapter.identity, adapterVersion: "fixture-explicit-batch16-v1" },
+    embed: (texts) => {
+      batchSizes.push(texts.length);
+      return Promise.resolve(texts.map(() => [1, 0, 0]));
+    }
+  };
+  for (let ordinal = 0; ordinal < 17; ordinal += 1) {
+    const suffix = String(ordinal).padStart(3, "0");
+    await writeCanonicalMemory({
+      runtimeRoot,
+      vaultRoot,
+      actor: "human",
+      memory: makeCanonicalMemory({
+        memoryId: `msmem_123e4567-e89b-42d3-a456-426614175${suffix}`,
+        revisionId: `msrev_123e4567-e89b-42d3-a456-426614175${suffix}`,
+        body: `Batch-bounded retrieval document ${suffix}.`
+      })
+    });
+  }
+
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: batchAdapter,
+    builtAt: "2026-08-07T10:03:00.000Z"
+  });
+  expect(batchSizes).toEqual([16, 1]);
+});
+
+test("a catalog change during a build leaves one consistent follow-up generation due", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-index-follow-up-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614175101",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614175111",
+      body: "The build captures this first immutable revision."
+    })
+  });
+  const lease = await beginRetrievalIndexBuild({
+    runtimeRoot,
+    now: "2026-08-07T10:10:00.000Z",
+    activeIndexExists: false,
+    adapterMatches: false,
+    foregroundPressure: false
+  });
+  if (lease.state !== "started") throw new Error("Expected the initial generation lease.");
+  let releaseEmbedding: (() => void) | undefined;
+  let notifyEmbeddingStarted: (() => void) | undefined;
+  const embeddingStarted = new Promise<void>((resolve) => { notifyEmbeddingStarted = resolve; });
+  const embeddingReleased = new Promise<void>((resolve) => { releaseEmbedding = resolve; });
+  const blockingAdapter: EmbeddingAdapter = {
+    ...adapter,
+    identity: { ...adapter.identity, adapterVersion: "fixture-follow-up-v1" },
+    embed: async (texts) => {
+      notifyEmbeddingStarted?.();
+      await embeddingReleased;
+      return texts.map(() => [1, 0, 0]);
+    }
+  };
+  const building = buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: blockingAdapter,
+    builtAt: "2026-08-07T10:10:01.000Z"
+  });
+  await embeddingStarted;
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614175102",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614175112",
+      body: "This later revision belongs to the follow-up generation."
+    })
+  });
+  releaseEmbedding?.();
+  const published = await building;
+  await completeRetrievalIndexBuild({
+    runtimeRoot,
+    targetGeneration: lease.targetGeneration,
+    completedAt: "2026-08-07T10:10:02.000Z"
+  });
+
+  expect(published.documentCount).toBe(1);
+  await expect(inspectRetrievalCatalogGeneration(runtimeRoot)).resolves.toMatchObject({
+    dirtyGeneration: 2,
+    publishedGeneration: 1,
+    buildingGeneration: null
+  });
 });
 
 test("index publication yields between bounded batches while the previous index stays active", async () => {

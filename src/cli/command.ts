@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -13,6 +13,7 @@ import {
   successEnvelope
 } from "../contracts/envelope.js";
 import { initializeMemStore } from "../operations/initialize.js";
+import { loadConfiguration } from "../configuration/index.js";
 import { prepareShadowEmbedding } from "../operations/embedding-install.js";
 import { migrateMemoryCategories } from "../operations/category-migration.js";
 import {
@@ -76,7 +77,8 @@ import {
   inspectSensitivityAssessment,
   inspectSensitivityStatus
 } from "../sensitivity/summary.js";
-import { startForegroundRetrievalServer } from "../retrieval/foreground-ipc.js";
+import { startForegroundRuntime } from "../retrieval/foreground-runtime.js";
+import { configureRetrievalIndexCoordinator } from "../retrieval/index-coordinator.js";
 import { runCodexHook } from "./codex-hook.js";
 import {
   applyManagedIntegration,
@@ -409,7 +411,10 @@ function previewResult(wouldChange: readonly string[], extra: Record<string, unk
   return { state: "preview", dry_run: true, would_change: wouldChange, ...extra };
 }
 
-async function configuredWorkerAdapters(runtimeRoot: string): Promise<{
+async function configuredWorkerAdapters(
+  runtimeRoot: string,
+  options: { readonly includeEmbedding?: boolean } = {}
+): Promise<{
   readonly adapters?: WorkerAdapters;
   dispose(): Promise<void>;
 }> {
@@ -425,7 +430,9 @@ async function configuredWorkerAdapters(runtimeRoot: string): Promise<{
       });
   let embedding: Awaited<ReturnType<typeof loadConfiguredEmbeddingAdapter>>;
   try {
-    embedding = await loadConfiguredEmbeddingAdapter(runtimeRoot);
+    embedding = options.includeEmbedding === false
+      ? undefined
+      : await loadConfiguredEmbeddingAdapter(runtimeRoot);
   } catch (error) {
     if (!(error instanceof EmbeddingArtifactMismatchError)) throw error;
     throw new MemStoreCommandError("embedding_artifact_mismatch", error.message);
@@ -443,6 +450,19 @@ async function configuredWorkerAdapters(runtimeRoot: string): Promise<{
     ...(adapters === undefined ? {} : { adapters }),
     dispose: async () => embedding?.dispose()
   };
+}
+
+async function configureWorkerIndexPolicy(location: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+}): Promise<void> {
+  const configuration = await loadConfiguration(location);
+  if (configuration.mode !== "read_write") return;
+  await configureRetrievalIndexCoordinator({
+    runtimeRoot: location.runtimeRoot,
+    quietPeriodSeconds: configuration.policy.indexQuietPeriodSeconds,
+    maximumStalenessSeconds: configuration.policy.indexMaximumStalenessSeconds
+  });
 }
 
 function reviewAction(
@@ -771,6 +791,7 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
     };
   }
   if (command === "worker" && parsed.positionals[1] === "once") {
+    if (!parsed.values.preview) await configureWorkerIndexPolicy(location);
     const configured = await configuredWorkerAdapters(location.runtimeRoot);
     try {
       return {
@@ -805,13 +826,33 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
     process.once("SIGTERM", () => {
       controller.abort();
     });
-    const configured = await configuredWorkerAdapters(location.runtimeRoot);
-    const foreground = configured.adapters?.embedding === undefined
-      ? undefined
-      : await startForegroundRetrievalServer({
-          ...location,
-          adapter: configured.adapters.embedding
-        });
+    await configureWorkerIndexPolicy(location);
+    const configured = await configuredWorkerAdapters(location.runtimeRoot, {
+      includeEmbedding: false
+    });
+    const embeddingDirectory = resolve(
+      process.env.MEMSTORE_EMBEDDING_MODEL_DIR ??
+        join(location.runtimeRoot, "models", "e5-base-q8")
+    );
+    const embeddingAvailable = await access(embeddingDirectory)
+      .then(() => true)
+      .catch(() => false);
+    const foreground = embeddingAvailable
+      ? await startForegroundRuntime(location)
+      : undefined;
+    const continuousAdapters: WorkerAdapters | undefined =
+      configured.adapters === undefined && foreground === undefined
+        ? undefined
+        : {
+            ...configured.adapters,
+            ...(foreground === undefined
+              ? {}
+              : {
+                  embedding: foreground.embedding,
+                  foregroundPressure: () => foreground.hasRecentPressure(),
+                  publishRetrievalSnapshot: (snapshot) => foreground.publishSnapshot(snapshot)
+                })
+          };
     try {
       return {
         command: "worker.run",
@@ -823,7 +864,7 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
             ? 1_000
             : z.coerce.number().int().min(100).max(60_000).parse(parsed.values.interval),
           signal: controller.signal,
-          ...(configured.adapters === undefined ? {} : { adapters: configured.adapters })
+          ...(continuousAdapters === undefined ? {} : { adapters: continuousAdapters })
         }),
         json: parsed.values.json
       };

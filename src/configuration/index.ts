@@ -62,6 +62,11 @@ const machineSchema = z.object({
   launch_agent: extensibleSectionSchema
 });
 
+const retrievalIndexPolicySchema = z.object({
+  index_quiet_period_seconds: z.number().int().min(1).max(300).default(30),
+  index_max_staleness_seconds: z.number().int().min(30).max(3600).default(120)
+}).loose();
+
 const versionedDocumentSchema = z.object({
   schema_version: z.number().int()
 });
@@ -80,6 +85,8 @@ export interface LoadedConfiguration {
     readonly governanceTimezone: string;
     readonly weeklyGovernance: "MONDAY 19:00";
     readonly monthlyGovernance: "FIRST_MONDAY 19:00";
+    readonly indexQuietPeriodSeconds: number;
+    readonly indexMaximumStalenessSeconds: number;
   };
   readonly machine: {
     readonly vaultRoot: string;
@@ -291,6 +298,7 @@ export async function loadConfiguration(
   }
 
   const policy = policyResult.document as PolicyDocument;
+  const retrievalIndexPolicy = retrievalIndexPolicySchema.parse(policy.injection);
   const recoveredDocuments: ConfigurationDocumentName[] = [];
   if (policyResult.recovered) recoveredDocuments.push("policy");
   if (machineResult.recovered) recoveredDocuments.push("machine");
@@ -303,7 +311,9 @@ export async function loadConfiguration(
       candidateTombstoneDays: policy.retention.candidate_tombstone_days,
       governanceTimezone: policy.governance.timezone,
       weeklyGovernance: policy.governance.weekly,
-      monthlyGovernance: policy.governance.monthly
+      monthlyGovernance: policy.governance.monthly,
+      indexQuietPeriodSeconds: retrievalIndexPolicy.index_quiet_period_seconds,
+      indexMaximumStalenessSeconds: retrievalIndexPolicy.index_max_staleness_seconds
     },
     machine: {
       vaultRoot,

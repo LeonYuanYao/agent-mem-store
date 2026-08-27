@@ -5,7 +5,8 @@ import { z } from "zod";
 import { getEncoding } from "js-tiktoken";
 
 import { openRuntimeDatabase } from "../runtime/database.js";
-import { readCanonicalMemory, type CanonicalMemory } from "../vault/index.js";
+import { readCanonicalRevision, type CanonicalMemory } from "../vault/index.js";
+import { acknowledgeUnleasedIndexPublication } from "./index-coordinator.js";
 
 const embeddingIdentitySchema = z.object({
   adapterVersion: z.string().min(1),
@@ -190,33 +191,45 @@ async function buildRetrievalIndexImpl(request: {
   readonly indexRevisionId: string;
   readonly documentCount: number;
   readonly semanticReady: true;
+  readonly sourceGeneration: number;
 }> {
   const builtAt = z.iso.datetime().parse(request.builtAt);
   const adapterIdentity = embeddingIdentitySchema.parse(request.adapter.identity);
   const snapshotDatabase = await openRuntimeDatabase(request.runtimeRoot);
   let catalogRows: readonly Record<string, unknown>[];
+  let sourceGeneration: number;
   try {
+    snapshotDatabase.exec("BEGIN");
     catalogRows = snapshotDatabase.prepare(
       `SELECT memory_id, current_revision_id, content_identity, lifecycle, sensitivity
        FROM memory_catalog
        WHERE lifecycle = 'active' AND sensitivity IN ('normal', 'private')
        ORDER BY memory_id`
     ).all();
+    sourceGeneration = z.number().int().nonnegative().parse(snapshotDatabase.prepare(
+      "SELECT dirty_generation FROM retrieval_catalog_generations WHERE singleton = 1"
+    ).get()?.dirty_generation);
+    snapshotDatabase.exec("COMMIT");
+  } catch (error) {
+    snapshotDatabase.exec("ROLLBACK");
+    throw error;
   } finally {
     snapshotDatabase.close();
   }
   const sourceCatalogSha256 = catalogSha256(catalogRows);
   const memories = (await Promise.all(catalogRows.map(async (row) => {
     const memoryId = z.string().parse(row.memory_id);
-    const current = await readCanonicalMemory({
+    const currentRevisionId = z.string().parse(row.current_revision_id);
+    const current = await readCanonicalRevision({
       runtimeRoot: request.runtimeRoot,
       vaultRoot: request.vaultRoot,
-      memoryId
+      memoryId,
+      revisionId: currentRevisionId
     });
     if (
       current === undefined ||
       current.memory.lifecycle !== "active" ||
-      current.memory.revisionId !== row.current_revision_id ||
+      current.memory.revisionId !== currentRevisionId ||
       current.contentIdentity !== row.content_identity
     ) {
       throw new Error("Canonical catalog changed while the retrieval index was building.");
@@ -243,9 +256,12 @@ async function buildRetrievalIndexImpl(request: {
     missingTexts.push(text);
     return undefined;
   });
-  const rawVectors = missingTexts.length === 0
-    ? []
-    : await (request.adapter.embedDocuments ?? request.adapter.embed)(missingTexts);
+  const rawVectors: (readonly number[])[] = [];
+  const embedDocuments = (textsToEmbed: readonly string[]) =>
+    request.adapter.embedDocuments?.(textsToEmbed) ?? request.adapter.embed(textsToEmbed);
+  for (let offset = 0; offset < missingTexts.length; offset += 16) {
+    rawVectors.push(...await embedDocuments(missingTexts.slice(offset, offset + 16)));
+  }
   if (rawVectors.length !== missingTexts.length) {
     throw new Error("Embedding adapter returned the wrong vector count.");
   }
@@ -372,6 +388,10 @@ async function buildRetrievalIndexImpl(request: {
            standard_validated, standard_token_count, searchable_text, revised_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
+      const insertFtsDocument = database.prepare(
+        `INSERT INTO active_fts_memories(index_revision_id, memory_id, searchable_text)
+         VALUES (?, ?, ?)`
+      );
       let publishedDocumentCount = 0;
       for (
         let batchStart = 0;
@@ -418,6 +438,7 @@ async function buildRetrievalIndexImpl(request: {
               document.text,
               memory.revisedAt
             );
+            insertFtsDocument.run(indexRevisionId, memory.memoryId, document.text);
           }
           database.exec("COMMIT");
         } catch (error) {
@@ -438,12 +459,6 @@ async function buildRetrievalIndexImpl(request: {
         if (completed.changes !== 1) {
           throw new Error("Retrieval index revision could not be completed.");
         }
-        database.prepare("DELETE FROM active_fts_memories").run();
-        database.prepare(
-          `INSERT INTO active_fts_memories(index_revision_id, memory_id, searchable_text)
-           SELECT index_revision_id, memory_id, searchable_text
-           FROM retrieval_documents WHERE index_revision_id = ?`
-        ).run(indexRevisionId);
         database.prepare(
           `INSERT INTO active_retrieval_index(singleton, index_revision_id)
            VALUES (1, ?)
@@ -468,7 +483,8 @@ async function buildRetrievalIndexImpl(request: {
     state: "published",
     indexRevisionId,
     documentCount: memories.length,
-    semanticReady: true
+    semanticReady: true,
+    sourceGeneration
   };
 }
 
@@ -544,6 +560,9 @@ export async function pruneRetiredRetrievalSnapshots(request: {
     try {
       database.exec("BEGIN IMMEDIATE");
       database.prepare(
+        `DELETE FROM active_fts_memories WHERE index_revision_id IN (${revisionPlaceholders})`
+      ).run(...indexRevisionIds);
+      database.prepare(
         `DELETE FROM retrieval_documents WHERE index_revision_id IN (${revisionPlaceholders})`
       ).run(...indexRevisionIds);
       database.exec("COMMIT");
@@ -618,6 +637,11 @@ export async function buildRetrievalIndex(request: {
       ...request,
       publicationBatchSize
     });
+    await acknowledgeUnleasedIndexPublication({
+      runtimeRoot: request.runtimeRoot,
+      targetGeneration: result.sourceGeneration,
+      completedAt: request.builtAt
+    });
     const completedAt = new Date().toISOString();
     const completionDatabase = await openRuntimeDatabase(request.runtimeRoot);
     try {
@@ -629,7 +653,9 @@ export async function buildRetrievalIndex(request: {
     } finally {
       completionDatabase.close();
     }
-    return result;
+    const { sourceGeneration: _sourceGeneration, ...published } = result;
+    void _sourceGeneration;
+    return published;
   } catch (error) {
     const failedAt = new Date().toISOString();
     const failureDatabase = await openRuntimeDatabase(request.runtimeRoot);
