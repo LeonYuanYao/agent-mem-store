@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 
+import { formatMemoryReference } from "../memories/reference.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import type { EmbeddingAdapter } from "./index.js";
 import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
@@ -27,7 +28,7 @@ const SESSION_BUCKET_PAGE_SIZE = 16;
 const RECEIPT_OMISSION_DETAIL_LIMIT = 128;
 const AUTOMATIC_SEMANTIC_DEADLINE_MS = 300;
 const MINIMUM_SESSION_ITEM_INCREMENT = tokenizer.encode(
-  "\n[M:msmem_00000000-0000-0000-0000-000000000000 S:G A:H R:compact] x"
+  "\n[M:1 S:G A:H R:C] x"
 ).length;
 
 type PriorityTier = "critical" | "strong" | "normal";
@@ -58,6 +59,7 @@ const retrievalStageTimingsSchema = z.object({
 
 export interface ShadowPackItem {
   readonly memoryId: string;
+  readonly memoryRef: number;
   readonly revisionId: string;
   readonly scope: IndexedMemory["scope"];
   readonly authority: IndexedMemory["authority"];
@@ -251,7 +253,7 @@ async function visitPagedSessionCandidates(request: {
 }
 
 function scopeLabel(scope: IndexedMemory["scope"]): string {
-  return scope.kind === "global" ? "G" : `P:${scope.projectId}`;
+  return scope.kind === "global" ? "G" : "P";
 }
 
 function authorityLabel(authority: IndexedMemory["authority"]): string {
@@ -275,7 +277,7 @@ function representationFor(
   ) {
     return {
       kind: "identity",
-      text: `${memory.identityLabel}; body is incomplete; read ${memory.memoryId} by identity before reliance.`
+      text: `${memory.identityLabel}; body is incomplete; read M:${String(memory.memoryRef)} by identity before reliance.`
     };
   }
   return undefined;
@@ -286,7 +288,12 @@ function renderItem(
   representationKind: RepresentationKind,
   text: string
 ): string {
-  return `[M:${memory.memoryId} S:${scopeLabel(memory.scope)} A:${authorityLabel(memory.authority)} R:${representationKind}] ${text}`;
+  const representationLabel = representationKind === "compact"
+    ? "C"
+    : representationKind === "standard"
+      ? "S"
+      : "I";
+  return `[M:${String(memory.memoryRef)} S:${scopeLabel(memory.scope)} A:${authorityLabel(memory.authority)} R:${representationLabel}] ${text}`;
 }
 
 const standardHeader =
@@ -663,6 +670,7 @@ async function prepareSessionStartShadowPackCore(
     if (always && alwaysTokens + itemTokens > ALWAYS_TOKEN_LIMIT) return false;
     const trial = renderPack([...selected, {
       memoryId: memory.memoryId,
+      memoryRef: memory.memoryRef,
       revisionId: memory.revisionId,
       scope: memory.scope,
       authority: memory.authority,
@@ -676,6 +684,7 @@ async function prepareSessionStartShadowPackCore(
     if (trial.renderedTokenCount > SESSION_TOKEN_LIMIT) return false;
     selected.push({
       memoryId: memory.memoryId,
+      memoryRef: memory.memoryRef,
       revisionId: memory.revisionId,
       scope: memory.scope,
       authority: memory.authority,
@@ -870,6 +879,12 @@ function isContinuationOnly(prompt: string): boolean {
   return normalized.length <= 12 && /^(ok|okay|yes|sure|continue|好的?|可以|同意|继续|行了?|没问题)[。.!！]?$/u.test(normalized);
 }
 
+function directlyReferencesMemory(prompt: string, memory: IndexedMemory): boolean {
+  if (prompt.includes(memory.memoryId)) return true;
+  const reference = formatMemoryReference(memory.memoryRef);
+  return new RegExp(`(?:^|[^A-Za-z0-9_])${reference}(?![0-9])`, "iu").test(prompt);
+}
+
 async function relationshipBoosts(
   runtimeRoot: string,
   seedMemoryIds: readonly string[],
@@ -1022,7 +1037,7 @@ async function prepareUserPromptShadowPackCore(
   const signalValues = [...request.signals.files, ...request.signals.symbols,
     ...request.signals.errors, ...request.signals.commands].filter((item) => item.length > 0);
   const baseScored = memories.map((memory) => {
-    const directIdentity = normalizedPrompt.includes(memory.memoryId);
+    const directIdentity = directlyReferencesMemory(normalizedPrompt, memory);
     const exact = exactDistinctiveMatch(normalizedPrompt, memory) || signalValues.some((signal) =>
       memory.searchableText.toLocaleLowerCase("en-US").includes(signal.toLocaleLowerCase("en-US"))
     );
@@ -1106,6 +1121,7 @@ async function prepareUserPromptShadowPackCore(
       const text = renderItem(item.memory, representation.kind, representation.text);
       const candidate: ShadowPackItem = {
         memoryId: item.memory.memoryId,
+        memoryRef: item.memory.memoryRef,
         revisionId: item.memory.revisionId,
         scope: item.memory.scope,
         authority: item.memory.authority,

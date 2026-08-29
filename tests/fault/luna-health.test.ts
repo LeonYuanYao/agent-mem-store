@@ -235,7 +235,9 @@ test("the retry epoch migration preserves attempts from an existing Runtime", as
   } finally {
     database.close();
   }
-  const migrated = await openRuntimeDatabase(runtimeRoot);
+  const migrated = await openRuntimeDatabase(runtimeRoot, {
+    applyPendingMigrations: true
+  });
   try {
     expect(migrated.prepare(
       "SELECT attempt_count, retry_epoch, epoch_attempt_count FROM luna_operations WHERE operation_id = ?"

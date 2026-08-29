@@ -444,7 +444,9 @@ test("the generic-tool evidence migration reopens historical insufficient Candid
   database.prepare("DELETE FROM schema_migrations WHERE version = 27").run();
   database.close();
 
-  const migrated = await openRuntimeDatabase(runtimeRoot);
+  const migrated = await openRuntimeDatabase(runtimeRoot, {
+    applyPendingMigrations: true
+  });
   migrated.close();
   await expect(advanceCandidateReevaluationBackfill({
     runtimeRoot,

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { MemStoreCommandError } from "../contracts/envelope.js";
+import { resolveMemoryReference } from "../memories/reference.js";
 import { inspectProject } from "../projects/index.js";
 import type { EmbeddingAdapter } from "../retrieval/index.js";
 import type { RetrievalJudge } from "../retrieval/judge.js";
@@ -72,10 +73,11 @@ export async function executeRecall(
       revision: z.string().min(1).optional(),
       detail: z.enum(["compact", "standard", "full"]).optional()
     }).parse(input);
+    const memory = await resolveMemoryReference(context.runtimeRoot, request.memory_id);
     return recallShow({
       runtimeRoot: context.runtimeRoot,
       vaultRoot: context.vaultRoot,
-      memoryId: request.memory_id,
+      memoryId: memory.memoryId,
       ...(request.revision === undefined ? {} : { revision: request.revision }),
       ...(request.detail === undefined ? {} : { detail: request.detail }),
       ...(currentProject === undefined ? {} : { currentProjectId: currentProject }),
@@ -91,10 +93,11 @@ export async function executeRecall(
       cursor: z.string().min(1).optional(),
       target_tokens: z.number().int().positive().optional()
     }).parse(input);
+    const memory = await resolveMemoryReference(context.runtimeRoot, request.memory_id);
     return recallProvenance({
       runtimeRoot: context.runtimeRoot,
       vaultRoot: context.vaultRoot,
-      memoryId: request.memory_id,
+      memoryId: memory.memoryId,
       ...(request.revision === undefined ? {} : { revision: request.revision }),
       ...(request.limit === undefined ? {} : { limit: request.limit }),
       ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
@@ -112,10 +115,11 @@ export async function executeRecall(
       cursor: z.string().min(1).optional(),
       target_tokens: z.number().int().positive().optional()
     }).parse(input);
+    const memory = await resolveMemoryReference(context.runtimeRoot, request.memory_id);
     return recallRelated({
       runtimeRoot: context.runtimeRoot,
       vaultRoot: context.vaultRoot,
-      memoryId: request.memory_id,
+      memoryId: memory.memoryId,
       ...(request.revision === undefined ? {} : { revision: request.revision }),
       ...(request.direction === undefined ? {} : { direction: request.direction }),
       ...(request.limit === undefined ? {} : { limit: request.limit }),
@@ -130,10 +134,11 @@ export async function executeRecall(
     receipt_id: z.string().min(1),
     memory_id: z.string().min(1)
   }).parse(input);
+  const memory = await resolveMemoryReference(context.runtimeRoot, request.memory_id);
   return reportIrrelevant({
     runtimeRoot: context.runtimeRoot,
     receiptId: request.receipt_id,
-    memoryId: request.memory_id,
+    memoryId: memory.memoryId,
     callerIdentity: context.callerIdentity,
     observedAt: context.requestedAt
   });

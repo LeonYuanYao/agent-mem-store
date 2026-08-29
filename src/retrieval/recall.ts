@@ -8,6 +8,10 @@ import { z } from "zod";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { writeFileAtomically } from "../contracts/atomic-file.js";
 import {
+  formatMemoryReference,
+  resolveMemoryReference
+} from "../memories/reference.js";
+import {
   readCanonicalMemory,
   readCanonicalRevision,
   type CanonicalMemory
@@ -43,6 +47,7 @@ interface RetrievalDocument {
   readonly indexRevisionId: string;
   readonly vectorOrdinal: number;
   readonly memoryId: string;
+  readonly memoryRef: number;
   readonly revisionId: string;
   readonly scope:
     | { readonly kind: "project"; readonly projectId: string }
@@ -57,6 +62,8 @@ interface RetrievalDocument {
 
 export interface RecallSearchItem {
   readonly memoryId: string;
+  readonly memoryRef: number;
+  readonly reference: string;
   readonly revisionId: string;
   readonly scope: RetrievalDocument["scope"];
   readonly authority: RetrievalDocument["authority"];
@@ -132,6 +139,7 @@ function documentFromRow(row: Record<string, unknown>): RetrievalDocument {
     indexRevisionId: z.string().parse(row.index_revision_id),
     vectorOrdinal: z.number().int().nonnegative().parse(row.vector_ordinal),
     memoryId: z.string().parse(row.memory_id),
+    memoryRef: z.number().int().positive().parse(row.memory_ref),
     revisionId: z.string().parse(row.revision_id),
     scope,
     authority: z.enum(["human_authored", "agent_derived"]).parse(row.authority),
@@ -211,7 +219,7 @@ function readVector(
 
 function renderSearchItem(item: RecallSearchItem): string {
   const scope = item.scope.kind === "global" ? "Global" : `Project:${item.scope.projectId}`;
-  return `[${item.memoryId} ${item.revisionId} ${scope} ${item.authority}] ${item.description}`;
+  return `[${item.reference} ${item.revisionId} ${scope} ${item.authority}] ${item.description}`;
 }
 
 export async function recallSearch(request: {
@@ -414,12 +422,14 @@ export async function recallSearch(request: {
     if (rankedItem === undefined) break;
     const item: RecallSearchItem = {
       memoryId: rankedItem.document.memoryId,
+      memoryRef: rankedItem.document.memoryRef,
+      reference: formatMemoryReference(rankedItem.document.memoryRef),
       revisionId: rankedItem.document.revisionId,
       scope: rankedItem.document.scope,
       authority: rankedItem.document.authority,
       description: rankedItem.document.compactValidated && rankedItem.document.compactText.length > 0
         ? rankedItem.document.compactText
-        : `No validated compact description; read ${rankedItem.document.memoryId} by identity.`,
+        : `No validated compact description; read ${formatMemoryReference(rankedItem.document.memoryRef)} by identity.`,
       relevanceReasons: rankedItem.reasons.slice(0, 3),
       ...(rankedItem.document.authority === "agent_derived" &&
         rankedItem.document.validityState === "review_due"
@@ -771,6 +781,8 @@ export interface RelatedRecallItem {
   readonly direction: "incoming" | "outgoing";
   readonly relationshipType: string;
   readonly memoryId: string;
+  readonly memoryRef: number;
+  readonly reference: string;
   readonly revisionId: string;
   readonly scope: CanonicalMemory["scope"];
   readonly authority: CanonicalMemory["authority"];
@@ -835,18 +847,20 @@ export async function recallRelated(request: {
       direction: itemDirection,
       relationshipType: z.string().parse(row.relationship_type),
       memoryId: document.memoryId,
+      memoryRef: document.memoryRef,
+      reference: formatMemoryReference(document.memoryRef),
       revisionId: document.revisionId,
       scope: document.scope,
       authority: document.authority,
       description: document.compactValidated && document.compactText.length > 0
         ? document.compactText
-        : `No validated compact description; read ${document.memoryId} by identity.`
+        : `No validated compact description; read ${formatMemoryReference(document.memoryRef)} by identity.`
     }];
   });
   const page = pageIdentityItems({
     items,
     identityOf: (item) => `${item.direction}:${item.relationshipType}:${item.memoryId}`,
-    render: (item) => `${item.direction}:${item.relationshipType}:${item.memoryId}:${item.description}`,
+    render: (item) => `${item.direction}:${item.relationshipType}:${item.reference}:${item.description}`,
     binding: simpleCursorBinding([
       "related-v1",
       source.memory.memoryId,
@@ -1071,6 +1085,7 @@ export async function recallShow(request: {
   readonly chainId?: string;
 }): Promise<{
   readonly memoryId: string;
+  readonly memoryRef: number;
   readonly revisionId: string;
   readonly scope: CanonicalMemory["scope"];
   readonly authority: CanonicalMemory["authority"];
@@ -1094,6 +1109,9 @@ export async function recallShow(request: {
     throw new Error("Memory is not eligible for explicit recall.");
   }
   const memory = loaded.memory;
+  const memoryRef = memory.memoryRef ?? (
+    await resolveMemoryReference(request.runtimeRoot, memory.memoryId)
+  ).memoryRef;
   if (
     memory.sensitivity === "private" &&
     memory.scope.kind === "project" &&
@@ -1105,7 +1123,7 @@ export async function recallShow(request: {
   const body = detail === "full" ? memory.body : validRepresentation(memory, detail);
   if (body === undefined) throw new Error(`Validated ${detail} representation is unavailable.`);
   const renderedTokenCount = tokenizer.encode(
-    `[${memory.memoryId} ${memory.revisionId} ${detail}]\n${body}`
+    `[${formatMemoryReference(memoryRef)} ${memory.revisionId} ${detail}]\n${body}`
   ).length;
   const receiptId = await recordExplicitReadReceipt({
     runtimeRoot: request.runtimeRoot,
@@ -1129,6 +1147,7 @@ export async function recallShow(request: {
     : undefined;
   return {
     memoryId: memory.memoryId,
+    memoryRef,
     revisionId: memory.revisionId,
     scope: memory.scope,
     authority: memory.authority,

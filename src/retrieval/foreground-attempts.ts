@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
-import { openRuntimeDatabase } from "../runtime/database.js";
+import {
+  openRuntimeDatabase,
+  openRuntimeDatabaseReadOnly
+} from "../runtime/database.js";
 
 const outcomeSchema = z.enum([
   "completed",
@@ -78,7 +81,7 @@ export async function inspectForegroundAttempts(runtimeRoot: string): Promise<{
   readonly postDeadlineCount: number;
   readonly maximumPostDeadlineWorkMs: number;
 }> {
-  const database = await openRuntimeDatabase(runtimeRoot);
+  const database = await openRuntimeDatabaseReadOnly(runtimeRoot);
   try {
     const rows = database.prepare(
       `SELECT outcome, COUNT(*) AS count,

@@ -94,3 +94,49 @@ test("CLI and MCP search normalize into the same Recall result", async () => {
   await client.close();
   await server.close();
 });
+
+test("MCP deep reads accept a portable numeric Memory reference", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-mcp-memory-ref-"));
+  temporaryDirectories.push(root);
+  const workspace = join(root, "workspace");
+  const vaultRoot = join(root, "vault");
+  const runtimeRoot = join(root, "runtime");
+  await mkdir(workspace, { recursive: true });
+  await initializeMemStore({ vaultRoot, runtimeRoot, preview: false });
+  const memoryId = "msmem_123e4567-e89b-42d3-a456-426614174012";
+  await writeCanonicalMemory({
+    vaultRoot,
+    runtimeRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId,
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174013",
+      body: "Portable references resolve to canonical memory identities.",
+      scope: { kind: "global" }
+    })
+  });
+  const server = createMemStoreMcpServer({
+    runtimeRoot,
+    vaultRoot,
+    path: workspace,
+    callerIdentity: "mcp:memory-ref",
+    now: () => "2026-08-07T01:00:00.000Z"
+  });
+  const client = new Client({ name: "memory-ref-client", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+
+  const result = await client.callTool({
+    name: "memstore_get",
+    arguments: { memory_id: "M:1", detail: "compact" }
+  });
+  const content = result.content as readonly { readonly type: string; readonly text?: string }[];
+  const envelope = JSON.parse(
+    content[0]?.type === "text" ? (content[0].text ?? "{}") : "{}"
+  ) as { result: { memoryId?: string; memoryRef?: number } };
+  expect(envelope.result).toMatchObject({ memoryId, memoryRef: 1 });
+
+  await client.close();
+  await server.close();
+});

@@ -78,6 +78,7 @@ import {
   inspectSensitivityStatus
 } from "../sensitivity/summary.js";
 import { startForegroundRuntime } from "../retrieval/foreground-runtime.js";
+import { openRuntimeDatabase } from "../runtime/database.js";
 import { configureRetrievalIndexCoordinator } from "../retrieval/index-coordinator.js";
 import { runCodexHook } from "./codex-hook.js";
 import {
@@ -791,7 +792,13 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
     };
   }
   if (command === "worker" && parsed.positionals[1] === "once") {
-    if (!parsed.values.preview) await configureWorkerIndexPolicy(location);
+    if (!parsed.values.preview) {
+      const database = await openRuntimeDatabase(location.runtimeRoot, {
+        applyPendingMigrations: true
+      });
+      database.close();
+      await configureWorkerIndexPolicy(location);
+    }
     const configured = await configuredWorkerAdapters(location.runtimeRoot);
     try {
       return {
@@ -826,6 +833,10 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
     process.once("SIGTERM", () => {
       controller.abort();
     });
+    const database = await openRuntimeDatabase(location.runtimeRoot, {
+      applyPendingMigrations: true
+    });
+    database.close();
     await configureWorkerIndexPolicy(location);
     const configured = await configuredWorkerAdapters(location.runtimeRoot, {
       includeEmbedding: false

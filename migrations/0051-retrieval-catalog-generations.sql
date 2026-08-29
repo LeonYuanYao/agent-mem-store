@@ -3,8 +3,6 @@ CREATE TABLE retrieval_catalog_generations (
   dirty_generation INTEGER NOT NULL CHECK (dirty_generation >= 0),
   published_generation INTEGER NOT NULL CHECK (published_generation >= 0),
   building_generation INTEGER,
-  quiet_period_ms INTEGER NOT NULL DEFAULT 30000 CHECK (quiet_period_ms BETWEEN 1000 AND 300000),
-  maximum_staleness_ms INTEGER NOT NULL DEFAULT 120000 CHECK (maximum_staleness_ms BETWEEN 30000 AND 3600000),
   dirty_at TEXT,
   force_due_at TEXT,
   last_completed_at TEXT,
@@ -15,22 +13,18 @@ CREATE TABLE retrieval_catalog_generations (
 
 INSERT INTO retrieval_catalog_generations(
   singleton, dirty_generation, published_generation, building_generation,
-  quiet_period_ms, maximum_staleness_ms,
   dirty_at, force_due_at, last_completed_at, last_failed_at
-) VALUES (1, 0, 0, NULL, 30000, 120000, NULL, NULL, NULL, NULL);
+) VALUES (1, 0, 0, NULL, NULL, NULL, NULL, NULL);
 
 CREATE TRIGGER memory_catalog_retrieval_generation_insert
 AFTER INSERT ON memory_catalog
 BEGIN
   UPDATE retrieval_catalog_generations
   SET dirty_generation = dirty_generation + 1,
-      dirty_at = NEW.catalog_updated_at,
+      dirty_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
       force_due_at = COALESCE(
         force_due_at,
-        strftime(
-          '%Y-%m-%dT%H:%M:%fZ', NEW.catalog_updated_at,
-          printf('+%f seconds', maximum_staleness_ms / 1000.0)
-        )
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+2 minutes')
       )
   WHERE singleton = 1;
 END;
@@ -48,13 +42,10 @@ WHEN OLD.current_revision_id IS NOT NEW.current_revision_id
 BEGIN
   UPDATE retrieval_catalog_generations
   SET dirty_generation = dirty_generation + 1,
-      dirty_at = NEW.catalog_updated_at,
+      dirty_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
       force_due_at = COALESCE(
         force_due_at,
-        strftime(
-          '%Y-%m-%dT%H:%M:%fZ', NEW.catalog_updated_at,
-          printf('+%f seconds', maximum_staleness_ms / 1000.0)
-        )
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+2 minutes')
       )
   WHERE singleton = 1;
 END;
@@ -67,10 +58,7 @@ BEGIN
       dirty_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
       force_due_at = COALESCE(
         force_due_at,
-        strftime(
-          '%Y-%m-%dT%H:%M:%fZ', 'now',
-          printf('+%f seconds', maximum_staleness_ms / 1000.0)
-        )
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+2 minutes')
       )
   WHERE singleton = 1;
 END;

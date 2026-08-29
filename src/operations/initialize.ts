@@ -9,6 +9,7 @@ import {
 } from "../configuration/index.js";
 import { initializeGovernanceSchedule } from "../governance/scheduling.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
+import { backfillPortableMemoryRefs } from "../vault/index.js";
 
 const DEFAULT_GOVERNANCE_TIME_ZONE = "Asia/Shanghai";
 
@@ -75,8 +76,11 @@ export async function initializeMemStore(
     if (existing.mode !== "read_write") {
       throw new Error("Existing configuration is not writable by this version.");
     }
-    const database = await openRuntimeDatabase(runtimeRoot);
+    const database = await openRuntimeDatabase(runtimeRoot, {
+      applyPendingMigrations: true
+    });
     database.close();
+    await backfillPortableMemoryRefs({ vaultRoot, runtimeRoot });
     await initializeGovernanceSchedule({
       runtimeRoot,
       timeZone: existing.policy.governanceTimezone,
@@ -133,8 +137,11 @@ export async function initializeMemStore(
 
   await writeFileAtomically(policyPath, policy, 0o600);
   await writeFileAtomically(configPath, machine, 0o600);
-  const database = await openRuntimeDatabase(runtimeRoot);
+  const database = await openRuntimeDatabase(runtimeRoot, {
+    applyPendingMigrations: true
+  });
   database.close();
+  await backfillPortableMemoryRefs({ vaultRoot, runtimeRoot });
   await initializeGovernanceSchedule({
     runtimeRoot,
     timeZone: timezone,

@@ -23,10 +23,12 @@ const uuidV4Suffix =
 const memoryIdSchema = z.string().regex(new RegExp(`^msmem_${uuidV4Suffix}$`, "u"));
 const revisionIdSchema = z.string().regex(new RegExp(`^msrev_${uuidV4Suffix}$`, "u"));
 const projectIdSchema = z.string().regex(new RegExp(`^msproj_${uuidV4Suffix}$`, "u"));
+const memoryRefSchema = z.number().int().positive();
 
 export interface CanonicalMemory {
   readonly schemaVersion: 1;
   readonly memoryId: string;
+  readonly memoryRef?: number;
   readonly revisionId: string;
   readonly scope:
     | { readonly kind: "project"; readonly projectId: string }
@@ -108,6 +110,7 @@ const frontmatterSchema = z.object({
   memstore: z.object({
     schema_version: z.literal(1),
     memory_id: memoryIdSchema,
+    memory_ref: memoryRefSchema.optional(),
     revision_id: revisionIdSchema,
     scope: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("project"), project_id: projectIdSchema }),
@@ -198,6 +201,7 @@ export interface WriteCanonicalMemoryRequest {
 export interface CanonicalWriteResult {
   readonly state: "created" | "revised";
   readonly memoryId: string;
+  readonly memoryRef: number;
   readonly revisionId: string;
   readonly path: string;
   readonly contentIdentity: string;
@@ -230,6 +234,7 @@ export class SecretContentError extends Error {
 
 function validateCanonicalIdentity(memory: CanonicalMemory): void {
   memoryIdSchema.parse(memory.memoryId);
+  if (memory.memoryRef !== undefined) memoryRefSchema.parse(memory.memoryRef);
   revisionIdSchema.parse(memory.revisionId);
   z.string().regex(/^[0-9a-f]{64}$/u).parse(memory.contentIdentity);
   z.string().min(1).parse(memory.policyVersion);
@@ -312,6 +317,52 @@ function canonicalPath(vaultRoot: string, memory: CanonicalMemory): string {
         memory.scope.projectId,
         `${memory.memoryId}.md`
       );
+}
+
+async function reserveMemoryRef(
+  runtimeRoot: string,
+  selectedMemoryId: string,
+  requestedRef?: number
+): Promise<number> {
+  memoryIdSchema.parse(selectedMemoryId);
+  if (requestedRef !== undefined) memoryRefSchema.parse(requestedRef);
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = database.prepare(
+        "SELECT memory_ref FROM memory_ref_reservations WHERE memory_id = ?"
+      ).get(selectedMemoryId);
+      if (existing !== undefined) {
+        const memoryRef = memoryRefSchema.parse(existing.memory_ref);
+        if (requestedRef !== undefined && requestedRef !== memoryRef) {
+          throw new Error("Canonical Memory cannot change its portable reference.");
+        }
+        database.exec("COMMIT");
+        return memoryRef;
+      }
+      const allocator = database.prepare(
+        "SELECT next_ref FROM memory_ref_allocator WHERE singleton = 1"
+      ).get();
+      const allocatedRef = requestedRef ?? memoryRefSchema.parse(allocator?.next_ref);
+      database.prepare(
+        `INSERT INTO memory_ref_reservations(memory_id, memory_ref, reserved_at)
+         VALUES (?, ?, ?)`
+      ).run(selectedMemoryId, allocatedRef, new Date().toISOString());
+      database.prepare(
+        `UPDATE memory_ref_allocator
+         SET next_ref = MAX(next_ref, ?)
+         WHERE singleton = 1`
+      ).run(allocatedRef + 1);
+      database.exec("COMMIT");
+      return allocatedRef;
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    database.close();
+  }
 }
 
 function sameScope(left: CanonicalMemory["scope"], right: CanonicalMemory["scope"]): boolean {
@@ -469,6 +520,7 @@ function identityFromOwnedContent(
 ): string {
   const withoutIdentity = { ...ownedMetadata };
   delete withoutIdentity.content_identity;
+  delete withoutIdentity.memory_ref;
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -483,6 +535,7 @@ function render(memory: CanonicalMemory, previousSource?: string): string {
   const metadata = {
     schema_version: memory.schemaVersion,
     memory_id: memory.memoryId,
+    ...(memory.memoryRef === undefined ? {} : { memory_ref: memory.memoryRef }),
     revision_id: memory.revisionId,
     scope:
       memory.scope.kind === "global"
@@ -662,6 +715,7 @@ function parseCanonical(source: string): CanonicalMemory {
   const memory: CanonicalMemory = {
     schemaVersion: 1,
     memoryId: frontmatter.memory_id,
+    ...(frontmatter.memory_ref === undefined ? {} : { memoryRef: frontmatter.memory_ref }),
     revisionId: frontmatter.revision_id,
     scope,
     authority: frontmatter.authority,
@@ -824,6 +878,15 @@ export async function writeCanonicalMemory(
   if (sensitivity.state === "uncertain") {
     throw new Error("Uncertain sensitive content requires explicit review.");
   }
+  const memoryRef = await reserveMemoryRef(
+    request.runtimeRoot,
+    request.memory.memoryId,
+    request.memory.memoryRef
+  );
+  request = {
+    ...request,
+    memory: { ...request.memory, memoryRef }
+  };
   const vaultRoot = resolve(request.vaultRoot);
   const path = canonicalPath(vaultRoot, request.memory);
   const alreadyExists = await exists(path);
@@ -991,6 +1054,7 @@ export async function writeCanonicalMemory(
     return {
       state: "revised",
       memoryId: request.memory.memoryId,
+      memoryRef,
       revisionId: request.memory.revisionId,
       path,
       contentIdentity: revisedIdentity
@@ -1060,13 +1124,14 @@ export async function writeCanonicalMemory(
       database
         .prepare(
           `INSERT INTO memory_catalog(
-             memory_id, current_revision_id, canonical_path, scope_kind,
+             memory_id, memory_ref, current_revision_id, canonical_path, scope_kind,
              project_id, authority, sensitivity, lifecycle, content_identity,
              revised_at, catalog_updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           request.memory.memoryId,
+          memoryRef,
           request.memory.revisionId,
           path,
           request.memory.scope.kind,
@@ -1107,6 +1172,7 @@ export async function writeCanonicalMemory(
   return {
     state: "created",
     memoryId: request.memory.memoryId,
+    memoryRef,
     revisionId: request.memory.revisionId,
     path,
     contentIdentity: identity
@@ -1143,6 +1209,60 @@ export interface RebuildCanonicalCatalogRequest {
   readonly runtimeRoot: string;
 }
 
+export interface BackfillPortableMemoryRefsResult {
+  readonly scanned: number;
+  readonly updated: number;
+}
+
+export async function backfillPortableMemoryRefs(request: {
+  readonly vaultRoot: string;
+  readonly runtimeRoot: string;
+}): Promise<BackfillPortableMemoryRefsResult> {
+  const vaultRoot = resolve(request.vaultRoot);
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  let rows: readonly Record<string, unknown>[];
+  try {
+    rows = database.prepare(
+      `SELECT memory_id, memory_ref, canonical_path, scope_kind, project_id
+       FROM memory_catalog
+       ORDER BY memory_ref`
+    ).all();
+  } finally {
+    database.close();
+  }
+
+  let updated = 0;
+  for (const row of rows) {
+    const memoryId = memoryIdSchema.parse(row.memory_id);
+    const memoryRef = memoryRefSchema.parse(row.memory_ref);
+    const path = canonicalPathFromCatalogScope(
+      vaultRoot,
+      memoryId,
+      row.scope_kind,
+      row.project_id
+    );
+    if (resolve(z.string().parse(row.canonical_path)) !== path) {
+      throw new Error("Canonical catalog path is outside its derived Vault location.");
+    }
+    const source = await readFile(path, "utf8");
+    const memory = parseCanonical(source);
+    if (memory.memoryId !== memoryId) {
+      throw new Error("Canonical Memory path does not match its identity.");
+    }
+    if (memory.memoryRef !== undefined && memory.memoryRef !== memoryRef) {
+      throw new Error("Canonical Memory cannot change its portable reference.");
+    }
+    if (memory.memoryRef === memoryRef) continue;
+    const upgraded = render({ ...memory, memoryRef }, source);
+    if (contentIdentity(upgraded) !== contentIdentity(source)) {
+      throw new Error("Portable Memory reference changed Canonical content identity.");
+    }
+    await writeFileAtomically(path, upgraded, 0o600, fileIdentity(source));
+    updated += 1;
+  }
+  return { scanned: rows.length, updated };
+}
+
 export interface RebuildCanonicalCatalogResult {
   readonly state: "rebuilt";
   readonly memoryCount: number;
@@ -1154,7 +1274,7 @@ export async function rebuildCanonicalCatalog(
 ): Promise<RebuildCanonicalCatalogResult> {
   const vaultRoot = resolve(request.vaultRoot);
   const currentPaths = await listMarkdownFiles(join(vaultRoot, "Memories"));
-  const current = await Promise.all(
+  const discovered = await Promise.all(
     currentPaths.map(async (path) => {
       const source = await readFile(path, "utf8");
       if (classifyLocalSensitivity(source).state !== "normal") {
@@ -1173,6 +1293,28 @@ export async function rebuildCanonicalCatalog(
       };
     })
   );
+  const current = await Promise.all(discovered.map(async (item) => {
+    const memoryRef = await reserveMemoryRef(
+      request.runtimeRoot,
+      item.memory.memoryId,
+      item.memory.memoryRef
+    );
+    if (item.memory.memoryRef === memoryRef) return item;
+    const memory = { ...item.memory, memoryRef };
+    const source = render(memory, item.source);
+    const identity = contentIdentity(source);
+    if (identity !== item.identity) {
+      throw new Error("Portable Memory reference changed Canonical content identity.");
+    }
+    await writeFileAtomically(item.path, source, 0o600, item.fileIdentity);
+    return {
+      ...item,
+      source,
+      memory,
+      identity,
+      fileIdentity: fileIdentity(source)
+    };
+  }));
   const knownMemoryIds = new Set<string>();
   for (const item of current) {
     if (knownMemoryIds.has(item.memory.memoryId)) {
@@ -1321,13 +1463,14 @@ export async function rebuildCanonicalCatalog(
         database
           .prepare(
             `INSERT INTO memory_catalog(
-               memory_id, current_revision_id, canonical_path, scope_kind,
+               memory_id, memory_ref, current_revision_id, canonical_path, scope_kind,
                project_id, authority, sensitivity, lifecycle, content_identity,
                revised_at, catalog_updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
           .run(
             item.memory.memoryId,
+            memoryRefSchema.parse(item.memory.memoryRef),
             item.memory.revisionId,
             item.path,
             item.memory.scope.kind,
@@ -1406,11 +1549,12 @@ export async function reconcileCanonicalMemory(
   let path: string;
   let catalogIdentity: string;
   let catalogRevisionId: string;
+  let catalogMemoryRef: number;
   try {
     const row = database
       .prepare(
         `SELECT canonical_path, scope_kind, project_id, content_identity,
-                current_revision_id
+                current_revision_id, memory_ref
          FROM memory_catalog WHERE memory_id = ?`
       )
       .get(request.memoryId);
@@ -1433,6 +1577,7 @@ export async function reconcileCanonicalMemory(
     }
     catalogIdentity = row.content_identity;
     catalogRevisionId = row.current_revision_id;
+    catalogMemoryRef = memoryRefSchema.parse(row.memory_ref);
   } finally {
     database.close();
   }
@@ -1441,6 +1586,13 @@ export async function reconcileCanonicalMemory(
   const editedIdentity = contentIdentity(editedSource);
   const editedFileIdentity = fileIdentity(editedSource);
   if (editedIdentity === catalogIdentity) {
+    const editedMemory = parseCanonical(editedSource);
+    if (
+      editedMemory.memoryRef !== undefined &&
+      editedMemory.memoryRef !== catalogMemoryRef
+    ) {
+      throw new Error("Manual edit changed the portable Memory reference.");
+    }
     return { state: "unchanged", memoryId: request.memoryId };
   }
   const sensitivity = classifyLocalSensitivity(editedSource);
@@ -1465,6 +1617,12 @@ export async function reconcileCanonicalMemory(
     editedMemory.revisionId !== catalogRevisionId
   ) {
     throw new Error("Manual edit changed Canonical identity metadata.");
+  }
+  if (
+    editedMemory.memoryRef !== undefined &&
+    editedMemory.memoryRef !== catalogMemoryRef
+  ) {
+    throw new Error("Manual edit changed the portable Memory reference.");
   }
   if (canonicalPath(resolve(request.vaultRoot), editedMemory) !== path) {
     throw new Error("Manual edit cannot change Canonical Memory scope.");

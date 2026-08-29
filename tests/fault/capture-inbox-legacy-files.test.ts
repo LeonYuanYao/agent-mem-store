@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -11,6 +11,7 @@ import {
 import { openRuntimeDatabase } from "../../src/runtime/database.js";
 import { runWorkerOnce } from "../../src/worker/main.js";
 import { initializeMemStore } from "../../src/operations/initialize.js";
+import { resolveProject } from "../../src/projects/index.js";
 import { inspectStatus } from "../../src/operations/status.js";
 import { inspectDoctor } from "../../src/operations/maintenance.js";
 import {
@@ -77,6 +78,46 @@ test("a Stop event survives Runtime SQLite contention through the Capture Inbox"
     eventId: result.eventId,
     state: "pending"
   });
+});
+
+test("an emergency-spooled event preserves an already registered Project during SQLite contention", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-emergency-project-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const project = await resolveProject({ runtimeRoot, path: root });
+  if (project.status !== "resolved") throw new Error("Expected the Project to be registered.");
+  const database = await openRuntimeDatabase(runtimeRoot);
+  database.exec("BEGIN IMMEDIATE");
+
+  let result: Awaited<ReturnType<typeof handleCodexHook>>;
+  try {
+    result = await handleCodexHook({
+      runtimeRoot,
+      receivedAt: "2026-08-22T01:05:00.000Z",
+      input: {
+        hook_event_name: "Stop",
+        session_id: "session-emergency-project",
+        turn_id: "turn-emergency-project",
+        cwd: root,
+        last_assistant_message: "Preserve the registered Project identity."
+      }
+    });
+  } finally {
+    database.exec("ROLLBACK");
+    database.close();
+  }
+
+  expect(result).toMatchObject({
+    captured: true,
+    projectId: project.projectId
+  });
+  const pendingDirectory = join(runtimeRoot, "spool", "capture", "pending");
+  const [fileName] = await readdir(pendingDirectory);
+  if (fileName === undefined) throw new Error("Expected a pending emergency-spool entry.");
+  const entry = JSON.parse(await readFile(join(pendingDirectory, fileName), "utf8")) as {
+    event?: { projectId?: string };
+  };
+  expect(entry.event?.projectId).toBe(project.projectId);
 });
 
 test("the Capture Inbox preserves bounded-event truncation for a large Stop", async () => {

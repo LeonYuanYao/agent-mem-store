@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, test } from "vitest";
 
 import { initializeMemStore } from "../../../src/operations/initialize.js";
@@ -37,6 +38,40 @@ test("doctor diagnoses an initialized isolated installation without repairing it
     ["luna_operations", "ok"],
     ["vault_catalog", "ok"]
   ]);
+});
+
+test("doctor reports a pending Runtime migration without applying it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-doctor-pending-migration-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+
+  const databasePath = join(runtimeRoot, "state", "memstore.sqlite");
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec(`
+    DROP TABLE foreground_event_reservations;
+    DROP TABLE foreground_attempt_maintenance;
+    DROP TABLE foreground_attempt_overflow;
+    DELETE FROM schema_migrations WHERE version = 52;
+  `);
+  legacy.close();
+
+  const result = await inspectDoctor({ runtimeRoot, vaultRoot, deep: false });
+  const inspected = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    expect(inspected.prepare(
+      "SELECT name FROM schema_migrations WHERE version = 52"
+    ).get()).toBeUndefined();
+    expect(inspected.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+    ).get("foreground_event_reservations")).toBeUndefined();
+  } finally {
+    inspected.close();
+  }
+  expect(result.state).toBe("error");
+  expect(result.checks.find((check) => check.name === "foreground_retrieval"))
+    .toMatchObject({ state: "error" });
 });
 
 test("doctor only reports stale waiting Candidates that still need evaluation", async () => {

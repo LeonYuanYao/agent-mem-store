@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, test } from "vitest";
 
 import {
+  backfillPortableMemoryRefs,
   readCanonicalMemory,
   readCanonicalRevision,
   rebuildCanonicalCatalog,
@@ -116,6 +117,7 @@ test("Canonical Memory is written to its identity-stable Vault path and read bac
   expect(written).toEqual({
     state: "created",
     memoryId: memory.memoryId,
+    memoryRef: 1,
     revisionId: memory.revisionId,
     path: join(
       vaultRoot,
@@ -127,13 +129,14 @@ test("Canonical Memory is written to its identity-stable Vault path and read bac
     contentIdentity: written.contentIdentity
   });
   expect(read).toEqual({
-    memory: { ...memory, contentIdentity: written.contentIdentity },
+    memory: { ...memory, memoryRef: 1, contentIdentity: written.contentIdentity },
     path: written.path,
     contentIdentity: written.contentIdentity
   });
   expect(await readFile(written.path, "utf8")).toContain(
     `content_identity: ${written.contentIdentity}`
   );
+  expect(await readFile(written.path, "utf8")).toContain("memory_ref: 1");
   expect(
     await readFile(join(vaultRoot, "_MemStore", "Projects", `${projectId}.md`), "utf8")
   ).toContain(`project_id: ${projectId}`);
@@ -252,8 +255,14 @@ test("the Runtime catalog can be rebuilt from Canonical Vault files", async () =
   expect(result).toEqual({ state: "rebuilt", memoryCount: 1, revisionCount: 1 });
   expect(read?.memory).toEqual({
     ...memory,
+    memoryRef: created.memoryRef,
     contentIdentity: created.contentIdentity
   });
+  const rebuiltDatabase = new DatabaseSync(join(runtimeRoot, "state", "memstore.sqlite"));
+  expect(rebuiltDatabase.prepare(
+    "SELECT memory_ref FROM memory_catalog WHERE memory_id = ?"
+  ).get(memory.memoryId)).toEqual({ memory_ref: created.memoryRef });
+  rebuiltDatabase.close();
   expect(await readFile(revisionPath, "utf8")).toContain(memory.body);
 });
 
@@ -293,6 +302,7 @@ test("catalog rebuild preserves an unreconciled edit as a Human-authored revisio
   expect(current?.memory.revisionId).not.toBe(memory.revisionId);
   expect(original?.memory).toEqual({
     ...memory,
+    memoryRef: 1,
     contentIdentity: created.contentIdentity
   });
 });
@@ -360,6 +370,7 @@ test("a revision archives the prior body and rejects a stale content identity", 
   });
   expect(prior.memory).toEqual({
     ...memory,
+    memoryRef: 1,
     contentIdentity: created.contentIdentity
   });
 
@@ -378,7 +389,7 @@ test("a revision archives the prior body and rejects a stale content identity", 
   expect(
     (await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: memory.memoryId }))
       ?.memory
-  ).toEqual({ ...revisedMemory, contentIdentity: revised.contentIdentity });
+  ).toEqual({ ...revisedMemory, memoryRef: 1, contentIdentity: revised.contentIdentity });
 
   const reorderedHistoricalSource = (await readFile(prior.path, "utf8")).replace(
     "  revised_at: 2026-08-07T03:00:00.000Z\n",
@@ -800,6 +811,7 @@ test("a tombstone is representable only without memory-bearing text", async () =
   expect(written.state).toBe("created");
   expect(read?.memory).toEqual({
     ...tombstone,
+    memoryRef: 1,
     contentIdentity: written.contentIdentity
   });
 
@@ -915,8 +927,45 @@ test("a direct Obsidian body edit becomes a Human-authored revision", async () =
   expect(current?.memory.body).toContain("Human clarified");
   expect(original?.memory).toEqual({
     ...memoryWithIdentity,
+    memoryRef: 1,
     contentIdentity: created.contentIdentity
   });
+});
+
+test("a direct Obsidian edit cannot change the portable Memory reference", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-vault-ref-edit-"));
+  temporaryDirectories.push(root);
+  const vaultRoot = join(root, "vault");
+  const runtimeRoot = join(root, "runtime");
+  const created = await writeCanonicalMemory({ vaultRoot, runtimeRoot, memory });
+  const editedSource = (await readFile(created.path, "utf8"))
+    .replace("memory_ref: 1", "memory_ref: 2");
+  await writeFile(created.path, editedSource, "utf8");
+
+  await expect(reconcileCanonicalMemory({
+    vaultRoot,
+    runtimeRoot,
+    memoryId: memory.memoryId,
+    observedAt: "2026-08-07T03:04:00.000Z"
+  })).rejects.toThrow("portable Memory reference");
+});
+
+test("portable Memory reference backfill upgrades a legacy current Markdown file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-vault-ref-backfill-"));
+  temporaryDirectories.push(root);
+  const vaultRoot = join(root, "vault");
+  const runtimeRoot = join(root, "runtime");
+  const created = await writeCanonicalMemory({ vaultRoot, runtimeRoot, memory });
+  const legacySource = (await readFile(created.path, "utf8"))
+    .replace("  memory_ref: 1\n", "");
+  await writeFile(created.path, legacySource, "utf8");
+
+  const result = await backfillPortableMemoryRefs({ vaultRoot, runtimeRoot });
+  const upgradedSource = await readFile(created.path, "utf8");
+
+  expect(result).toEqual({ scanned: 1, updated: 1 });
+  expect(upgradedSource).toContain("  memory_ref: 1\n");
+  expect(upgradedSource).toContain(`  content_identity: ${created.contentIdentity}\n`);
 });
 
 test("manual metadata reconciliation refreshes Runtime lifecycle and relationships", async () => {

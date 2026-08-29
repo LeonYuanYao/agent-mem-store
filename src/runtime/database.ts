@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { access, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
@@ -269,6 +269,19 @@ const migrations: readonly Migration[] = [
     version: 51,
     name: "retrieval_catalog_generations",
     path: new URL("../../migrations/0051-retrieval-catalog-generations.sql", import.meta.url)
+  },
+  {
+    version: 52,
+    name: "complete_foreground_reliability_schema",
+    path: new URL(
+      "../../migrations/0052-complete-foreground-reliability-schema.sql",
+      import.meta.url
+    )
+  },
+  {
+    version: 53,
+    name: "portable_memory_refs",
+    path: new URL("../../migrations/0053-portable-memory-refs.sql", import.meta.url)
   }
 ];
 
@@ -288,6 +301,51 @@ function loadMigrations(): Promise<readonly LoadedMigration[]> {
 
 export interface OpenRuntimeDatabaseOptions {
   readonly busyTimeoutMilliseconds?: number;
+  readonly applyPendingMigrations?: boolean;
+}
+
+export async function openRuntimeDatabaseReadOnly(
+  runtimeRoot: string,
+  options: OpenRuntimeDatabaseOptions = {}
+): Promise<DatabaseSync> {
+  const busyTimeoutMilliseconds = options.busyTimeoutMilliseconds ?? 250;
+  if (
+    !Number.isInteger(busyTimeoutMilliseconds) ||
+    busyTimeoutMilliseconds < 0 ||
+    busyTimeoutMilliseconds > 60_000
+  ) {
+    throw new Error("SQLite busy timeout must be an integer from 0 through 60000 milliseconds.");
+  }
+  const database = new DatabaseSync(join(runtimeRoot, "state", "memstore.sqlite"), {
+    readOnly: true
+  });
+  try {
+    database.exec("PRAGMA foreign_keys = ON");
+    database.exec(`PRAGMA busy_timeout = ${String(busyTimeoutMilliseconds)}`);
+    const loadedMigrations = await loadMigrations();
+    const existingMigrations = new Map(
+      database.prepare(
+        "SELECT version, source_sha256 FROM schema_migrations ORDER BY version"
+      ).all().map((row) => [row.version, row.source_sha256])
+    );
+    for (const migration of loadedMigrations) {
+      const existingSourceSha256 = existingMigrations.get(migration.version);
+      if (existingSourceSha256 === undefined) {
+        throw new Error(
+          `Migration ${String(migration.version)} has not been applied to this Runtime.`
+        );
+      }
+      if (existingSourceSha256 !== migration.sourceSha256) {
+        throw new Error(
+          `Migration ${String(migration.version)} source checksum does not match the applied schema.`
+        );
+      }
+    }
+    return database;
+  } catch (error) {
+    database.close();
+    throw error;
+  }
 }
 
 export async function openRuntimeDatabase(
@@ -303,21 +361,35 @@ export async function openRuntimeDatabase(
     throw new Error("SQLite busy timeout must be an integer from 0 through 60000 milliseconds.");
   }
   const stateDirectory = join(runtimeRoot, "state");
+  const databasePath = join(stateDirectory, "memstore.sqlite");
+  const databaseExisted = await access(databasePath)
+    .then(() => true)
+    .catch((error: unknown) => {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) return false;
+      throw error;
+    });
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-  const database = new DatabaseSync(join(stateDirectory, "memstore.sqlite"));
+  const database = new DatabaseSync(databasePath);
 
-  database.exec("PRAGMA journal_mode = WAL");
   database.exec("PRAGMA foreign_keys = ON");
   database.exec(`PRAGMA busy_timeout = ${String(busyTimeoutMilliseconds)}`);
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      source_sha256 TEXT NOT NULL,
-      binary_version TEXT NOT NULL,
-      applied_at TEXT NOT NULL
-    ) STRICT
-  `);
+  if (!databaseExisted || options.applyPendingMigrations === true) {
+    database.exec("PRAGMA journal_mode = WAL");
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        source_sha256 TEXT NOT NULL,
+        binary_version TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      ) STRICT
+    `);
+  }
 
   const loadedMigrations = await loadMigrations();
   const existingMigrations = new Map(
@@ -338,6 +410,12 @@ export async function openRuntimeDatabase(
         );
       }
       continue;
+    }
+    if (databaseExisted && options.applyPendingMigrations !== true) {
+      database.close();
+      throw new Error(
+        `Migration ${String(migration.version)} has not been applied to this Runtime.`
+      );
     }
 
     database.exec("BEGIN IMMEDIATE");
@@ -368,6 +446,10 @@ export async function openRuntimeDatabase(
     .prepare("SELECT runtime_id FROM runtime_identity WHERE singleton = 1")
     .get();
   if (runtimeIdentity === undefined) {
+    if (databaseExisted && options.applyPendingMigrations !== true) {
+      database.close();
+      throw new Error("Runtime identity is missing from an existing Runtime.");
+    }
     database
       .prepare(
         `INSERT INTO runtime_identity(

@@ -74,9 +74,9 @@ export function createMemStoreMcpServer(
 
   server.registerTool("memstore_get", {
     title: "Read MemStore memory",
-    description: "Read one eligible memory revision by stable identity.",
+    description: "Read one eligible memory revision by portable M:<number> reference or canonical UUID.",
     inputSchema: {
-      memory_id: z.string().min(1),
+      memory_id: z.string().min(1).describe("Portable M:<number> reference or canonical msmem_ UUID."),
       revision: z.string().min(1).optional(),
       detail: z.enum(["compact", "standard", "full"]).optional()
     },
@@ -90,7 +90,7 @@ export function createMemStoreMcpServer(
     title: "Read MemStore provenance",
     description: "Page identity-bearing provenance for one memory without dumping a source session.",
     inputSchema: {
-      memory_id: z.string().min(1),
+      memory_id: z.string().min(1).describe("Portable M:<number> reference or canonical msmem_ UUID."),
       revision: z.string().min(1).optional(),
       limit: z.number().int().min(1).max(50).optional(),
       cursor: z.string().min(1).optional(),
@@ -106,7 +106,7 @@ export function createMemStoreMcpServer(
     title: "Read related MemStore memories",
     description: "Read exactly one typed relationship hop from a memory identity.",
     inputSchema: {
-      memory_id: z.string().min(1),
+      memory_id: z.string().min(1).describe("Portable M:<number> reference or canonical msmem_ UUID."),
       revision: z.string().min(1).optional(),
       direction: z.enum(["incoming", "outgoing", "both"]).optional(),
       limit: z.number().int().min(1).max(50).optional(),
@@ -124,7 +124,7 @@ export function createMemStoreMcpServer(
     description: "Record a receipt-bound irrelevant retrieval Bad Case without free-form feedback.",
     inputSchema: {
       receipt_id: z.string().min(1),
-      memory_id: z.string().min(1)
+      memory_id: z.string().min(1).describe("Portable M:<number> reference or canonical msmem_ UUID.")
     },
     annotations: { readOnlyHint: false, idempotentHint: true }
   }, async (input) => runTool(

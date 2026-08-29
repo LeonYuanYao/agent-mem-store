@@ -788,6 +788,7 @@ export interface RecordCaptureHealthIncidentRequest {
   readonly category: "hook_capture" | "capture_processing" | "worker_loop";
   readonly errorCode: string;
   readonly occurredAt: string;
+  readonly busyTimeoutMilliseconds?: number;
 }
 
 const hookSqliteBusyDiagnosticV1Schema = z.object({
@@ -901,7 +902,12 @@ export async function recordCaptureHealthIncident(
 ): Promise<void> {
   const occurredAt = z.iso.datetime().parse(request.occurredAt);
   const errorCode = z.string().regex(/^[a-z0-9_]{1,64}$/u).parse(request.errorCode);
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRuntimeDatabase(
+    request.runtimeRoot,
+    request.busyTimeoutMilliseconds === undefined
+      ? {}
+      : { busyTimeoutMilliseconds: request.busyTimeoutMilliseconds }
+  );
   try {
     database.exec("BEGIN IMMEDIATE");
     try {
@@ -951,9 +957,15 @@ export async function recoverCaptureHealthIncident(request: {
   readonly runtimeRoot: string;
   readonly category: RecordCaptureHealthIncidentRequest["category"];
   readonly recoveredAt: string;
+  readonly busyTimeoutMilliseconds?: number;
 }): Promise<void> {
   const recoveredAt = z.iso.datetime().parse(request.recoveredAt);
-  const database = await openRuntimeDatabase(request.runtimeRoot);
+  const database = await openRuntimeDatabase(
+    request.runtimeRoot,
+    request.busyTimeoutMilliseconds === undefined
+      ? {}
+      : { busyTimeoutMilliseconds: request.busyTimeoutMilliseconds }
+  );
   try {
     database.prepare(
       `UPDATE capture_health_incidents SET ended_at = ?

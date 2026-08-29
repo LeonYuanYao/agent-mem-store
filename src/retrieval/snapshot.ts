@@ -8,6 +8,7 @@ import { openRuntimeDatabase } from "../runtime/database.js";
 const indexedMemoryRowSchema = z.object({
   index_revision_id: z.string(),
   memory_id: z.string(),
+  memory_ref: z.number().int().positive(),
   revision_id: z.string(),
   scope_kind: z.enum(["global", "project"]),
   project_id: z.string().nullable(),
@@ -38,6 +39,7 @@ const indexedMemoryRowSchema = z.object({
 export interface IndexedMemory {
   readonly indexRevisionId: string;
   readonly memoryId: string;
+  readonly memoryRef: number;
   readonly revisionId: string;
   readonly scope: { readonly kind: "global" } | { readonly kind: "project"; readonly projectId: string };
   readonly authority: "human_authored" | "agent_derived";
@@ -67,6 +69,7 @@ export interface IndexedMemory {
 const indexedMemorySnapshotSchema = z.object({
   indexRevisionId: z.string().min(1),
   memoryId: z.string().min(1),
+  memoryRef: z.number().int().positive(),
   revisionId: z.string().min(1),
   scope: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("global") }),
@@ -101,6 +104,7 @@ export function rowToIndexedMemory(row: Record<string, unknown>): IndexedMemory 
   return {
     indexRevisionId: parsed.index_revision_id,
     memoryId: parsed.memory_id,
+    memoryRef: parsed.memory_ref,
     revisionId: parsed.revision_id,
     scope: parsed.scope_kind === "global"
       ? { kind: "global" }

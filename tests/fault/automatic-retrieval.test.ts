@@ -245,7 +245,7 @@ test("large Project scope is parsed before the semantic deadline", async () => {
   ) throw new Error("Expected an active retrieval index fixture.");
   const insert = database.prepare(
     `INSERT INTO retrieval_documents(
-       index_revision_id, vector_ordinal, memory_id, revision_id, content_identity,
+       index_revision_id, vector_ordinal, memory_id, memory_ref, revision_id, content_identity,
        scope_kind, project_id, authority, sensitivity, lifecycle, category,
        base_priority_tier, session_order_key, importance_tags_json, startup,
        applicability_summary, applicability_conditions_json, validity_state,
@@ -254,7 +254,7 @@ test("large Project scope is parsed before the semantic deadline", async () => {
        standard_text, standard_validated, standard_token_count, searchable_text,
        revised_at
      )
-     SELECT index_revision_id, ?, ?, ?, ?, scope_kind, project_id, authority,
+     SELECT index_revision_id, ?, ?, ?, ?, ?, scope_kind, project_id, authority,
             sensitivity, lifecycle, category, base_priority_tier, ?,
             importance_tags_json, startup, applicability_summary,
             applicability_conditions_json, validity_state, valid_from, valid_until,
@@ -269,6 +269,7 @@ test("large Project scope is parsed before the semantic deadline", async () => {
       insert.run(
         ordinal,
         `large-scope-memory-${String(ordinal)}`,
+        ordinal + 1,
         `large-scope-revision-${String(ordinal)}`,
         `large-scope-content-${String(ordinal)}`,
         `large-scope-order-${String(ordinal).padStart(4, "0")}`,

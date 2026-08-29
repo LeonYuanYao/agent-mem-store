@@ -1,6 +1,9 @@
 import { z } from "zod";
 
-import { openRuntimeDatabase } from "../runtime/database.js";
+import {
+  openRuntimeDatabase,
+  openRuntimeDatabaseReadOnly
+} from "../runtime/database.js";
 
 const failureCooldownMilliseconds = 5 * 60_000;
 
@@ -45,7 +48,7 @@ function view(row: z.infer<typeof generationRowSchema>): RetrievalCatalogGenerat
 export async function inspectRetrievalCatalogGeneration(
   runtimeRoot: string
 ): Promise<RetrievalCatalogGeneration> {
-  const database = await openRuntimeDatabase(runtimeRoot);
+  const database = await openRuntimeDatabaseReadOnly(runtimeRoot);
   try {
     const row = generationRowSchema.parse(database.prepare(
       "SELECT * FROM retrieval_catalog_generations WHERE singleton = 1"

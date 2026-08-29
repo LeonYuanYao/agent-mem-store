@@ -201,7 +201,7 @@ async function buildRetrievalIndexImpl(request: {
   try {
     snapshotDatabase.exec("BEGIN");
     catalogRows = snapshotDatabase.prepare(
-      `SELECT memory_id, current_revision_id, content_identity, lifecycle, sensitivity
+      `SELECT memory_id, memory_ref, current_revision_id, content_identity, lifecycle, sensitivity
        FROM memory_catalog
        WHERE lifecycle = 'active' AND sensitivity IN ('normal', 'private')
        ORDER BY memory_id`
@@ -219,6 +219,7 @@ async function buildRetrievalIndexImpl(request: {
   const sourceCatalogSha256 = catalogSha256(catalogRows);
   const memories = (await Promise.all(catalogRows.map(async (row) => {
     const memoryId = z.string().parse(row.memory_id);
+    const memoryRef = z.number().int().positive().parse(row.memory_ref);
     const currentRevisionId = z.string().parse(row.current_revision_id);
     const current = await readCanonicalRevision({
       runtimeRoot: request.runtimeRoot,
@@ -229,12 +230,13 @@ async function buildRetrievalIndexImpl(request: {
     if (
       current === undefined ||
       current.memory.lifecycle !== "active" ||
+      (current.memory.memoryRef !== undefined && current.memory.memoryRef !== memoryRef) ||
       current.memory.revisionId !== currentRevisionId ||
       current.contentIdentity !== row.content_identity
     ) {
       throw new Error("Canonical catalog changed while the retrieval index was building.");
     }
-    return current.memory;
+    return { ...current.memory, memoryRef };
   }))).filter((memory) => memory.validity.state !== "invalid");
   const texts = memories.map((memory) => searchableText(memory));
   const reusableVectors = await loadReusableVectors({
@@ -377,7 +379,7 @@ async function buildRetrievalIndexImpl(request: {
 
       const insertDocument = database.prepare(
         `INSERT INTO retrieval_documents(
-           index_revision_id, vector_ordinal, memory_id, revision_id,
+           index_revision_id, vector_ordinal, memory_id, memory_ref, revision_id,
            content_identity, scope_kind, project_id, authority, sensitivity,
            lifecycle, category, base_priority_tier, session_order_key,
            importance_tags_json, startup,
@@ -386,7 +388,7 @@ async function buildRetrievalIndexImpl(request: {
            identity_validated, identity_token_count, compact_text,
            compact_validated, compact_token_count, standard_text,
            standard_validated, standard_token_count, searchable_text, revised_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       const insertFtsDocument = database.prepare(
         `INSERT INTO active_fts_memories(index_revision_id, memory_id, searchable_text)
@@ -410,6 +412,7 @@ async function buildRetrievalIndexImpl(request: {
               indexRevisionId,
               document.ordinal,
               memory.memoryId,
+              z.number().int().positive().parse(memory.memoryRef),
               memory.revisionId,
               memory.contentIdentity,
               memory.scope.kind,

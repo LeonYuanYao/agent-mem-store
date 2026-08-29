@@ -105,13 +105,18 @@ test("SessionStart prepares a bounded authority-labelled Core Memory Pack withou
   expect(pack).toMatchObject({ mode: "shadow", injected: false, kind: "session_start" });
   expect(pack.renderedTokenCount).toBeLessThanOrEqual(1200);
   expect(pack.items).toEqual(expect.arrayContaining([
-    expect.objectContaining({ memoryId: always.memoryId, representationKind: "compact" }),
-    expect.objectContaining({ memoryId: dynamicGlobal.memoryId, representationKind: "compact" }),
-    expect.objectContaining({ memoryId: identityFallback.memoryId, representationKind: "identity" })
+    expect.objectContaining({ memoryId: always.memoryId, memoryRef: 1, representationKind: "compact" }),
+    expect.objectContaining({ memoryId: dynamicGlobal.memoryId, memoryRef: 2, representationKind: "compact" }),
+    expect.objectContaining({ memoryId: identityFallback.memoryId, memoryRef: 3, representationKind: "identity" })
   ]));
   expect(pack.items.some((item) => item.memoryId === never.memoryId)).toBe(false);
   expect(pack.text).toContain("historical long-term memory");
+  expect(pack.text).toContain("[M:1 S:P A:H R:C]");
+  expect(pack.text).toContain("[M:2 S:G A:H R:C]");
+  expect(pack.text).not.toContain("msmem_");
+  expect(pack.text).not.toContain("msproj_");
   expect(pack.text).toContain("body is incomplete");
+  expect(pack.text).toContain("read M:3 by identity");
   expect(pack.receiptId).toMatch(/^msreceipt_/u);
 });
 
@@ -224,6 +229,44 @@ test("UserPromptSubmit uses relevance bands, upgrades exact high matches, and su
   });
   expect(repeated.items).toEqual([]);
   expect(repeated.emptyReason).toBe("already_present");
+});
+
+test("UserPromptSubmit treats a portable M:<number> mention as a direct identity reference", async () => {
+  const roots = await createRoot();
+  const selected = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174423",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174433",
+    scope: { kind: "project", projectId },
+    body: "Use a stable direct-reference rule.",
+    compact: "Use the direct-reference rule.",
+    standard: "Use the stable direct-reference rule with its complete conditions.",
+    startup: "never"
+  });
+  await writeAll(roots, [selected]);
+  await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "portable-reference-pack",
+    requestedAt: "2026-08-07T12:02:10.000Z"
+  });
+
+  const pack = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "portable-reference-pack",
+    prompt: "Please inspect M:1.",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    requestedAt: "2026-08-07T12:02:11.000Z"
+  });
+
+  expect(pack.items).toEqual([
+    expect.objectContaining({
+      memoryId: selected.memoryId,
+      memoryRef: 1,
+      relevanceBand: "high",
+      representationKind: "standard"
+    })
+  ]);
 });
 
 test("probable-only automatic recall remains compact and admits at most two items", async () => {
@@ -449,7 +492,7 @@ test("SessionStart pages lightweight bucket rows beyond the first sixteen candid
   });
 });
 
-test("SessionStart stops paging when no valid Memory item can fit the remaining token budget", async () => {
+test("SessionStart keeps its item and token ceilings after portable references shrink headers", async () => {
   const roots = await createRoot();
   const memories = Array.from({ length: 80 }, (_, index) => makeCanonicalMemory({
     memoryId: `msmem_10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
@@ -471,7 +514,7 @@ test("SessionStart stops paging when no valid Memory item can fit the remaining 
   const receipt = await inspectRetrievalReceipt(roots.runtimeRoot, pack.receiptId);
 
   expect(pack.items.length).toBeGreaterThan(0);
-  expect(pack.items.length).toBeLessThan(12);
+  expect(pack.items.length).toBeLessThanOrEqual(12);
   expect(pack.renderedTokenCount).toBeLessThanOrEqual(1200);
   expect(receipt).toBeDefined();
   if (receipt === undefined) throw new Error("Expected a SessionStart retrieval Receipt.");

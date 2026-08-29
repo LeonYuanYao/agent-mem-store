@@ -11,7 +11,7 @@ import {
   prepareCaptureDisposition
 } from "../../capture/inbox.js";
 import { classifyLocalSensitivity } from "../../contracts/sensitivity.js";
-import { resolveProject } from "../../projects/index.js";
+import { inspectProject, resolveProject } from "../../projects/index.js";
 
 const hookInputSchema = z.object({
   hook_event_name: z.enum([
@@ -204,11 +204,18 @@ export async function handleCodexHook(
       ...(input.turn_id === undefined ? {} : { turnId: input.turn_id }),
       payload: hookPayload(input)
     };
-    const project = await resolveProject({
+    const inspectedProject = await inspectProject({
       path: input.cwd,
       runtimeRoot: request.runtimeRoot,
       busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds
     }).catch(() => undefined);
+    const project = inspectedProject?.status === "resolved"
+      ? inspectedProject
+      : await resolveProject({
+          path: input.cwd,
+          runtimeRoot: request.runtimeRoot,
+          busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds
+        }).catch(() => undefined);
     resolvedProjectId = project?.status === "resolved" ? project.projectId : undefined;
     emergencyEvent = {
       ...emergencyEvent,
@@ -228,7 +235,8 @@ export async function handleCodexHook(
       await recoverCaptureHealthIncident({
         runtimeRoot: request.runtimeRoot,
         category: "hook_capture",
-        recoveredAt: occurredAt
+        recoveredAt: occurredAt,
+        busyTimeoutMilliseconds: 0
       }).catch(() => undefined);
     }
     if (disposition.state !== "event") {
@@ -254,7 +262,8 @@ export async function handleCodexHook(
       runtimeRoot: request.runtimeRoot,
       category: "hook_capture",
       errorCode,
-      occurredAt: new Date().toISOString()
+      occurredAt: new Date().toISOString(),
+      busyTimeoutMilliseconds: 0
     }).catch(() => undefined);
     return {
       continue: true,
