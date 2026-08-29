@@ -9,6 +9,7 @@ import {
   prepareSessionStartShadowPack,
   prepareUserPromptShadowPack
 } from "../../../src/retrieval/packs.js";
+import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { writeCanonicalMemory } from "../../../src/vault/index.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
 
@@ -111,6 +112,9 @@ test("SessionStart prepares a bounded authority-labelled Core Memory Pack withou
   ]));
   expect(pack.items.some((item) => item.memoryId === never.memoryId)).toBe(false);
   expect(pack.text).toContain("historical long-term memory");
+  expect(pack.text).toContain(
+    "M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity)"
+  );
   expect(pack.text).toContain("[M:1 S:P A:H R:C]");
   expect(pack.text).toContain("[M:2 S:G A:H R:C]");
   expect(pack.text).not.toContain("msmem_");
@@ -195,6 +199,9 @@ test("UserPromptSubmit uses relevance bands, upgrades exact high matches, and su
     requestedAt: "2026-08-07T12:02:01.000Z"
   });
   expect(first).toMatchObject({ mode: "shadow", injected: false, kind: "user_prompt" });
+  expect(first.text).toContain(
+    "M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity)"
+  );
   expect(first.items).toEqual([
     expect.objectContaining({
       memoryId: sqlite.memoryId,
@@ -229,6 +236,103 @@ test("UserPromptSubmit uses relevance bands, upgrades exact high matches, and su
   });
   expect(repeated.items).toEqual([]);
   expect(repeated.emptyReason).toBe("already_present");
+});
+
+test("automatic packs explain compact fields only once per Context Epoch", async () => {
+  const roots = await createRoot();
+  const startup = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174417",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174427",
+    scope: { kind: "project", projectId },
+    body: "Keep startup memory concise.",
+    compact: "Keep startup memory concise.",
+    startup: "always"
+  });
+  const promptOnly = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174418",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174428",
+    scope: { kind: "project", projectId },
+    body: "Use SQLite WAL for durable prompt memory.",
+    compact: "Use SQLite WAL for durable prompt memory.",
+    startup: "never"
+  });
+  await writeAll(roots, [startup, promptOnly]);
+
+  const firstEpoch = await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "memory-legend-epoch",
+    requestedAt: "2026-08-07T12:01:00.000Z"
+  });
+  const prompt = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "memory-legend-epoch",
+    prompt: "How should SQLite WAL be configured?",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter,
+    requestedAt: "2026-08-07T12:01:01.000Z"
+  });
+  const secondEpoch = await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "memory-legend-epoch",
+    requestedAt: "2026-08-07T12:02:00.000Z"
+  });
+
+  expect(firstEpoch.text).toContain("M=memory ref");
+  expect(prompt.items).toHaveLength(1);
+  expect(prompt.text).not.toContain("M=memory ref");
+  expect(secondEpoch.text).toContain("M=memory ref");
+});
+
+test("an active Context Epoch created before the legend upgrade receives the legend once", async () => {
+  const roots = await createRoot();
+  const startup = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174419",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174429",
+    scope: { kind: "project", projectId },
+    body: "Keep the existing Context Epoch active.",
+    compact: "Keep the existing Context Epoch active.",
+    startup: "always"
+  });
+  const promptOnly = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174420",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174430",
+    scope: { kind: "project", projectId },
+    body: "Use SQLite WAL after an in-place upgrade.",
+    compact: "Use SQLite WAL after an in-place upgrade.",
+    startup: "never"
+  });
+  await writeAll(roots, [startup, promptOnly]);
+  const sessionId = "pre-legend-active-epoch";
+  await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId,
+    requestedAt: "2026-08-07T12:03:00.000Z"
+  });
+  const database = await openRuntimeDatabase(roots.runtimeRoot);
+  try {
+    database.prepare(
+      "UPDATE context_epochs SET memory_legend_version = 0 WHERE session_id = ? AND state = 'active'"
+    ).run(sessionId);
+  } finally {
+    database.close();
+  }
+
+  const prompt = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId,
+    prompt: "How should SQLite WAL work after the upgrade?",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter,
+    requestedAt: "2026-08-07T12:03:01.000Z"
+  });
+
+  expect(prompt.items).toHaveLength(1);
+  expect(prompt.text).toContain("M=memory ref");
 });
 
 test("UserPromptSubmit treats a portable M:<number> mention as a direct identity reference", async () => {

@@ -282,6 +282,11 @@ const migrations: readonly Migration[] = [
     version: 53,
     name: "portable_memory_refs",
     path: new URL("../../migrations/0053-portable-memory-refs.sql", import.meta.url)
+  },
+  {
+    version: 54,
+    name: "context_memory_legend",
+    path: new URL("../../migrations/0054-context-memory-legend.sql", import.meta.url)
   }
 ];
 

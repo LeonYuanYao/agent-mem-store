@@ -27,6 +27,7 @@ const PROBABLE_ITEM_LIMIT = 2;
 const SESSION_BUCKET_PAGE_SIZE = 16;
 const RECEIPT_OMISSION_DETAIL_LIMIT = 128;
 const AUTOMATIC_SEMANTIC_DEADLINE_MS = 300;
+const MEMORY_LEGEND_VERSION = 1;
 const MINIMUM_SESSION_ITEM_INCREMENT = tokenizer.encode(
   "\n[M:1 S:G A:H R:C] x"
 ).length;
@@ -300,13 +301,23 @@ const standardHeader =
   "<memstore-context>historical long-term memory. Apply only when relevant; current explicit instructions and verified workspace state take precedence.</memstore-context>";
 const probableHeader =
   "<memstore-context>possibly relevant historical long-term memory. Verify applicability and read by identity when more detail is needed.</memstore-context>";
+const memoryLegend =
+  "Legend: M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity).";
 
-function renderPack(items: readonly ShadowPackItem[], probableOnly = false): {
+function renderPack(
+  items: readonly ShadowPackItem[],
+  probableOnly = false,
+  includeLegend = false
+): {
   readonly text: string;
   readonly renderedTokenCount: number;
 } {
   if (items.length === 0) return { text: "", renderedTokenCount: 0 };
-  const text = [probableOnly ? probableHeader : standardHeader, ...items.map((item) => item.text)].join("\n");
+  const text = [
+    probableOnly ? probableHeader : standardHeader,
+    ...(includeLegend ? [memoryLegend] : []),
+    ...items.map((item) => item.text)
+  ].join("\n");
   return { text, renderedTokenCount: tokenizer.encode(text).length };
 }
 
@@ -421,12 +432,14 @@ async function startEpoch(request: {
 async function loadEpoch(runtimeRoot: string, sessionId: string): Promise<{
   readonly epochId: string;
   readonly tokenTotal: number;
+  readonly memoryLegendVersion: number;
   readonly injectedRevisions: ReadonlySet<string>;
 }> {
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     const row = database.prepare(
-      "SELECT epoch_id, automatic_token_total FROM context_epochs WHERE session_id = ? AND state = 'active'"
+      `SELECT epoch_id, automatic_token_total, memory_legend_version
+       FROM context_epochs WHERE session_id = ? AND state = 'active'`
     ).get(sessionId);
     if (row === undefined) throw new Error("UserPromptSubmit requires an active Context Epoch.");
     const epochId = z.string().parse(row.epoch_id);
@@ -439,6 +452,7 @@ async function loadEpoch(runtimeRoot: string, sessionId: string): Promise<{
     return {
       epochId,
       tokenTotal: z.number().int().nonnegative().parse(row.automatic_token_total),
+      memoryLegendVersion: z.number().int().nonnegative().parse(row.memory_legend_version),
       injectedRevisions: new Set(revisions.map((item) => `${String(item.memory_id)}:${String(item.revision_id)}`))
     };
   } finally {
@@ -464,6 +478,7 @@ async function recordAutomaticReceipt(request: {
     readonly omissionReason: string;
   }[];
   readonly renderedTokenCount: number;
+  readonly memoryLegendVersion?: number;
   readonly budgetTier: string;
   readonly semanticStage: "complete" | "lexical_only" | "not_applicable";
   readonly emptyReason?: string;
@@ -491,7 +506,8 @@ async function recordAutomaticReceipt(request: {
     database.exec("BEGIN IMMEDIATE");
     await request.foregroundControl?.checkpoint("receipt_transaction_started");
     const epoch = database.prepare(
-      "SELECT automatic_token_total FROM context_epochs WHERE epoch_id = ? AND state = 'active'"
+      `SELECT automatic_token_total, memory_legend_version
+       FROM context_epochs WHERE epoch_id = ? AND state = 'active'`
     ).get(request.epochId);
     if (epoch === undefined) throw new Error("Context Epoch changed before Receipt commit.");
     const previousTotal = z.number().int().nonnegative().parse(epoch.automatic_token_total);
@@ -567,9 +583,16 @@ async function recordAutomaticReceipt(request: {
       JSON.stringify(item.reasons),
       item.omissionReason
     ));
+    const previousLegendVersion = z.number().int().nonnegative().parse(epoch.memory_legend_version);
+    const memoryLegendVersion = Math.max(
+      previousLegendVersion,
+      request.items.length === 0 ? 0 : request.memoryLegendVersion ?? 0
+    );
     database.prepare(
-      "UPDATE context_epochs SET automatic_token_total = ? WHERE epoch_id = ? AND state = 'active'"
-    ).run(epochTotal, request.epochId);
+      `UPDATE context_epochs
+       SET automatic_token_total = ?, memory_legend_version = ?
+       WHERE epoch_id = ? AND state = 'active'`
+    ).run(epochTotal, memoryLegendVersion, request.epochId);
     if (request.timingStartedAt !== undefined && request.preReceiptTimings !== undefined) {
       const receiptWriteMs = Math.max(0, performance.now() - receiptStarted);
       const totalMs = Math.max(0, performance.now() - request.timingStartedAt);
@@ -680,7 +703,7 @@ async function prepareSessionStartShadowPackCore(
       reasons: [always ? "startup_always" : "startup_ranked"],
       text,
       renderedTokenCount: itemTokens
-    }]);
+    }], false, true);
     if (trial.renderedTokenCount > SESSION_TOKEN_LIMIT) return false;
     selected.push({
       memoryId: memory.memoryId,
@@ -723,7 +746,7 @@ async function prepareSessionStartShadowPackCore(
         visit: (memory) => trySelect(memory, false),
         ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot })
       });
-  const rendered = renderPack(selected);
+  const rendered = renderPack(selected, false, true);
   const selectedIds = new Set(selected.map((item) => item.memoryId));
   const omittedItems = examined.filter((memory) => !selectedIds.has(memory.memoryId)).map((memory) => {
     const tier = tierFor(memory, request.projectId);
@@ -751,6 +774,7 @@ async function prepareSessionStartShadowPackCore(
     items: selected,
     omittedItems,
     renderedTokenCount: rendered.renderedTokenCount,
+    memoryLegendVersion: MEMORY_LEGEND_VERSION,
     budgetTier: "session_start_1200",
     semanticStage: "not_applicable",
     rowsExamined: alwaysStats.rowsExamined + dynamicStats.rowsExamined,
@@ -952,6 +976,7 @@ async function prepareUserPromptShadowPackCore(
   const normalizedPrompt = request.prompt.trim().replace(/\s+/gu, " ");
   const epochLoadStarted = performance.now();
   const epoch = await loadEpoch(request.runtimeRoot, request.sessionId);
+  const includeMemoryLegend = epoch.memoryLegendVersion < MEMORY_LEGEND_VERSION;
   await request.foregroundControl?.checkpoint("prompt_epoch_loaded");
   const epochLoadMs = Math.max(0, performance.now() - epochLoadStarted);
   let loaded: Awaited<ReturnType<typeof loadActiveScope>>;
@@ -1133,8 +1158,11 @@ async function prepareUserPromptShadowPackCore(
         text,
         renderedTokenCount: tokenizer.encode(text).length
       };
-      const trial = renderPack([...selected, candidate],
-        selected.length === 0 && item.band === "probable");
+      const trial = renderPack(
+        [...selected, candidate],
+        selected.length === 0 && item.band === "probable",
+        includeMemoryLegend
+      );
       if (trial.renderedTokenCount > PROMPT_HARD_LIMIT ||
         epoch.tokenTotal + trial.renderedTokenCount > hardLimit) continue;
       selected.push(candidate);
@@ -1161,11 +1189,16 @@ async function prepareUserPromptShadowPackCore(
       };
       const trialItems = selected.map((item, itemIndex) => itemIndex === index ? upgraded : item);
       const limit = rankedItem.directIdentity ? PROMPT_HARD_LIMIT : PROMPT_TARGET_LIMIT;
-      if (renderPack(trialItems).renderedTokenCount <= limit) selected[index] = upgraded;
+      if (renderPack(trialItems, false, includeMemoryLegend).renderedTokenCount <= limit) {
+        selected[index] = upgraded;
+      }
     }
   }
-  const rendered = renderPack(selected,
-    selected.length > 0 && selected.every((item) => item.relevanceBand === "probable"));
+  const rendered = renderPack(
+    selected,
+    selected.length > 0 && selected.every((item) => item.relevanceBand === "probable"),
+    includeMemoryLegend
+  );
   const selectedIds = new Set(selected.map((item) => item.memoryId));
   const omittedItems = scored.filter((item) => !selectedIds.has(item.memory.memoryId)).map((item) => ({
     memoryId: item.memory.memoryId,
@@ -1203,6 +1236,7 @@ async function prepareUserPromptShadowPackCore(
     items: selected,
     omittedItems,
     renderedTokenCount: rendered.renderedTokenCount,
+    ...(includeMemoryLegend ? { memoryLegendVersion: MEMORY_LEGEND_VERSION } : {}),
     budgetTier: postSoft ? "post_soft" : "normal",
     semanticStage: semantic.stage,
     rowsExamined: memories.length,

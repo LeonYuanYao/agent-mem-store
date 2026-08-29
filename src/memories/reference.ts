@@ -14,7 +14,7 @@ export interface ResolvedMemoryReference {
 }
 
 export function formatMemoryReference(memoryRef: number): string {
-  return `M:${z.number().int().positive().parse(memoryRef)}`;
+  return `M:${String(z.number().int().positive().parse(memoryRef))}`;
 }
 
 export async function resolveMemoryReference(
