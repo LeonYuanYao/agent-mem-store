@@ -10,4 +10,4 @@ Monthly Governance performs all Weekly duties when the schedules coincide and ad
 
 Monthly may identify restore, archive, and future purge obligations and emits one bounded Monthly Governance Summary plus aggregated Review Inbox items. It cannot silently change Human-authored Memory, model or adapter, ranking threshold, scope, schedule, or safety policy.
 
-The Engineering MVP records archive-body purge obligations but does not execute the separately deferred six-month body purge. Deletion remains unavailable until the purge milestone implements its reviewed rechecks and evidence.
+At this historical milestone, the Engineering MVP recorded archive-body purge obligations but did not execute body purge. A later reviewed milestone implemented deletion; ADR-0012, ADR-0079, and ADR-0085 are authoritative for the current three-calendar-month retention and executor behavior.

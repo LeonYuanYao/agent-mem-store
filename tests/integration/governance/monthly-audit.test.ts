@@ -74,7 +74,7 @@ test("monthly governance performs weekly duties then audits all Active and Archi
           ? [{
               memoryId: archivedId,
               notBefore: "2027-02-10T19:01:00.000Z",
-              reason: "Archived retention can be reviewed after six months."
+              reason: "Archived retention can be reviewed after three months."
             }]
           : [],
         summaryItems: [`${request.phase} page ${String(request.pageOrdinal)}`]

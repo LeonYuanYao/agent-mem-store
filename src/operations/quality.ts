@@ -4,6 +4,10 @@ import { z } from "zod";
 import { assessExactCompact } from "../memories/representations.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import {
+  archiveLifecycleDetails,
+  loadArchiveRetentionMonths
+} from "../lifecycle/archive-retention.js";
+import {
   readCanonicalMemory,
   writeCanonicalMemory,
   type CanonicalMemory
@@ -263,6 +267,7 @@ export async function archiveOperationalMemories(request: {
   const eligible = page.memories.filter(isOperationalArchiveEligible);
   let changedCount = 0;
   if (!request.preview) {
+    const archiveRetentionMonths = await loadArchiveRetentionMonths(request);
     for (const memory of eligible) {
       const revisionId = `msrev_${randomUUID()}`;
       const hasOperationalProvenance = qualityCodes(memory).includes("operational_provenance");
@@ -283,10 +288,12 @@ export async function archiveOperationalMemories(request: {
           predecessorRevisionId: memory.revisionId,
           revisedAt: archivedAt,
           lifecycle: "archived",
-          lifecycleDetails: {
+          lifecycleDetails: archiveLifecycleDetails({
+            previous: memory.lifecycleDetails,
             archivedAt,
-            reason
-          },
+            reason,
+            archiveRetentionMonths
+          }),
           representations: reboundRepresentations(memory, revisionId),
           provenance: memory.provenance.includes(provenance)
             ? memory.provenance

@@ -1313,7 +1313,15 @@ export async function evaluateCandidate(request: {
       `SELECT
          (SELECT COUNT(*) FROM memory_catalog
           WHERE lifecycle = 'active' AND authority = 'agent_derived'
-            AND scope_kind = ? AND (? = 'global' OR project_id = ?))
+            AND scope_kind = ? AND (? = 'global' OR project_id = ?)
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_ranking_exclusions AS exclusion
+              WHERE exclusion.memory_id = memory_catalog.memory_id
+                AND exclusion.revision_id = memory_catalog.current_revision_id
+                AND exclusion.space_key = CASE
+                  WHEN memory_catalog.scope_kind = 'global' THEN 'global'
+                  ELSE 'project:' || memory_catalog.project_id END
+            ))
          +
          (SELECT COUNT(*) FROM memory_candidates
           WHERE state = 'waiting' AND promotion_generation IS NOT NULL

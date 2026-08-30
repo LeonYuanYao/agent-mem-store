@@ -300,6 +300,22 @@ const migrations: readonly Migration[] = [
       "../../migrations/0056-capacity-governance-selection-indexes.sql",
       import.meta.url
     )
+  },
+  {
+    version: 57,
+    name: "reversible_capacity_working_set",
+    path: new URL(
+      "../../migrations/0057-reversible-capacity-working-set.sql",
+      import.meta.url
+    )
+  },
+  {
+    version: 58,
+    name: "automatic_archive_retention",
+    path: new URL(
+      "../../migrations/0058-automatic-archive-retention.sql",
+      import.meta.url
+    )
   }
 ];
 

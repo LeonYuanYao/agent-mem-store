@@ -34,6 +34,26 @@ function rollbackIfTransaction(database: DatabaseSync): void {
   if (database.isTransaction) database.exec("ROLLBACK");
 }
 
+function reactivateExplicitlySelectedMemories(request: {
+  readonly database: DatabaseSync;
+  readonly selected: readonly { readonly memoryId: string; readonly revisionId: string }[];
+  readonly requestedAt: string;
+}): void {
+  const remove = request.database.prepare(
+    "DELETE FROM memory_ranking_exclusions WHERE memory_id = ? AND revision_id = ?"
+  );
+  let changed = false;
+  for (const item of request.selected) {
+    if (remove.run(item.memoryId, item.revisionId).changes > 0) changed = true;
+  }
+  if (!changed) return;
+  request.database.prepare(
+    `UPDATE memory_working_set_generations
+     SET dirty_generation = dirty_generation + 1, dirty_at = ?, last_error = NULL
+     WHERE singleton = 1`
+  ).run(request.requestedAt);
+}
+
 export class CursorStaleError extends Error {
   public readonly code = "cursor_stale";
 
@@ -514,6 +534,11 @@ export async function recallSearch(request: {
       tokenizer.encode(renderSearchItem(item)).length,
       JSON.stringify(item.relevanceReasons)
     ));
+    reactivateExplicitlySelectedMemories({
+      database: receiptDatabase,
+      selected,
+      requestedAt
+    });
     receiptDatabase.exec("COMMIT");
   } catch (error) {
     rollbackIfTransaction(receiptDatabase);
@@ -649,6 +674,11 @@ async function recordExplicitReadReceipt(request: {
       request.renderedTokenCount,
       JSON.stringify([`${request.operation}_read`])
     );
+    reactivateExplicitlySelectedMemories({
+      database,
+      selected: [{ memoryId: request.memoryId, revisionId: request.revisionId }],
+      requestedAt: request.requestedAt
+    });
     database.exec("COMMIT");
   } catch (error) {
     rollbackIfTransaction(database);

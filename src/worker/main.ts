@@ -1,7 +1,13 @@
 import { z } from "zod";
 import { Temporal } from "@js-temporal/polyfill";
 
-import { loadMemoryCapacityPolicy } from "../capacity/index.js";
+import {
+  inspectMemoryWorkingSetGeneration,
+  loadMemoryCapacityPolicy,
+  markMemoryWorkingSetPublished,
+  rebalancePressuredMemorySpaces,
+  recordMemoryWorkingSetPublicationFailure
+} from "../capacity/index.js";
 import { pruneExpiredAdmissionAudit } from "../admission/audit.js";
 import type { GovernanceAdapter } from "../governance/worker.js";
 import { runNextGovernanceStep } from "../governance/worker.js";
@@ -54,6 +60,7 @@ import {
   captureAbandonedSessionEnd
 } from "./session-catchup.js";
 import { runNextCandidateMaintenance } from "./candidate-maintenance.js";
+import { runScheduledArchiveRetention } from "../purge/index.js";
 import {
   advanceCompactQualityDiscovery,
   runNextMemoryQualityStep,
@@ -227,6 +234,60 @@ export async function runWorkerOnce(request: {
   if (lifecycleRecovery.state === "completed") {
     activities.push("distillation:lifecycle-only-recovered");
   }
+  const capacityPolicy = await loadMemoryCapacityPolicy({
+    runtimeRoot: request.runtimeRoot,
+    vaultRoot: request.vaultRoot
+  });
+  try {
+    const capacityResults = await rebalancePressuredMemorySpaces({
+      runtimeRoot: request.runtimeRoot,
+      vaultRoot: request.vaultRoot,
+      policy: capacityPolicy,
+      observedAt: now
+    });
+    for (const result of capacityResults) {
+      if (result.state === "deferred" || result.lowWaterUnreachable) {
+        shouldRefreshReview = true;
+      }
+      activities.push(result.state === "rebalanced"
+        ? `memory-working-set:${result.scope.kind}:${String(result.rankedActiveAgentCount)}/${String(result.durableActiveAgentCount)}`
+        : `memory-working-set:${result.scope.kind}:deferred`);
+    }
+  } catch {
+    activities.push("memory-working-set:reconciliation-failed");
+  }
+  if (request.adapters?.publishRetrievalSnapshot !== undefined) {
+    const generation = await inspectMemoryWorkingSetGeneration(request.runtimeRoot);
+    const publicationDue = generation.publicationNextRetryAt === null ||
+      generation.publicationNextRetryAt <= now;
+    if (generation.dirtyGeneration > generation.publishedGeneration && publicationDue) {
+      const activeIndex = await inspectActiveRetrievalIndex(request.runtimeRoot);
+      if (activeIndex !== undefined) {
+        try {
+          await request.adapters.publishRetrievalSnapshot(
+            await loadRetrievalSnapshot({ runtimeRoot: request.runtimeRoot })
+          );
+          await markMemoryWorkingSetPublished({
+            runtimeRoot: request.runtimeRoot,
+            generation: generation.dirtyGeneration,
+            publishedAt: now
+          });
+          if (generation.publicationFailureCount > 0) shouldRefreshReview = true;
+          activities.push(`memory-working-set:published:${String(generation.dirtyGeneration)}`);
+        } catch {
+          const failure = await recordMemoryWorkingSetPublicationFailure({
+            runtimeRoot: request.runtimeRoot,
+            failedAt: now,
+            errorCode: "snapshot_publication_failed"
+          }).catch(() => undefined);
+          activities.push(failure === undefined
+            ? "memory-working-set:publication-failed"
+            : `memory-working-set:publication-deferred:${failure.nextRetryAt}`);
+          shouldRefreshReview = true;
+        }
+      }
+    }
+  }
   try {
     const pruning = await pruneRetiredRetrievalSnapshots({
       runtimeRoot: request.runtimeRoot,
@@ -246,6 +307,32 @@ export async function runWorkerOnce(request: {
   });
   if (sessionCatchUp.state !== "empty") {
     activities.push("session-end:catch-up");
+  }
+  const archiveRetention = await runScheduledArchiveRetention({
+    runtimeRoot: request.runtimeRoot,
+    vaultRoot: request.vaultRoot,
+    now,
+    ...(request.adapters?.foregroundPressure === undefined
+      ? {}
+      : {
+          foregroundPressure: () => Promise.resolve(
+            request.adapters?.foregroundPressure?.() === true
+          )
+        })
+  });
+  if (archiveRetention.state !== "not_due") {
+    if (archiveRetention.state === "failed") {
+      activities.push(`archive-purge:failed:${archiveRetention.errorCode ?? "unknown_error"}`);
+      shouldRefreshReview = true;
+    } else if (archiveRetention.state === "yielded") {
+      activities.push("archive-purge:yielded");
+    }
+    if (archiveRetention.deadlineCount > 0) {
+      activities.push(`archive-retention:deadlines:${String(archiveRetention.deadlineCount)}`);
+    }
+    if (archiveRetention.purgedMemoryIds.length > 0) {
+      activities.push(`archive-purge:purged:${String(archiveRetention.purgedMemoryIds.length)}`);
+    }
   }
   if (request.adapters?.embedding !== undefined) {
     const foregroundPressure = request.adapters.foregroundPressure?.() === true;
@@ -379,15 +466,10 @@ export async function runWorkerOnce(request: {
     }
   }
   if (scheduleExists && request.adapters?.governance !== undefined) {
-    const capacityPolicy = await loadMemoryCapacityPolicy({
-      runtimeRoot: request.runtimeRoot,
-      vaultRoot: request.vaultRoot
-    });
     const scheduled = await scheduleDueGovernance({
       runtimeRoot: request.runtimeRoot,
       now,
-      workerStartedAt,
-      capacityPolicy
+      workerStartedAt
     });
     if (scheduled.state !== "idle") activities.push(`governance-schedule:${scheduled.state}`);
     const governance = await runNextGovernanceStep({

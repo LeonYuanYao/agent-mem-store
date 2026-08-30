@@ -6,6 +6,10 @@ import { assessExactCompact } from "../memories/representations.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { memoryCategorySchema, type MemoryCategory } from "../memories/categories.js";
 import {
+  archiveLifecycleDetails,
+  loadArchiveRetentionMonths
+} from "../lifecycle/archive-retention.js";
+import {
   readCanonicalMemory,
   writeCanonicalMemory,
   type CanonicalMemory
@@ -279,14 +283,17 @@ export async function assertHumanKnowledge(request: {
 
   if (predecessor !== undefined) {
     const archivedRevisionId = `msrev_${randomUUID()}`;
+    const archiveRetentionMonths = await loadArchiveRetentionMonths(request);
     const archived: CanonicalMemory = {
       ...predecessor.memory,
       revisionId: archivedRevisionId,
       lifecycle: "archived",
-      lifecycleDetails: {
+      lifecycleDetails: archiveLifecycleDetails({
+        previous: predecessor.memory.lifecycleDetails,
         archivedAt: assertedAt,
-        reason: "explicit_human_successor"
-      },
+        reason: "explicit_human_successor",
+        archiveRetentionMonths
+      }),
       revisedAt: assertedAt,
       successorMemoryId: memoryId,
       predecessorRevisionId: predecessor.memory.revisionId,

@@ -145,12 +145,12 @@ _Avoid_: Project Memory、默认知识
 _Avoid_: 本地目录、Obsidian 文件夹、整个 Memory Vault
 
 **Active Memory Capacity（活跃记忆容量）**:
-一个 Memory Space 中可参与正常检索和注入的 Active Agent-derived Durable Memory 数量。Archived Memory、Candidate、Tombstone 和 Human-authored Memory 不占用该受管容量。
-_Avoid_: Vault 文件总数、物理存储上限、删除配额
+一个 Memory Space 中可参与 SessionStart 和 UserPromptSubmit 自动检索与注入的 Active Agent-derived Durable Memory 工作集数量。被可逆排除的冷记忆仍属于完整 Durable Corpus，并继续可由显式 MCP、Skill 或 ID 深读。Archived Memory、Candidate、Tombstone 和 Human-authored Memory 不占用该受管容量。
+_Avoid_: Durable Corpus 总数、Vault 文件总数、物理存储上限、删除配额
 
 **Capacity Governance Obligation（容量治理义务）**:
-Memory Space 超过活跃记忆软目标后产生的可恢复治理工作。它优先合并、取代或归档不再适用的 Agent-derived Memory，并且不能仅按年龄、召回次数或模型重要性分数处理知识。
-_Avoid_: 按最旧顺序删除、Human-authored 自动归档、一次性清空
+Memory Space 的自动排名工作集超过高水位后产生的本地、可恢复治理工作。它通过确定性的近期活动、硬保护和软排序信号生成精确 revision 绑定的可逆 exclusion，不调用模型，也不修改 Canonical Memory lifecycle。
+_Avoid_: Luna 容量裁决、按最旧顺序删除、容量触发归档、Human-authored 自动降权
 
 **Independent Project Evidence（独立项目证据）**:
 来自不同 `project_id`、且各自不依赖同一上游结论或 MemStore 注入内容的可追溯支持证据。同一 Project 的多个 Session、共享 marker 的 worktree/clone，以及由已有 Memory 回声产生的再次提炼都不能增加独立项目计数。
@@ -237,7 +237,7 @@ _Avoid_: Active Durable Memory、Memory Candidate、已物理删除内容
 _Avoid_: 静默覆盖、无身份的新副本、自动解决 Human Conflict
 
 **Purge Policy（清除策略）**:
-决定 Archived Memory 何时删除正文的配置规则。单条 `purge_after` 或 `retain_forever` 优先，其次是 authority/scope 策略，最后是系统默认。
+决定 Archived Memory 何时删除正文的配置规则。默认从不可变的 `archived_at` 起保留三个自然月；单条 `purge_after` 或 `retain_forever` 优先，显式 pin 也会阻止自动清除。
 _Avoid_: 写死期限、归档即删除、后台静默覆盖人工保护
 
 **Memory Tombstone（记忆墓碑）**:

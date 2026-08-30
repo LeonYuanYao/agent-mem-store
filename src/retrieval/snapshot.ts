@@ -201,6 +201,7 @@ export function rowToIndexedMemory(row: Record<string, unknown>): IndexedMemory 
 
 const snapshotSchema = z.object({
   schemaVersion: z.literal(1),
+  workingSetGeneration: z.number().int().nonnegative(),
   indexRevisionId: z.string().min(1),
   directoryPath: z.string().min(1),
   adapterVersion: z.string().min(1),
@@ -209,6 +210,7 @@ const snapshotSchema = z.object({
   dimensions: z.number().int().positive(),
   documents: z.array(indexedMemorySnapshotSchema),
   vectors: z.instanceof(Float32Array),
+  automaticEligibleOrdinals: z.array(z.number().int().nonnegative()),
   globalOrdinals: z.array(z.number().int().nonnegative()),
   projectOrdinals: z.array(z.object({
     projectId: z.string().min(1),
@@ -247,8 +249,16 @@ export function validateRetrievalSnapshot(snapshot: unknown): RetrievalSnapshot 
     throw new Error("Retrieval Snapshot session bucket contains an invalid ordinal.");
   }
   const validated = { ...parsed } as RetrievalSnapshot;
+  if (parsed.automaticEligibleOrdinals.some((ordinal) => ordinal >= parsed.documents.length)) {
+    throw new Error("Retrieval Snapshot working-set ordinal is invalid.");
+  }
   Object.defineProperty(validated, "searchIndex", {
-    value: buildRetrievalSearchIndex(parsed.documents),
+    value: buildRetrievalSearchIndex(
+      parsed.automaticEligibleOrdinals.flatMap((ordinal) => {
+        const document = parsed.documents[ordinal];
+        return document === undefined ? [] : [document];
+      })
+    ),
     enumerable: false,
     writable: false,
     configurable: false
@@ -263,6 +273,8 @@ export async function loadRetrievalSnapshot(request: {
   let active: Record<string, unknown> | undefined;
   let documentRows: readonly Record<string, unknown>[] = [];
   let relationshipRows: readonly Record<string, unknown>[] = [];
+  let exclusionRows: readonly Record<string, unknown>[] = [];
+  let workingSetGeneration = 0;
   try {
     database.exec("BEGIN");
     active = database.prepare(
@@ -279,6 +291,12 @@ export async function loadRetrievalSnapshot(request: {
       relationshipRows = database.prepare(
         "SELECT source_memory_id, target_memory_id FROM memory_relationships"
       ).all();
+      exclusionRows = database.prepare(
+        "SELECT memory_id, revision_id, space_key FROM memory_ranking_exclusions"
+      ).all();
+      workingSetGeneration = z.number().int().nonnegative().parse(database.prepare(
+        "SELECT dirty_generation FROM memory_working_set_generations WHERE singleton = 1"
+      ).get()?.dirty_generation);
     }
     database.exec("COMMIT");
   } catch (error) {
@@ -315,9 +333,25 @@ export async function loadRetrievalSnapshot(request: {
     vectorBytes.byteLength / 4
   );
   const vectors = new Float32Array(sourceVectors);
+  const excludedRevisions = new Set(exclusionRows.flatMap((row) =>
+    typeof row.memory_id === "string" && typeof row.revision_id === "string" &&
+      typeof row.space_key === "string"
+      ? [`${row.memory_id}:${row.revision_id}:${row.space_key}`]
+      : []
+  ));
+  const automaticEligibleOrdinals = documents.flatMap((document, ordinal) => {
+    const spaceKey = document.scope.kind === "global"
+      ? "global"
+      : `project:${document.scope.projectId}`;
+    return excludedRevisions.has(`${document.memoryId}:${document.revisionId}:${spaceKey}`)
+      ? []
+      : [ordinal];
+  });
+  const automaticEligibleOrdinalSet = new Set(automaticEligibleOrdinals);
   const globalOrdinals: number[] = [];
   const projects = new Map<string, number[]>();
   documents.forEach((document, ordinal) => {
+    if (!automaticEligibleOrdinalSet.has(ordinal)) return;
     if (document.scope.kind === "global") globalOrdinals.push(ordinal);
     else {
       const ordinals = projects.get(document.scope.projectId) ?? [];
@@ -339,6 +373,7 @@ export async function loadRetrievalSnapshot(request: {
     ? "strong"
     : "critical";
   documents.forEach((document, ordinal) => {
+    if (!automaticEligibleOrdinalSet.has(ordinal)) return;
     if (document.startup === "never") return;
     const projectId = document.scope.kind === "project" ? document.scope.projectId : null;
     const tier = projectId === null
@@ -371,6 +406,7 @@ export async function loadRetrievalSnapshot(request: {
   );
   return validateRetrievalSnapshot({
     schemaVersion: 1,
+    workingSetGeneration,
     indexRevisionId,
     directoryPath,
     adapterVersion: z.string().parse(active.adapter_version),
@@ -379,6 +415,7 @@ export async function loadRetrievalSnapshot(request: {
     dimensions,
     documents,
     vectors,
+    automaticEligibleOrdinals,
     globalOrdinals,
     projectOrdinals: [...projects.entries()]
       .sort(([left], [right]) => left.localeCompare(right))

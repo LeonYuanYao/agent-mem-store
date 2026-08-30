@@ -31,7 +31,7 @@ function archivedMemory(
   };
 }
 
-test("Human authority, retain-forever, pin, explicit purge, and calendar-month defaults resolve conservatively", async () => {
+test("all archived authority follows the three-calendar-month default unless explicitly protected", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-purge-policy-"));
   roots.push(root);
   const vaultRoot = join(root, "vault");
@@ -39,27 +39,27 @@ test("Human authority, retain-forever, pin, explicit purge, and calendar-month d
   const backupRoot = join(root, "backup");
   const memories = [
     archivedMemory(101, "human_authored", {
-      archivedAt: "2026-01-31T00:00:00.000Z",
+      archivedAt: "2026-01-15T00:00:00.000Z",
       reason: "superseded"
     }),
     archivedMemory(102, "agent_derived", {
-      archivedAt: "2026-01-31T00:00:00.000Z",
+      archivedAt: "2026-01-15T00:00:00.000Z",
       reason: "superseded",
       retainForever: true
     }),
     archivedMemory(103, "agent_derived", {
-      archivedAt: "2026-01-31T00:00:00.000Z",
+      archivedAt: "2026-01-15T00:00:00.000Z",
       reason: "superseded",
       pinned: true
     }),
     archivedMemory(104, "agent_derived", {
-      archivedAt: "2026-01-31T00:00:00.000Z",
+      archivedAt: "2026-01-15T00:00:00.000Z",
       reason: "superseded",
       pinned: true,
       purgeAfter: "2026-02-01T00:00:00.000Z"
     }),
     archivedMemory(105, "agent_derived", {
-      archivedAt: "2026-01-31T00:00:00.000Z",
+      archivedAt: "2026-01-15T00:00:00.000Z",
       reason: "superseded"
     })
   ];
@@ -77,38 +77,39 @@ test("Human authority, retain-forever, pin, explicit purge, and calendar-month d
     vaultRoot,
     runtimeRoot,
     backupRoot,
-    now: "2026-07-30T23:59:59.000Z"
+    now: "2026-04-14T23:59:59.000Z"
   });
   const atCalendarDeadline = await previewArchivePurge({
     vaultRoot,
     runtimeRoot,
     backupRoot,
-    now: "2026-07-31T00:00:00.000Z"
+    now: "2026-04-15T00:00:00.000Z"
   });
   const completed = await runArchivePurgeBatch({
     vaultRoot,
     runtimeRoot,
     backupRoot,
-    now: "2026-07-31T00:00:00.000Z"
+    now: "2026-04-15T00:00:00.000Z"
   });
 
   expect(beforeCalendarDeadline.items.map((item) => item.memoryId)).toEqual([
     memories[3]?.memoryId
   ]);
   expect(atCalendarDeadline.items.map((item) => item.memoryId)).toEqual([
+    memories[0]?.memoryId,
     memories[3]?.memoryId,
     memories[4]?.memoryId
   ]);
   expect(atCalendarDeadline.protectedItems).toEqual([
-    { memoryId: memories[0]?.memoryId, reason: "human_default_no_automatic_purge" },
     { memoryId: memories[1]?.memoryId, reason: "retain_forever" },
     { memoryId: memories[2]?.memoryId, reason: "pinned" }
   ]);
   expect(completed.purgedMemoryIds).toEqual([
+    memories[0]?.memoryId,
     memories[3]?.memoryId,
     memories[4]?.memoryId
   ]);
-  for (const memory of memories.slice(0, 3)) {
+  for (const memory of memories.slice(1, 3)) {
     expect((await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: memory.memoryId }))?.memory)
       .toMatchObject({ lifecycle: "archived", body: memory.body });
   }

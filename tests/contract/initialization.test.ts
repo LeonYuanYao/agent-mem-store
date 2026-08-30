@@ -98,7 +98,7 @@ test("initialization creates separate portable and machine configuration", async
     schemaVersion: 1,
     mode: "read_write",
     policy: {
-      archiveRetentionMonths: 6,
+      archiveRetentionMonths: 3,
       candidateTombstoneDays: 180,
       governanceTimezone: "Asia/Shanghai",
       weeklyGovernance: "MONDAY 19:00",
@@ -106,7 +106,7 @@ test("initialization creates separate portable and machine configuration", async
       memoryCapacity: {
         project: { target: 2_500, hardLimit: 3_500, lowWater: 2_200 },
         global: { target: 300, hardLimit: 500, lowWater: 270 },
-        coldDays: 180,
+        coldDays: 7,
         governanceBatchSize: 50
       }
     },
@@ -220,7 +220,7 @@ test("configuration activation rejects invalid content and keeps one prior valid
     source: "schema_version = 1\n",
     preview: false
   });
-  const validSource = original.replace("archive_months = 6", "archive_months = 9");
+  const validSource = original.replace("archive_months = 3", "archive_months = 9");
   const activated = await activateConfigurationDocument({
     vaultRoot,
     runtimeRoot,
@@ -316,7 +316,7 @@ test("an invalid manual edit falls back to the last known good configuration", a
   const policyPath = join(vaultRoot, "_MemStore", "policy.toml");
   await initializeMemStore({ vaultRoot, runtimeRoot, preview: false });
   const original = await readFile(policyPath, "utf8");
-  const validSource = original.replace("archive_months = 6", "archive_months = 9");
+  const validSource = original.replace("archive_months = 3", "archive_months = 9");
   await activateConfigurationDocument({
     vaultRoot,
     runtimeRoot,

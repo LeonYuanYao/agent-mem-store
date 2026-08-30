@@ -126,8 +126,11 @@ test("weekly governance applies only authorized Agent changes and suggests Human
     runtimeRoot, vaultRoot, now: "2026-08-10T19:05:00.000Z", adapter
   })).resolves.toMatchObject({ state: "completed" });
 
-  expect((await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: agentArchiveId }))?.memory.lifecycle)
-    .toBe("archived");
+  expect((await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: agentArchiveId }))?.memory)
+    .toMatchObject({
+      lifecycle: "archived",
+      lifecycleDetails: { purgeAfter: "2026-11-10T19:01:00.000Z" }
+    });
   expect((await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: agentArchiveId }))?.memory.successorMemoryId)
     .toBe(agentRelationId);
   expect((await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: humanId }))?.memory.lifecycle)

@@ -4,7 +4,7 @@ status: accepted
 
 # Retain body-free Tombstones without time expiry
 
-Agent-derived Archived Memory defaults to body purge six calendar months from immutable `archived_at`, not after an approximate 180-day duration. Archive resolves the applicable policy and materializes a fixed `purge_after` for that archive cycle. Later global policy changes apply prospectively; accelerating existing records requires a separate governed operation with strict preview.
+Archived Memory defaults to body purge three calendar months from immutable `archived_at`, not after an approximate elapsed-day duration. Archive resolves the applicable policy and materializes a fixed `purge_after` for that archive cycle. The accepted transition to three months includes a governed backfill of existing unprotected archives; later global policy changes apply prospectively unless another explicit transition is approved.
 
 Purge removes the body and every compact, standard, embedding, source-excerpt, and otherwise recoverable content representation. It retains a minimal Canonical Tombstone containing only Memory and revision identities, Project or Global scope, authority, content identity, archive and purge timestamps, purge reason, successor identity, and body-free provenance identities as applicable.
 

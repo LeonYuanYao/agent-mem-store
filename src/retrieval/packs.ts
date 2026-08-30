@@ -192,6 +192,14 @@ async function visitPagedSessionCandidates(request: {
        FROM retrieval_documents
        WHERE index_revision_id = ? AND startup = ?
          AND (scope_kind = 'global' OR (scope_kind = 'project' AND project_id = ?))
+         AND NOT EXISTS (
+           SELECT 1 FROM memory_ranking_exclusions AS exclusion
+           WHERE exclusion.memory_id = retrieval_documents.memory_id
+             AND exclusion.revision_id = retrieval_documents.revision_id
+             AND exclusion.space_key = CASE
+               WHEN retrieval_documents.scope_kind = 'global' THEN 'global'
+               ELSE 'project:' || retrieval_documents.project_id END
+         )
          AND (valid_from IS NULL OR valid_from <= ?)
          AND (valid_until IS NULL OR valid_until >= ?)
        ORDER BY CASE ${tierExpression}
@@ -229,6 +237,14 @@ async function visitPagedSessionCandidates(request: {
               `SELECT * FROM retrieval_documents
                WHERE index_revision_id = ? AND startup = ? AND category = ?
                  AND (scope_kind = 'global' OR (scope_kind = 'project' AND project_id = ?))
+                 AND NOT EXISTS (
+                   SELECT 1 FROM memory_ranking_exclusions AS exclusion
+                   WHERE exclusion.memory_id = retrieval_documents.memory_id
+                     AND exclusion.revision_id = retrieval_documents.revision_id
+                     AND exclusion.space_key = CASE
+                       WHEN retrieval_documents.scope_kind = 'global' THEN 'global'
+                       ELSE 'project:' || retrieval_documents.project_id END
+                 )
                  AND (valid_from IS NULL OR valid_from <= ?)
                  AND (valid_until IS NULL OR valid_until >= ?)
                  AND ${tierExpression} = ? AND session_order_key > ?
@@ -376,9 +392,17 @@ async function loadActiveScope(request: {
     if (active === undefined) throw new Error("No completed retrieval index is active.");
     const indexRevisionId = z.string().parse(active.index_revision_id);
     const rows = database.prepare(
-      `SELECT * FROM retrieval_documents
+      `SELECT document.* FROM retrieval_documents AS document
        WHERE index_revision_id = ? AND
          (scope_kind = 'global' OR (scope_kind = 'project' AND project_id = ?))
+         AND NOT EXISTS (
+           SELECT 1 FROM memory_ranking_exclusions AS exclusion
+           WHERE exclusion.memory_id = document.memory_id
+             AND exclusion.revision_id = document.revision_id
+             AND exclusion.space_key = CASE
+               WHEN document.scope_kind = 'global' THEN 'global'
+               ELSE 'project:' || document.project_id END
+         )
        ORDER BY memory_id`
     ).all(indexRevisionId, request.projectId);
     const memories = rows.map((row) => rowToIndexedMemory(row)).filter((memory) =>

@@ -71,9 +71,7 @@ test("the real Luna adapter exposes a versioned authority-safe governance task",
         items: {
           anyOf: [
             { properties: { kind: { type: "string", const: "archive" } } },
-            { properties: { kind: { type: "string", const: "archive_for_capacity" } } },
             { properties: { kind: { type: "string", const: "supersede" } } },
-            { properties: { kind: { type: "string", const: "supersede_for_capacity" } } },
             { properties: { kind: { type: "string", const: "mark_review_due" } } },
             { properties: { kind: { type: "string", const: "add_relationship" } } }
           ]

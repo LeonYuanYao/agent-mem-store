@@ -262,7 +262,11 @@ test("an explicit replacement archives the predecessor and creates a successor",
   if (successor.state !== "created") throw new Error("Expected successor Memory.");
   const oldMemory = await readCanonicalMemory({ ...roots, memoryId: original.memoryId });
   const newMemory = await readCanonicalMemory({ ...roots, memoryId: successor.memoryId });
-  expect(oldMemory?.memory).toMatchObject({ lifecycle: "archived", successorMemoryId: successor.memoryId });
+  expect(oldMemory?.memory).toMatchObject({
+    lifecycle: "archived",
+    successorMemoryId: successor.memoryId,
+    lifecycleDetails: { purgeAfter: "2026-11-07T09:20:01.000Z" }
+  });
   expect(newMemory?.memory).toMatchObject({
     lifecycle: "active",
     predecessorMemoryId: original.memoryId,

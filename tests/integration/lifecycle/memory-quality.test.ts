@@ -181,6 +181,7 @@ test("quality audit reports operational and temporal signals without mutating me
   });
   expect(archived?.memory.lifecycle).toBe("archived");
   expect(archived?.memory.lifecycleDetails.reason).toBe("quality:operational-provenance-v1");
+  expect(archived?.memory.lifecycleDetails.purgeAfter).toBe("2026-11-18T22:30:00.000Z");
 });
 
 test("operational archive catches runtime-bound status without archiving durable current-state rules", async () => {
@@ -229,7 +230,13 @@ test("operational archive catches runtime-bound status without archiving durable
     preview: false
   });
   expect((await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: transientId }))?.memory)
-    .toMatchObject({ lifecycle: "archived", lifecycleDetails: { reason: "quality:transient-runtime-state-v2" } });
+    .toMatchObject({
+      lifecycle: "archived",
+      lifecycleDetails: {
+        reason: "quality:transient-runtime-state-v2",
+        purgeAfter: "2026-11-18T22:45:00.000Z"
+      }
+    });
   expect((await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: durableId }))?.memory.lifecycle)
     .toBe("active");
 });

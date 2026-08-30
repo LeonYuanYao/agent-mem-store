@@ -49,12 +49,12 @@ const memoryCapacitySchema = z.object({
     hard_limit: 500,
     low_water: 270
   }),
-  cold_days: z.number().int().positive().default(180),
+  cold_days: z.number().int().positive().default(7),
   governance_batch_size: z.number().int().min(1).max(50).default(50)
 }).default({
   project: { target: 2_500, hard_limit: 3_500, low_water: 2_200 },
   global: { target: 300, hard_limit: 500, low_water: 270 },
-  cold_days: 180,
+  cold_days: 7,
   governance_batch_size: 50
 });
 

@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 
 import {
+  inspectMemoryWorkingSetGeneration,
   inspectMemoryCapacity,
   loadMemoryCapacityPolicy
 } from "../capacity/index.js";
@@ -14,6 +15,7 @@ import { inspectCaptureInbox } from "../capture/inbox.js";
 import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
 import { inspectRetrievalCatalogGeneration } from "../retrieval/index-coordinator.js";
 import { foregroundRetrievalSocketPath } from "../retrieval/foreground-protocol.js";
+import { loadArchiveRetentionMonths } from "../lifecycle/archive-retention.js";
 
 async function databasePath(runtimeRoot: string): Promise<string> {
   const path = join(runtimeRoot, "state", "memstore.sqlite");
@@ -96,6 +98,7 @@ export async function inspectStatus(request: {
   readonly vaultRoot: string;
 }) {
   const memoryCapacityPolicy = await loadMemoryCapacityPolicy(request);
+  const archiveRetentionMonths = await loadArchiveRetentionMonths(request);
   const hookSqliteBusy = await inspectHookSqliteBusyDiagnostics(request.runtimeRoot);
   const captureInbox = await inspectCaptureInbox(request.runtimeRoot);
   const [foregroundAttempts, catalogGeneration, foregroundSocketAvailable] = await Promise.all([
@@ -103,6 +106,7 @@ export async function inspectStatus(request: {
     inspectRetrievalCatalogGeneration(request.runtimeRoot),
     foregroundEndpointAcceptsConnections(request.runtimeRoot)
   ]);
+  const workingSetGeneration = await inspectMemoryWorkingSetGeneration(request.runtimeRoot);
   const database = new DatabaseSync(await databasePath(request.runtimeRoot), { readOnly: true });
   try {
     const health = database.prepare("SELECT * FROM luna_health_state WHERE singleton = 1").get();
@@ -171,6 +175,22 @@ export async function inspectStatus(request: {
       `SELECT state, scanned_candidate_count, reopened_candidate_count, updated_at
        FROM candidate_reevaluation_backfill WHERE singleton = 1`
     ).get();
+    const archiveRetention = database.prepare(
+      `SELECT next_check_at, last_checked_at, last_completed_at, last_error_code,
+              consecutive_failure_count, backfill_completed_at
+       FROM archive_retention_maintenance WHERE singleton = 1`
+    ).get();
+    const archiveCounts = database.prepare(
+      `SELECT
+         SUM(CASE WHEN lifecycle = 'archived' THEN 1 ELSE 0 END) AS archived_count,
+         SUM(CASE WHEN lifecycle = 'tombstone' THEN 1 ELSE 0 END) AS tombstone_count
+       FROM memory_catalog`
+    ).get();
+    const purgeRun = database.prepare(
+      `SELECT run_id, state, started_at, completed_at, next_eligible_at,
+              purged_count, removed_bytes, last_error_code
+       FROM archive_purge_runs ORDER BY started_at DESC LIMIT 1`
+    ).get();
     const operationCounts = new Map(activeOperationRows.map((row) => [
       z.string().parse(row.operation_kind),
       {
@@ -238,7 +258,42 @@ export async function inspectStatus(request: {
         phase: governance.current_phase,
         coverage_through: governance.coverage_through
       },
-      memory_capacity: memoryCapacity,
+      archive_retention: archiveRetention === undefined ? null : {
+        archive_months: archiveRetentionMonths,
+        archived_count: z.number().int().nonnegative().parse(archiveCounts?.archived_count ?? 0),
+        tombstone_count: z.number().int().nonnegative().parse(archiveCounts?.tombstone_count ?? 0),
+        next_check_at: archiveRetention.next_check_at,
+        last_checked_at: archiveRetention.last_checked_at,
+        last_completed_at: archiveRetention.last_completed_at,
+        last_error_code: archiveRetention.last_error_code,
+        consecutive_failure_count: z.number().int().nonnegative().parse(
+          archiveRetention.consecutive_failure_count
+        ),
+        backfill_completed_at: archiveRetention.backfill_completed_at,
+        latest_purge: purgeRun === undefined ? null : {
+          run_id: purgeRun.run_id,
+          state: purgeRun.state,
+          started_at: purgeRun.started_at,
+          completed_at: purgeRun.completed_at,
+          next_eligible_at: purgeRun.next_eligible_at,
+          purged_count: purgeRun.purged_count,
+          removed_bytes: purgeRun.removed_bytes,
+          last_error_code: purgeRun.last_error_code
+        }
+      },
+      memory_capacity: {
+        ...memoryCapacity,
+        working_set: {
+          dirty_generation: workingSetGeneration.dirtyGeneration,
+          published_generation: workingSetGeneration.publishedGeneration,
+          dirty_at: workingSetGeneration.dirtyAt,
+          last_rebalanced_at: workingSetGeneration.lastRebalancedAt,
+          last_published_at: workingSetGeneration.lastPublishedAt,
+          last_error: workingSetGeneration.lastError,
+          publication_next_retry_at: workingSetGeneration.publicationNextRetryAt,
+          publication_failure_count: workingSetGeneration.publicationFailureCount
+        }
+      },
       pipelines: {
         capture: {
           unbatched_event_count: z.number().int().nonnegative().parse(unbatchedCapture?.count),

@@ -13,7 +13,15 @@ import {
   successEnvelope
 } from "../contracts/envelope.js";
 import { initializeMemStore } from "../operations/initialize.js";
+import { formatMemoryReference } from "../memories/reference.js";
+import {
+  inspectMemoryCapacity,
+  loadMemoryCapacityPolicy,
+  previewMemoryWorkingSet,
+  rebalanceMemoryWorkingSet
+} from "../capacity/index.js";
 import { loadConfiguration } from "../configuration/index.js";
+import { loadArchiveRetentionMonths } from "../lifecycle/archive-retention.js";
 import { prepareShadowEmbedding } from "../operations/embedding-install.js";
 import { migrateMemoryCategories } from "../operations/category-migration.js";
 import {
@@ -133,6 +141,7 @@ function parseCommon(arguments_: readonly string[]) {
       vault: { type: "string" },
       runtime: { type: "string" },
       path: { type: "string" },
+      "project-id": { type: "string" },
       scope: { type: "string" },
       startup: { type: "string" },
       text: { type: "string" },
@@ -183,6 +192,7 @@ function parseCommon(arguments_: readonly string[]) {
       target: { type: "string", multiple: true },
       "native-store": { type: "string", multiple: true },
       preview: { type: "boolean", default: false },
+      apply: { type: "boolean", default: false },
       json: { type: "boolean", default: false }
     }
   });
@@ -630,6 +640,7 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       ...location,
       backupRoot: resolve(parsed.values.backup),
       now,
+      archiveRetentionMonths: await loadArchiveRetentionMonths(location),
       limits
     };
     if (action === "preview" || (action === "run" && parsed.values.preview)) {
@@ -1295,6 +1306,68 @@ async function run(arguments_: readonly string[]): Promise<void> {
     const result = await inspectOperation(roots(parsed.values).runtimeRoot, operationId);
     if (parsed.values.json) process.stdout.write(`${JSON.stringify(successEnvelope("operation.status", result))}\n`);
     else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (command === "capacity" && arguments_[1] === "rebalance") {
+    const parsed = parseCommon(arguments_);
+    if (parsed.values.preview === parsed.values.apply) {
+      throw new MemStoreCommandError(
+        "capacity_mode_required",
+        "capacity rebalance requires exactly one of --preview or --apply."
+      );
+    }
+    const location = roots(parsed.values);
+    const policy = await loadMemoryCapacityPolicy(location);
+    const capacity = inspectMemoryCapacity({ runtimeRoot: location.runtimeRoot, policy });
+    const requestedProjectId = parsed.values["project-id"];
+    const scope = requestedProjectId === undefined
+      ? capacity.spaces.find((space) => space.scope.kind === "project")?.scope
+      : { kind: "project" as const, project_id: z.string().min(1).parse(requestedProjectId) };
+    if (scope === undefined || scope.kind !== "project") {
+      throw new MemStoreCommandError(
+        "capacity_space_required",
+        "No Project Memory Space is available; pass --project-id explicitly."
+      );
+    }
+    const request = {
+      ...location,
+      policy,
+      scope: { kind: "project" as const, projectId: scope.project_id },
+      observedAt: new Date().toISOString()
+    };
+    const result = parsed.values.preview
+      ? await previewMemoryWorkingSet(request)
+      : await rebalanceMemoryWorkingSet(request);
+    const { rankedMemoryIds, excludedMemoryIds, ...summary } = result;
+    const capacityDatabase = await openRuntimeDatabase(location.runtimeRoot);
+    let referenceByMemoryId: ReadonlyMap<string, number>;
+    try {
+      referenceByMemoryId = new Map(capacityDatabase.prepare(
+        "SELECT memory_id, memory_ref FROM memory_catalog WHERE memory_ref IS NOT NULL"
+      ).all().flatMap((row) =>
+        typeof row.memory_id === "string" && typeof row.memory_ref === "number"
+          ? [[row.memory_id, row.memory_ref] as const]
+          : []
+      ));
+    } finally {
+      capacityDatabase.close();
+    }
+    const visibleResult = {
+      ...summary,
+      rankedMemoryRefs: rankedMemoryIds.flatMap((memoryId) => {
+        const memoryRef = referenceByMemoryId.get(memoryId);
+        return memoryRef === undefined ? [] : [formatMemoryReference(memoryRef)];
+      }),
+      excludedMemoryRefs: excludedMemoryIds.flatMap((memoryId) => {
+        const memoryRef = referenceByMemoryId.get(memoryId);
+        return memoryRef === undefined ? [] : [formatMemoryReference(memoryRef)];
+      })
+    };
+    if (parsed.values.json) {
+      process.stdout.write(`${JSON.stringify(successEnvelope("capacity.rebalance", visibleResult))}\n`);
+    } else {
+      process.stdout.write(`${JSON.stringify(visibleResult, null, 2)}\n`);
+    }
     return;
   }
   if (command === "status") {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { copyFile, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { performance } from "node:perf_hooks";
 import { Temporal } from "@js-temporal/polyfill";
@@ -8,9 +8,16 @@ import { z } from "zod";
 
 import { openRuntimeDatabase } from "../runtime/database.js";
 import {
+  archiveLifecycleDetails,
+  archivePurgeAfter,
+  DEFAULT_ARCHIVE_RETENTION_MONTHS,
+  loadArchiveRetentionMonths
+} from "../lifecycle/archive-retention.js";
+import {
   inspectStandaloneCanonicalFile,
   purgeArchivedCanonicalBody,
   readCanonicalMemory,
+  writeCanonicalMemory,
   type CanonicalMemory,
   type CanonicalPurgeCheckpoint
 } from "../vault/index.js";
@@ -40,6 +47,7 @@ export interface ArchivePurgeRequest {
     checkpoint: CanonicalPurgeCheckpoint,
     memoryId: string
   ) => Promise<void>;
+  readonly prepareManagedBackup?: boolean;
 }
 
 export interface ArchivePurgePreviewItem {
@@ -51,6 +59,14 @@ export interface ArchivePurgePreviewItem {
   readonly backupPath: string;
   readonly backupSha256: string;
   readonly removableBytes: number;
+}
+
+export interface ScheduledArchiveRetentionResult {
+  readonly state: "not_due" | "completed" | "yielded" | "failed";
+  readonly deadlineCount: number;
+  readonly purgedMemoryIds: readonly string[];
+  readonly nextCheckAt?: string;
+  readonly errorCode?: string;
 }
 
 interface NormalizedLimits {
@@ -92,14 +108,6 @@ function validateRoots(vaultRoot: string, runtimeRoot: string, backupRoot: strin
   }
 }
 
-function addCalendarMonths(instant: string, months: number): string {
-  return Temporal.Instant.from(instant)
-    .toZonedDateTimeISO("UTC")
-    .add({ months })
-    .toInstant()
-    .toString({ smallestUnit: "millisecond" });
-}
-
 async function hasForegroundPressure(request: ArchivePurgeRequest): Promise<boolean> {
   if (await request.foregroundPressure?.() === true) return true;
   const database = new DatabaseSync(
@@ -135,13 +143,10 @@ function resolvePurgeAfter(
   if (memory.lifecycleDetails.pinned === true) {
     return { state: "protected", reason: "pinned" };
   }
-  if (memory.authority === "human_authored") {
-    return { state: "protected", reason: "human_default_no_automatic_purge" };
-  }
   const archivedAt = z.iso.datetime().parse(memory.lifecycleDetails.archivedAt);
   return {
     state: "eligible",
-    purgeAfter: addCalendarMonths(archivedAt, archiveRetentionMonths)
+    purgeAfter: archivePurgeAfter(archivedAt, archiveRetentionMonths)
   };
 }
 
@@ -186,6 +191,155 @@ async function verifyBackup(request: {
   };
 }
 
+async function stageBackup(request: {
+  readonly vaultRoot: string;
+  readonly backupRoot: string;
+  readonly paths: readonly string[];
+}): Promise<void> {
+  for (const sourcePath of request.paths) {
+    const relativePath = relative(request.vaultRoot, sourcePath);
+    if (relativePath.startsWith("..") || relativePath.length === 0) {
+      throw new Error("Purge staging source is outside the Vault root.");
+    }
+    const targetPath = resolve(request.backupRoot, relativePath);
+    if (!isWithin(request.backupRoot, targetPath)) {
+      throw new Error("Purge staging target escaped the managed root.");
+    }
+    await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
+    await copyFile(sourcePath, targetPath);
+  }
+}
+
+function openProtectionReason(
+  database: DatabaseSync,
+  memoryId: string
+): string | undefined {
+  if (database.prepare(
+    `SELECT 1 FROM governance_review_suggestions
+     WHERE target_memory_id = ? AND state = 'open' LIMIT 1`
+  ).get(memoryId) !== undefined) return "open_review";
+  if (database.prepare(
+    `SELECT 1 FROM verification_requests AS verification
+     JOIN memory_candidates AS candidate ON candidate.candidate_id = verification.candidate_id
+     WHERE candidate.promoted_memory_id = ? AND verification.state = 'open' LIMIT 1`
+  ).get(memoryId) !== undefined) return "open_verification";
+  if (database.prepare(
+    `SELECT 1 FROM human_memory_conflicts
+     WHERE state = 'open' AND (
+       proposed_memory_id = ? OR
+       EXISTS(SELECT 1 FROM json_each(conflicting_memory_ids_json) WHERE value = ?)
+     ) LIMIT 1`
+  ).get(memoryId, memoryId) !== undefined) return "open_conflict";
+  return undefined;
+}
+
+function currentOpenProtectionReason(runtimeRoot: string, memoryId: string): string | undefined {
+  const database = new DatabaseSync(
+    join(resolve(runtimeRoot), "state", "memstore.sqlite"),
+    { readOnly: true }
+  );
+  try {
+    return openProtectionReason(database, memoryId);
+  } finally {
+    database.close();
+  }
+}
+
+function reboundRepresentations(memory: CanonicalMemory, revisionId: string) {
+  return {
+    ...(memory.representations.identity === undefined ? {} : {
+      identity: { ...memory.representations.identity, sourceRevisionId: revisionId }
+    }),
+    compact: { ...memory.representations.compact, sourceRevisionId: revisionId },
+    standard: { ...memory.representations.standard, sourceRevisionId: revisionId }
+  };
+}
+
+export async function materializeArchivedPurgeDeadlines(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly materializedAt: string;
+  readonly archiveRetentionMonths: number;
+  readonly limit?: number;
+}): Promise<{
+  readonly changedCount: number;
+  readonly memoryIds: readonly string[];
+  readonly hasMore: boolean;
+}> {
+  const materializedAt = z.iso.datetime().parse(request.materializedAt);
+  const limit = z.number().int().min(1).max(200).parse(request.limit ?? 50);
+  const database = new DatabaseSync(
+    join(resolve(request.runtimeRoot), "state", "memstore.sqlite"),
+    { readOnly: true }
+  );
+  let rows: readonly Record<string, unknown>[];
+  try {
+    rows = database.prepare(
+      `SELECT memory_id FROM memory_catalog
+       WHERE lifecycle = 'archived' ORDER BY revised_at, memory_id`
+    ).all();
+  } finally {
+    database.close();
+  }
+  const eligible: { readonly memory: CanonicalMemory; readonly contentIdentity: string }[] = [];
+  for (const row of rows) {
+    const current = await readCanonicalMemory({
+      runtimeRoot: request.runtimeRoot,
+      vaultRoot: request.vaultRoot,
+      memoryId: z.string().parse(row.memory_id)
+    });
+    if (
+      current === undefined ||
+      current.memory.lifecycle !== "archived" ||
+      current.memory.lifecycleDetails.purgeAfter !== undefined ||
+      current.memory.lifecycleDetails.retainForever === true ||
+      current.memory.lifecycleDetails.pinned === true
+    ) continue;
+    eligible.push({ memory: current.memory, contentIdentity: current.contentIdentity });
+  }
+  const selected = eligible.slice(0, limit);
+  for (const current of selected) {
+    const revisionId = `msrev_${randomUUID()}`;
+    const archivedAt = z.iso.datetime().parse(current.memory.lifecycleDetails.archivedAt);
+    const reason = z.string().min(1).parse(current.memory.lifecycleDetails.reason);
+    await writeCanonicalMemory({
+      runtimeRoot: request.runtimeRoot,
+      vaultRoot: request.vaultRoot,
+      actor: current.memory.authority === "human_authored" ? "human" : "agent",
+      expectedContentIdentity: current.contentIdentity,
+      memory: {
+        ...current.memory,
+        revisionId,
+        predecessorRevisionId: current.memory.revisionId,
+        revisedAt: materializedAt,
+        lifecycleDetails: archiveLifecycleDetails({
+          previous: current.memory.lifecycleDetails,
+          archivedAt,
+          reason,
+          archiveRetentionMonths: request.archiveRetentionMonths
+        }),
+        representations: reboundRepresentations(current.memory, revisionId),
+        provenance: current.memory.provenance.includes("retention:deadline-backfill-v1")
+          ? current.memory.provenance
+          : [...current.memory.provenance, "retention:deadline-backfill-v1"]
+      }
+    });
+  }
+  return {
+    changedCount: selected.length,
+    memoryIds: selected.map((item) => item.memory.memoryId),
+    hasMore: eligible.length > selected.length
+  };
+}
+
+export function managedArchivePurgeBackupRoot(runtimeRoot: string): string {
+  const normalizedRuntimeRoot = resolve(runtimeRoot);
+  return resolve(
+    dirname(normalizedRuntimeRoot),
+    `${basename(normalizedRuntimeRoot)}-Purge-Staging`
+  );
+}
+
 async function collectPreview(request: ArchivePurgeRequest): Promise<{
   readonly items: readonly PreviewCandidate[];
   readonly protectedItems: readonly { memoryId: string; reason: string }[];
@@ -198,26 +352,22 @@ async function collectPreview(request: ArchivePurgeRequest): Promise<{
   validateRoots(vaultRoot, runtimeRoot, backupRoot);
   const now = Temporal.Instant.from(z.iso.datetime().parse(request.now));
   const archiveRetentionMonths = z.number().int().positive().parse(
-    request.archiveRetentionMonths ?? 6
+    request.archiveRetentionMonths ?? DEFAULT_ARCHIVE_RETENTION_MONTHS
   );
   const limits = normalizeLimits(request.limits);
   const databasePath = join(runtimeRoot, "state", "memstore.sqlite");
   const database = new DatabaseSync(databasePath, { readOnly: true });
-  let rows: readonly Record<string, unknown>[];
-  try {
-    rows = database.prepare(
+  const rows = database.prepare(
       `SELECT memory_id, current_revision_id, canonical_path, content_identity
        FROM memory_catalog WHERE lifecycle = 'archived'
        ORDER BY revised_at, memory_id`
     ).all();
-  } finally {
-    database.close();
-  }
   const items: PreviewCandidate[] = [];
   const protectedItems: { memoryId: string; reason: string }[] = [];
   let selectedBytes = 0;
   let hasMore = false;
-  for (const row of rows) {
+  try {
+    for (const row of rows) {
     const memoryId = z.string().parse(row.memory_id);
     const canonicalPath = resolve(z.string().parse(row.canonical_path));
     if (!isWithin(join(vaultRoot, "Memories"), canonicalPath)) {
@@ -239,17 +389,16 @@ async function collectPreview(request: ArchivePurgeRequest): Promise<{
       protectedItems.push({ memoryId, reason: retention.reason });
       continue;
     }
+    const openProtection = openProtectionReason(database, memoryId);
+    if (openProtection !== undefined) {
+      protectedItems.push({ memoryId, reason: openProtection });
+      continue;
+    }
     if (Temporal.Instant.compare(Temporal.Instant.from(retention.purgeAfter), now) > 0) continue;
-    const revisionDatabase = new DatabaseSync(databasePath, { readOnly: true });
-    let revisionPaths: string[];
-    try {
-      revisionPaths = revisionDatabase.prepare(
+    const revisionPaths = database.prepare(
         `SELECT revision_path FROM memory_revisions
          WHERE memory_id = ? ORDER BY created_at, revision_id`
       ).all(memoryId).map((revision) => resolve(z.string().parse(revision.revision_path)));
-    } finally {
-      revisionDatabase.close();
-    }
     for (const revisionPath of revisionPaths) {
       if (!isWithin(join(vaultRoot, "_MemStore", "Revisions", memoryId), revisionPath)) {
         throw new Error("Purge revision path is outside its derived Vault directory.");
@@ -260,6 +409,17 @@ async function collectPreview(request: ArchivePurgeRequest): Promise<{
         (total, metadata) => total + metadata.size,
         0
       );
+    if (items.length >= limits.bodies || selectedBytes + removableBytes > limits.bytes) {
+      hasMore = true;
+      continue;
+    }
+    if (request.prepareManagedBackup === true) {
+      await stageBackup({
+        vaultRoot,
+        backupRoot,
+        paths: [canonicalPath, ...revisionPaths]
+      });
+    }
     const backup = await verifyBackup({
       vaultRoot,
       backupRoot,
@@ -267,10 +427,6 @@ async function collectPreview(request: ArchivePurgeRequest): Promise<{
       expectedContentIdentity,
       revisionPaths
     });
-    if (items.length >= limits.bodies || selectedBytes + removableBytes > limits.bytes) {
-      hasMore = true;
-      continue;
-    }
     selectedBytes += removableBytes;
     items.push({
       memoryId,
@@ -283,6 +439,9 @@ async function collectPreview(request: ArchivePurgeRequest): Promise<{
       backupSha256: backup.backupSha256,
       removableBytes
     });
+    }
+  } finally {
+    database.close();
   }
   return { items, protectedItems, hasMore, limits };
 }
@@ -430,6 +589,21 @@ async function resumeInterruptedPurge(request: ArchivePurgeRequest): Promise<{
           skipDatabase.close();
         }
         skipped.push({ memoryId, reason: "restored" });
+        continue;
+      }
+      const openProtection = currentOpenProtectionReason(request.runtimeRoot, memoryId);
+      if (openProtection !== undefined) {
+        const skipDatabase = await openRuntimeDatabase(request.runtimeRoot);
+        try {
+          skipDatabase.prepare(
+            `UPDATE archive_purge_items
+             SET state = 'skipped', skip_reason = ?, updated_at = ?
+             WHERE item_id = ?`
+          ).run(openProtection, request.now, itemId);
+        } finally {
+          skipDatabase.close();
+        }
+        skipped.push({ memoryId, reason: openProtection });
         continue;
       }
       const resumable = current !== undefined && (
@@ -646,6 +820,21 @@ export async function runArchivePurgeBatch(request: ArchivePurgeRequest): Promis
         throw new Error("Purge backup changed after preview; refusing deletion.");
       }
       const itemId = z.string().parse(itemIds.get(item.memoryId));
+      const openProtection = currentOpenProtectionReason(request.runtimeRoot, item.memoryId);
+      if (openProtection !== undefined) {
+        const skipDatabase = await openRuntimeDatabase(request.runtimeRoot);
+        try {
+          skipDatabase.prepare(
+            `UPDATE archive_purge_items
+             SET state = 'skipped', skip_reason = ?, updated_at = ?
+             WHERE item_id = ?`
+          ).run(openProtection, request.now, itemId);
+        } finally {
+          skipDatabase.close();
+        }
+        skipped.push({ memoryId: item.memoryId, reason: openProtection });
+        continue;
+      }
       await purgeArchivedCanonicalBody({
         vaultRoot: request.vaultRoot,
         runtimeRoot: request.runtimeRoot,
@@ -722,5 +911,104 @@ export async function runArchivePurgeBatch(request: ArchivePurgeRequest): Promis
       failedDatabase.close();
     }
     throw error;
+  }
+}
+
+export async function runScheduledArchiveRetention(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly now: string;
+  readonly foregroundPressure?: () => Promise<boolean>;
+}): Promise<ScheduledArchiveRetentionResult> {
+  const now = z.iso.datetime().parse(request.now);
+  const stateDatabase = new DatabaseSync(
+    join(resolve(request.runtimeRoot), "state", "memstore.sqlite"),
+    { readOnly: true }
+  );
+  let maintenance: Record<string, unknown> | undefined;
+  try {
+    maintenance = stateDatabase.prepare(
+      `SELECT next_check_at, consecutive_failure_count
+       FROM archive_retention_maintenance WHERE singleton = 1`
+    ).get();
+  } finally {
+    stateDatabase.close();
+  }
+  const nextCheckAt = typeof maintenance?.next_check_at === "string"
+    ? maintenance.next_check_at
+    : undefined;
+  if (
+    nextCheckAt !== undefined &&
+    Temporal.Instant.compare(Temporal.Instant.from(now), Temporal.Instant.from(nextCheckAt)) < 0
+  ) {
+    return { state: "not_due", deadlineCount: 0, purgedMemoryIds: [], nextCheckAt };
+  }
+
+  try {
+    const archiveRetentionMonths = await loadArchiveRetentionMonths(request);
+    const deadlines = await materializeArchivedPurgeDeadlines({
+      ...request,
+      materializedAt: now,
+      archiveRetentionMonths
+    });
+    const backupRoot = managedArchivePurgeBackupRoot(request.runtimeRoot);
+    const purge = await runArchivePurgeBatch({
+      ...request,
+      backupRoot,
+      now,
+      archiveRetentionMonths,
+      prepareManagedBackup: true
+    });
+    const pendingWork = deadlines.hasMore || purge.hasMore || purge.state === "yielded";
+    const scheduledAt = purge.nextEligibleAt ?? Temporal.Instant.from(now)
+      .add(pendingWork ? { seconds: 30 } : { hours: 6 })
+      .toString();
+    const completedDatabase = await openRuntimeDatabase(request.runtimeRoot);
+    try {
+      completedDatabase.prepare(
+        `UPDATE archive_retention_maintenance
+         SET next_check_at = ?, last_checked_at = ?, last_completed_at = ?,
+             last_error_code = NULL, consecutive_failure_count = 0,
+             backfill_completed_at = CASE WHEN ? = 0 THEN COALESCE(backfill_completed_at, ?) ELSE NULL END
+         WHERE singleton = 1`
+      ).run(scheduledAt, now, now, deadlines.hasMore ? 1 : 0, now);
+    } finally {
+      completedDatabase.close();
+    }
+    if (purge.state === "completed" && !pendingWork) {
+      await rm(backupRoot, { recursive: true, force: true });
+    }
+    return {
+      state: purge.state,
+      deadlineCount: deadlines.changedCount,
+      purgedMemoryIds: purge.purgedMemoryIds,
+      nextCheckAt: scheduledAt
+    };
+  } catch (error) {
+    const errorCode = error instanceof Error ? error.name : "unknown_error";
+    const previousFailures = z.number().int().nonnegative().parse(
+      maintenance?.consecutive_failure_count ?? 0
+    );
+    const failureCount = previousFailures + 1;
+    const retryMinutes = Math.min(360, 5 * (2 ** Math.min(failureCount - 1, 7)));
+    const retryAt = Temporal.Instant.from(now).add({ minutes: retryMinutes }).toString();
+    const failedDatabase = await openRuntimeDatabase(request.runtimeRoot);
+    try {
+      failedDatabase.prepare(
+        `UPDATE archive_retention_maintenance
+         SET next_check_at = ?, last_checked_at = ?, last_error_code = ?,
+             consecutive_failure_count = ?
+         WHERE singleton = 1`
+      ).run(retryAt, now, errorCode, failureCount);
+    } finally {
+      failedDatabase.close();
+    }
+    return {
+      state: "failed",
+      deadlineCount: 0,
+      purgedMemoryIds: [],
+      nextCheckAt: retryAt,
+      errorCode
+    };
   }
 }
