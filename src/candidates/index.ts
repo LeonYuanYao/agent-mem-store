@@ -4,6 +4,11 @@ import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { z } from "zod";
 
+import {
+  capacityLimitsForScope,
+  loadMemoryCapacityPolicy,
+  reconcileMemoryCapacity
+} from "../capacity/index.js";
 import { readCapturedEvent } from "../capture/index.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import type { ImportanceReason, ImportanceTag } from "../luna/index.js";
@@ -1293,10 +1298,41 @@ export async function evaluateCandidate(request: {
     );
   }
 
+  const capacityPolicy = await loadMemoryCapacityPolicy({
+    runtimeRoot: request.runtimeRoot,
+    vaultRoot: request.vaultRoot
+  });
+  const capacityLimits = capacityLimitsForScope(capacityPolicy, scope);
   const reservationDatabase = await openRuntimeDatabase(request.runtimeRoot);
   let memoryId: string;
   let revisionId: string;
+  let capacityBlocked = false;
   try {
+    reservationDatabase.exec("BEGIN IMMEDIATE");
+    const activeCountRow = reservationDatabase.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM memory_catalog
+          WHERE lifecycle = 'active' AND authority = 'agent_derived'
+            AND scope_kind = ? AND (? = 'global' OR project_id = ?))
+         +
+         (SELECT COUNT(*) FROM memory_candidates
+          WHERE state = 'waiting' AND promotion_generation IS NOT NULL
+            AND scope_kind = ? AND (? = 'global' OR project_id = ?)) AS count`
+    ).get(
+      scope.kind,
+      scope.kind,
+      scope.kind === "project" ? scope.projectId : null,
+      scope.kind,
+      scope.kind,
+      scope.kind === "project" ? scope.projectId : null
+    );
+    const activeCount = z.number().int().nonnegative().parse(activeCountRow?.count);
+    if (activeCount >= capacityLimits.hardLimit) {
+      capacityBlocked = true;
+      reservationDatabase.exec("COMMIT");
+      memoryId = "";
+      revisionId = "";
+    } else {
     const reserved = reservationDatabase.prepare(
       `UPDATE memory_candidates
        SET promoted_memory_id = COALESCE(promoted_memory_id, ?),
@@ -1324,8 +1360,27 @@ export async function evaluateCandidate(request: {
     ).get(request.candidateId);
     memoryId = z.string().parse(reservation?.promoted_memory_id);
     revisionId = z.string().parse(reservation?.promotion_revision_id);
+      reservationDatabase.exec("COMMIT");
+    }
+  } catch (error) {
+    reservationDatabase.exec("ROLLBACK");
+    throw error;
   } finally {
     reservationDatabase.close();
+  }
+  if (capacityBlocked) {
+    await reconcileMemoryCapacity({
+      runtimeRoot: request.runtimeRoot,
+      policy: capacityPolicy,
+      observedAt: evaluatedAt
+    });
+    return commitNonPromotion(
+      request.runtimeRoot,
+      request.candidateId,
+      "wait",
+      "memory_space_capacity_hard_limit",
+      evaluatedAt
+    );
   }
   await request.onPromotionReserved?.();
   const memory = canonicalFromCandidate({
@@ -1394,6 +1449,11 @@ export async function evaluateCandidate(request: {
   } finally {
     update.close();
   }
+  await reconcileMemoryCapacity({
+    runtimeRoot: request.runtimeRoot,
+    policy: capacityPolicy,
+    observedAt: evaluatedAt
+  });
   return { state: "promoted", candidateId: request.candidateId, memoryId };
 }
 

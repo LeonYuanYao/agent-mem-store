@@ -66,6 +66,69 @@ export interface IndexedMemory {
   readonly vectorOrdinal: number;
 }
 
+export interface RetrievalSearchDocument {
+  readonly memoryId: string;
+  readonly memoryRef: number;
+  readonly normalizedSearchableText: string;
+  readonly normalizedApplicabilityText: string;
+  readonly searchableTerms: ReadonlySet<string>;
+  readonly applicabilityTerms: ReadonlySet<string>;
+}
+
+export interface RetrievalSearchIndex {
+  readonly documentsByMemoryId: ReadonlyMap<string, RetrievalSearchDocument>;
+  readonly memoryIdByRef: ReadonlyMap<number, string>;
+  readonly postingsByTerm: ReadonlyMap<string, readonly string[]>;
+}
+
+function normalizeSearchText(text: string): string {
+  return text.normalize("NFKC").toLocaleLowerCase("en-US");
+}
+
+function tokenizeSearchText(text: string): ReadonlySet<string> {
+  return new Set(
+    normalizeSearchText(text).match(/[\p{L}\p{N}_./:-]+/gu)?.filter((term) => term.length > 1) ?? []
+  );
+}
+
+export function buildRetrievalSearchIndex(
+  documents: readonly IndexedMemory[]
+): RetrievalSearchIndex {
+  const documentsByMemoryId = new Map<string, RetrievalSearchDocument>();
+  const memoryIdByRef = new Map<number, string>();
+  const mutablePostings = new Map<string, string[]>();
+  for (const document of documents) {
+    const normalizedSearchableText = normalizeSearchText(document.searchableText);
+    const normalizedApplicabilityText = normalizeSearchText([
+      document.applicabilitySummary,
+      ...document.applicabilityConditions
+    ].join("\n"));
+    const searchableTerms = tokenizeSearchText(normalizedSearchableText);
+    const applicabilityTerms = tokenizeSearchText(normalizedApplicabilityText);
+    documentsByMemoryId.set(document.memoryId, {
+      memoryId: document.memoryId,
+      memoryRef: document.memoryRef,
+      normalizedSearchableText,
+      normalizedApplicabilityText,
+      searchableTerms,
+      applicabilityTerms
+    });
+    memoryIdByRef.set(document.memoryRef, document.memoryId);
+    for (const term of searchableTerms) {
+      const postings = mutablePostings.get(term) ?? [];
+      postings.push(document.memoryId);
+      mutablePostings.set(term, postings);
+    }
+  }
+  return {
+    documentsByMemoryId,
+    memoryIdByRef,
+    postingsByTerm: new Map(
+      [...mutablePostings.entries()].map(([term, memoryIds]) => [term, memoryIds] as const)
+    )
+  };
+}
+
 const indexedMemorySnapshotSchema = z.object({
   indexRevisionId: z.string().min(1),
   memoryId: z.string().min(1),
@@ -164,7 +227,9 @@ const snapshotSchema = z.object({
   }))
 });
 
-export type RetrievalSnapshot = z.infer<typeof snapshotSchema>;
+export type RetrievalSnapshot = z.infer<typeof snapshotSchema> & {
+  readonly searchIndex: RetrievalSearchIndex;
+};
 
 export function validateRetrievalSnapshot(snapshot: unknown): RetrievalSnapshot {
   const parsed = snapshotSchema.parse(snapshot);
@@ -181,7 +246,14 @@ export function validateRetrievalSnapshot(snapshot: unknown): RetrievalSnapshot 
   )) {
     throw new Error("Retrieval Snapshot session bucket contains an invalid ordinal.");
   }
-  return parsed;
+  const validated = { ...parsed } as RetrievalSnapshot;
+  Object.defineProperty(validated, "searchIndex", {
+    value: buildRetrievalSearchIndex(parsed.documents),
+    enumerable: false,
+    writable: false,
+    configurable: false
+  });
+  return validated;
 }
 
 export async function loadRetrievalSnapshot(request: {

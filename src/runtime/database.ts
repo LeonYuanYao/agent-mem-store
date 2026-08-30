@@ -287,6 +287,19 @@ const migrations: readonly Migration[] = [
     version: 54,
     name: "context_memory_legend",
     path: new URL("../../migrations/0054-context-memory-legend.sql", import.meta.url)
+  },
+  {
+    version: 55,
+    name: "memory_space_capacity",
+    path: new URL("../../migrations/0055-memory-space-capacity.sql", import.meta.url)
+  },
+  {
+    version: 56,
+    name: "capacity_governance_selection_indexes",
+    path: new URL(
+      "../../migrations/0056-capacity-governance-selection-indexes.sql",
+      import.meta.url
+    )
   }
 ];
 

@@ -102,7 +102,13 @@ test("initialization creates separate portable and machine configuration", async
       candidateTombstoneDays: 180,
       governanceTimezone: "Asia/Shanghai",
       weeklyGovernance: "MONDAY 19:00",
-      monthlyGovernance: "FIRST_MONDAY 19:00"
+      monthlyGovernance: "FIRST_MONDAY 19:00",
+      memoryCapacity: {
+        project: { target: 2_500, hardLimit: 3_500, lowWater: 2_200 },
+        global: { target: 300, hardLimit: 500, lowWater: 270 },
+        coldDays: 180,
+        governanceBatchSize: 50
+      }
     },
     machine: { vaultRoot, runtimeRoot }
   });
@@ -129,6 +135,7 @@ test("initialization creates separate portable and machine configuration", async
   for (const section of [
     "lifecycle",
     "promotion",
+    "capacity",
     "injection",
     "review",
     "anomalies",

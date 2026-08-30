@@ -11,7 +11,20 @@ export const governanceAgentActionSchema = z.discriminatedUnion("kind", [
     evidenceRefs: evidenceRefsSchema
   }),
   z.object({
+    kind: z.literal("archive_for_capacity"),
+    targetMemoryId: z.string().min(1),
+    reason: z.string().min(1).max(1024),
+    evidenceRefs: evidenceRefsSchema
+  }),
+  z.object({
     kind: z.literal("supersede"),
+    targetMemoryId: z.string().min(1),
+    successorMemoryId: z.string().min(1),
+    reason: z.string().min(1).max(1024),
+    evidenceRefs: evidenceRefsSchema
+  }),
+  z.object({
+    kind: z.literal("supersede_for_capacity"),
     targetMemoryId: z.string().min(1),
     successorMemoryId: z.string().min(1),
     reason: z.string().min(1).max(1024),
@@ -79,9 +92,28 @@ export const governanceOutputJsonSchema = {
           },
           {
             type: "object", additionalProperties: false,
+            required: ["kind", "targetMemoryId", "reason", "evidenceRefs"],
+            properties: {
+              kind: { type: "string", const: "archive_for_capacity" }, targetMemoryId: { type: "string", minLength: 1 },
+              reason: { type: "string", minLength: 1, maxLength: 1024 },
+              evidenceRefs: { type: "array", minItems: 1, maxItems: 16, items: { type: "string", minLength: 1, maxLength: 512 } }
+            }
+          },
+          {
+            type: "object", additionalProperties: false,
             required: ["kind", "targetMemoryId", "successorMemoryId", "reason", "evidenceRefs"],
             properties: {
               kind: { type: "string", const: "supersede" }, targetMemoryId: { type: "string", minLength: 1 },
+              successorMemoryId: { type: "string", minLength: 1 },
+              reason: { type: "string", minLength: 1, maxLength: 1024 },
+              evidenceRefs: { type: "array", minItems: 1, maxItems: 16, items: { type: "string", minLength: 1, maxLength: 512 } }
+            }
+          },
+          {
+            type: "object", additionalProperties: false,
+            required: ["kind", "targetMemoryId", "successorMemoryId", "reason", "evidenceRefs"],
+            properties: {
+              kind: { type: "string", const: "supersede_for_capacity" }, targetMemoryId: { type: "string", minLength: 1 },
               successorMemoryId: { type: "string", minLength: 1 },
               reason: { type: "string", minLength: 1, maxLength: 1024 },
               evidenceRefs: { type: "array", minItems: 1, maxItems: 16, items: { type: "string", minLength: 1, maxLength: 512 } }
@@ -153,6 +185,25 @@ export interface GovernanceMemoryInput {
   readonly provenance: readonly string[];
   readonly body: string;
   readonly revisedAt: string;
+  readonly capacity?: {
+    readonly eligible: boolean;
+    readonly coldSince: string;
+    readonly selectedCount: number;
+    readonly irrelevantCount: number;
+    readonly protectionReasons: readonly string[];
+    readonly redundantByMemoryId?: string;
+  };
+}
+
+export interface GovernanceCapacityPressure {
+  readonly scope:
+    | { readonly kind: "project"; readonly projectId: string }
+    | { readonly kind: "global" };
+  readonly activeCount: number;
+  readonly target: number;
+  readonly hardLimit: number;
+  readonly lowWater: number;
+  readonly requiredReduction: number;
 }
 
 export interface GovernanceAuditSignals {
@@ -184,6 +235,7 @@ export interface GovernancePageRequest {
   readonly coverage: { readonly from: string; readonly through: string };
   readonly pageOrdinal: number;
   readonly memories: readonly GovernanceMemoryInput[];
+  readonly capacityPressures?: readonly GovernanceCapacityPressure[];
   readonly auditSignals?: GovernanceAuditSignals;
 }
 

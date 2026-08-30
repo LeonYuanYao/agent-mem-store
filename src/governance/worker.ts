@@ -18,6 +18,7 @@ import {
   type GovernanceAgentAction,
   type GovernanceAdapter,
   type GovernanceAuditSignals,
+  type GovernanceCapacityPressure,
   type GovernanceMemoryInput,
   type GovernancePageRequest,
   type GovernancePageReview
@@ -49,6 +50,7 @@ interface RunRow {
   readonly currentPhase: "weekly" | "monthly" | "finalize";
   readonly attemptCount: number;
   readonly consecutiveFailureCount: number;
+  readonly capacityTriggered: boolean;
 }
 
 function parseRun(row: Record<string, unknown>): RunRow {
@@ -62,8 +64,220 @@ function parseRun(row: Record<string, unknown>): RunRow {
     coverageThrough: z.iso.datetime().parse(row.coverage_through),
     currentPhase: z.enum(["weekly", "monthly", "finalize"]).parse(row.current_phase),
     attemptCount: z.number().int().nonnegative().parse(row.attempt_count),
-    consecutiveFailureCount: z.number().int().nonnegative().parse(row.consecutive_failure_count)
+    consecutiveFailureCount: z.number().int().nonnegative().parse(row.consecutive_failure_count),
+    capacityTriggered: row.capacity_triggered === 1
   };
+}
+
+interface CapacityRunPressure extends GovernanceCapacityPressure {
+  readonly coldDays: number;
+}
+
+function pressureMatchesMemory(
+  pressure: CapacityRunPressure,
+  memory: CanonicalMemory
+): boolean {
+  return pressure.scope.kind === memory.scope.kind && (
+    pressure.scope.kind === "global" ||
+    (memory.scope.kind === "project" && pressure.scope.projectId === memory.scope.projectId)
+  );
+}
+
+async function loadCapacityPressures(
+  runtimeRoot: string,
+  runId: string
+): Promise<readonly CapacityRunPressure[]> {
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    return database.prepare(
+      `SELECT scope_kind, project_id, active_count, target_count,
+              hard_limit, low_water, cold_days
+       FROM memory_capacity_obligations
+       WHERE run_id = ? AND state = 'linked'
+       ORDER BY active_count DESC, space_key`
+    ).all(runId).map((row): CapacityRunPressure => ({
+      scope: row.scope_kind === "global"
+        ? { kind: "global" }
+        : { kind: "project", projectId: z.string().parse(row.project_id) },
+      activeCount: z.number().int().nonnegative().parse(row.active_count),
+      target: z.number().int().positive().parse(row.target_count),
+      hardLimit: z.number().int().positive().parse(row.hard_limit),
+      lowWater: z.number().int().nonnegative().parse(row.low_water),
+      requiredReduction: Math.max(
+        0,
+        z.number().int().nonnegative().parse(row.active_count) -
+          z.number().int().nonnegative().parse(row.low_water)
+      ),
+      coldDays: z.number().int().positive().parse(row.cold_days)
+    }));
+  } finally {
+    database.close();
+  }
+}
+
+const capacityProtectedImportanceTags = new Set([
+  "user_decision",
+  "stable_preference",
+  "constraint",
+  "exception",
+  "architecture_invariant",
+  "api_contract",
+  "security_boundary",
+  "data_loss_risk",
+  "irreversible_operation",
+  "failure_root_cause",
+  "effective_repair",
+  "recovery_procedure",
+  "recurrence_hazard",
+  "expensive_rediscovery",
+  "limitation",
+  "negation",
+  "applicability_correction"
+]);
+
+const capacitySupersessionSafeProtections = new Set([
+  "protected_importance",
+  "high_value",
+  "multiple_evidence_sources"
+]);
+
+function capacitySupersessionEligible(
+  signal: NonNullable<GovernanceMemoryInput["capacity"]>
+): boolean {
+  return signal.redundantByMemoryId !== undefined &&
+    signal.protectionReasons.every((reason) => capacitySupersessionSafeProtections.has(reason));
+}
+
+async function capacitySignal(request: {
+  readonly runtimeRoot: string;
+  readonly memory: CanonicalMemory;
+  readonly pressure: CapacityRunPressure;
+  readonly through: string;
+}): Promise<NonNullable<GovernanceMemoryInput["capacity"]>> {
+  const coldSince = new Date(
+    Date.parse(request.through) - request.pressure.coldDays * 24 * 60 * 60 * 1_000
+  ).toISOString();
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    const selected = database.prepare(
+      `SELECT COUNT(*) AS count FROM retrieval_receipt_items AS item
+       JOIN retrieval_receipts AS receipt ON receipt.receipt_id = item.receipt_id
+       WHERE item.memory_id = ? AND item.outcome = 'selected' AND receipt.created_at > ?`
+    ).get(request.memory.memoryId, coldSince);
+    const irrelevant = database.prepare(
+      "SELECT COUNT(*) AS count FROM irrelevant_observations WHERE memory_id = ? AND observed_at > ?"
+    ).get(request.memory.memoryId, coldSince);
+    const relationship = database.prepare(
+      `SELECT COUNT(*) AS count FROM memory_relationships
+       WHERE source_memory_id = ? OR target_memory_id = ?`
+    ).get(request.memory.memoryId, request.memory.memoryId);
+    const candidate = database.prepare(
+      `SELECT candidate.high_value, candidate.pinned,
+              (SELECT COUNT(*) FROM candidate_evidence AS evidence
+               WHERE evidence.candidate_id = candidate.candidate_id) AS evidence_count,
+              EXISTS(
+                SELECT 1 FROM verification_requests AS verification
+                WHERE verification.candidate_id = candidate.candidate_id
+                  AND verification.state = 'open'
+              ) AS verification_open
+       FROM memory_candidates AS candidate
+       WHERE candidate.promoted_memory_id = ?
+       ORDER BY candidate.updated_at DESC LIMIT 1`
+    ).get(request.memory.memoryId);
+    const reviewOpen = database.prepare(
+      `SELECT 1 FROM governance_review_suggestions
+       WHERE target_memory_id = ? AND state = 'open' LIMIT 1`
+    ).get(request.memory.memoryId) !== undefined;
+    const redundantRows = database.prepare(
+      `SELECT successor_id FROM (
+         SELECT right_memory_id AS successor_id, right_revision_id AS successor_revision_id,
+                similarity
+         FROM memory_duplicate_clusters
+         WHERE state = 'completed' AND decision = 'right_subsumes_left'
+           AND left_memory_id = ? AND left_revision_id = ?
+         UNION ALL
+         SELECT left_memory_id AS successor_id, left_revision_id AS successor_revision_id,
+                similarity
+         FROM memory_duplicate_clusters
+         WHERE state = 'completed' AND decision = 'left_subsumes_right'
+           AND right_memory_id = ? AND right_revision_id = ?
+       ) AS confirmed
+       JOIN memory_catalog AS successor ON successor.memory_id = confirmed.successor_id
+       WHERE successor.lifecycle = 'active'
+         AND successor.authority = 'agent_derived'
+         AND successor.current_revision_id = confirmed.successor_revision_id
+       ORDER BY confirmed.similarity DESC, confirmed.successor_id`
+    ).all(
+      request.memory.memoryId,
+      request.memory.revisionId,
+      request.memory.memoryId,
+      request.memory.revisionId
+    );
+    let redundantByMemoryId: string | undefined;
+    for (const row of redundantRows) {
+      const successorId = z.string().min(1).parse(row.successor_id);
+      const reverse = database.prepare(
+        `SELECT 1 FROM memory_duplicate_clusters
+         WHERE state = 'completed' AND (
+           (decision = 'right_subsumes_left'
+             AND left_memory_id = ? AND left_revision_id =
+               (SELECT current_revision_id FROM memory_catalog WHERE memory_id = ?)
+             AND right_memory_id = ? AND right_revision_id = ?)
+           OR
+           (decision = 'left_subsumes_right'
+             AND left_memory_id = ? AND left_revision_id = ?
+             AND right_memory_id = ? AND right_revision_id =
+               (SELECT current_revision_id FROM memory_catalog WHERE memory_id = ?))
+         ) LIMIT 1`
+      ).get(
+        successorId,
+        successorId,
+        request.memory.memoryId,
+        request.memory.revisionId,
+        request.memory.memoryId,
+        request.memory.revisionId,
+        successorId,
+        successorId
+      );
+      if (reverse === undefined) {
+        redundantByMemoryId = successorId;
+        break;
+      }
+    }
+    const selectedCount = z.number().int().nonnegative().parse(selected?.count);
+    const irrelevantCount = z.number().int().nonnegative().parse(irrelevant?.count);
+    const protectionReasons: string[] = [];
+    if (request.memory.authority !== "agent_derived") protectionReasons.push("human_authority");
+    if (request.memory.lifecycle !== "active") protectionReasons.push("not_active");
+    if (request.memory.lifecycleDetails.pinned === true) protectionReasons.push("pinned");
+    if (request.memory.lifecycleDetails.retainForever === true) protectionReasons.push("retain_forever");
+    if (request.memory.startup === "always") protectionReasons.push("startup_always");
+    if (request.memory.importanceTags.some((tag) => capacityProtectedImportanceTags.has(tag))) {
+      protectionReasons.push("protected_importance");
+    }
+    if (z.number().int().nonnegative().parse(relationship?.count) > 0) {
+      protectionReasons.push("active_relationship");
+    }
+    if (candidate?.high_value === 1) protectionReasons.push("high_value");
+    if (candidate?.pinned === 1) protectionReasons.push("candidate_pinned");
+    if (typeof candidate?.evidence_count === "number" && candidate.evidence_count > 1) {
+      protectionReasons.push("multiple_evidence_sources");
+    }
+    if (candidate?.verification_open === 1) protectionReasons.push("verification_open");
+    if (reviewOpen) protectionReasons.push("review_open");
+    if (request.memory.revisedAt > coldSince) protectionReasons.push("recent_revision");
+    if (selectedCount > 0) protectionReasons.push("recently_selected");
+    return {
+      eligible: protectionReasons.length === 0,
+      coldSince,
+      selectedCount,
+      irrelevantCount,
+      protectionReasons,
+      ...(redundantByMemoryId === undefined ? {} : { redundantByMemoryId })
+    };
+  } finally {
+    database.close();
+  }
 }
 
 function memoryInput(memory: CanonicalMemory): GovernanceMemoryInput {
@@ -273,11 +487,17 @@ async function writeAgentRevision(request: {
 
 async function validateReview(
   runtimeRoot: string,
+  vaultRoot: string,
   runId: string,
+  coverageThrough: string,
   review: GovernancePageReview
 ): Promise<void> {
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
+    const runPolicy = database.prepare(
+      "SELECT capacity_triggered, includes_weekly FROM governance_runs WHERE run_id = ?"
+    ).get(runId);
+    const capacityOnly = runPolicy?.capacity_triggered === 1 && runPolicy.includes_weekly === 0;
     const rows = database.prepare(
       `SELECT member.memory_id, catalog.authority, catalog.lifecycle
        FROM governance_run_members AS member
@@ -291,7 +511,18 @@ async function validateReview(
         lifecycle: z.enum(["active", "archived", "tombstone"]).parse(row.lifecycle)
       }
     ]));
+    if (capacityOnly && (
+      review.reviewSuggestions.length > 0 || review.futurePurgeObligations.length > 0
+    )) {
+      throw new Error("A capacity-only run cannot create semantic review or purge work.");
+    }
     for (const action of review.agentActions) {
+      if (capacityOnly && ![
+        "archive_for_capacity",
+        "supersede_for_capacity"
+      ].includes(action.kind)) {
+        throw new Error("A capacity-only run accepts only locally validated capacity actions.");
+      }
       const sourceId = action.kind === "add_relationship" ? action.sourceMemoryId : action.targetMemoryId;
       const source = members.get(sourceId);
       if (source?.authority !== "agent_derived") {
@@ -302,6 +533,46 @@ async function validateReview(
       }
       if (action.kind === "supersede" && members.get(action.successorMemoryId)?.authority !== "agent_derived") {
         throw new Error("Supersession successor must be Agent-derived in this run.");
+      }
+      if (action.kind === "archive_for_capacity") {
+        const memory = await currentMemory(runtimeRoot, vaultRoot, action.targetMemoryId);
+        const pressure = (await loadCapacityPressures(runtimeRoot, runId))
+          .find((item) => pressureMatchesMemory(item, memory));
+        if (pressure === undefined) {
+          throw new Error("Capacity archive target is outside a linked pressured Space.");
+        }
+        const signal = await capacitySignal({
+          runtimeRoot,
+          memory,
+          pressure,
+          through: coverageThrough
+        });
+        if (!signal.eligible) {
+          throw new Error(
+            `Capacity archive target is protected: ${signal.protectionReasons.join(",")}.`
+          );
+        }
+      }
+      if (action.kind === "supersede_for_capacity") {
+        const memory = await currentMemory(runtimeRoot, vaultRoot, action.targetMemoryId);
+        const successor = await currentMemory(runtimeRoot, vaultRoot, action.successorMemoryId);
+        const pressure = (await loadCapacityPressures(runtimeRoot, runId))
+          .find((item) => pressureMatchesMemory(item, memory));
+        if (pressure === undefined || !pressureMatchesMemory(pressure, successor)) {
+          throw new Error("Capacity supersession must stay inside one linked pressured Space.");
+        }
+        const signal = await capacitySignal({
+          runtimeRoot,
+          memory,
+          pressure,
+          through: coverageThrough
+        });
+        if (
+          signal.redundantByMemoryId !== action.successorMemoryId ||
+          !capacitySupersessionEligible(signal)
+        ) {
+          throw new Error("Capacity supersession lacks a current unambiguous reviewed duplicate decision.");
+        }
       }
     }
     for (const suggestion of review.reviewSuggestions) {
@@ -356,10 +627,10 @@ async function applyAgentAction(request: {
   }
   let result: Record<string, unknown>;
   let desiredStateAlreadyPresent: boolean;
-  if (request.action.kind === "archive") {
+  if (request.action.kind === "archive" || request.action.kind === "archive_for_capacity") {
     desiredStateAlreadyPresent = source.lifecycle === "archived" &&
       source.lifecycleDetails.reason?.startsWith(`governance:${request.runId}:`) === true;
-  } else if (request.action.kind === "supersede") {
+  } else if (request.action.kind === "supersede" || request.action.kind === "supersede_for_capacity") {
     desiredStateAlreadyPresent = source.lifecycle === "archived" &&
       source.successorMemoryId === request.action.successorMemoryId &&
       source.lifecycleDetails.reason?.startsWith(`governance:${request.runId}:`) === true;
@@ -388,6 +659,84 @@ async function applyAgentAction(request: {
     result = { state: "already_applied" };
   } else if (source.revisionId !== snapshotRevisionId && !canContinueRunChain) {
     result = { state: "skipped", reason: "revision_changed_after_snapshot" };
+  } else if (request.action.kind === "supersede_for_capacity") {
+    const pressure = (await loadCapacityPressures(request.runtimeRoot, request.runId))
+      .find((item) => pressureMatchesMemory(item, source));
+    const signal = pressure === undefined
+      ? undefined
+      : await capacitySignal({
+          runtimeRoot: request.runtimeRoot,
+          memory: source,
+          pressure,
+          through: request.coverageThrough
+        });
+    const successor = await currentMemory(
+      request.runtimeRoot,
+      request.vaultRoot,
+      request.action.successorMemoryId
+    );
+    if (
+      signal?.redundantByMemoryId !== request.action.successorMemoryId ||
+      !capacitySupersessionEligible(signal) ||
+      pressure === undefined ||
+      !pressureMatchesMemory(pressure, successor) ||
+      successor.lifecycle !== "active" ||
+      successor.authority !== "agent_derived"
+    ) {
+      result = { state: "skipped", reason: "capacity_duplicate_decision_unavailable" };
+    } else {
+      await writeAgentRevision({
+        runtimeRoot: request.runtimeRoot,
+        vaultRoot: request.vaultRoot,
+        current: source,
+        runId: request.runId,
+        revisedAt: request.coverageThrough,
+        changes: {
+          lifecycle: "archived",
+          lifecycleDetails: {
+            archivedAt: request.coverageThrough,
+            reason: `governance:${request.runId}:capacity-duplicate:${request.action.reason}`
+          },
+          successorMemoryId: request.action.successorMemoryId
+        }
+      });
+      result = { state: "superseded", successorMemoryId: request.action.successorMemoryId };
+    }
+  } else if (request.action.kind === "archive_for_capacity") {
+    const pressure = (await loadCapacityPressures(request.runtimeRoot, request.runId))
+      .find((item) => pressureMatchesMemory(item, source));
+    const signal = pressure === undefined
+      ? undefined
+      : await capacitySignal({
+          runtimeRoot: request.runtimeRoot,
+          memory: source,
+          pressure,
+          through: request.coverageThrough
+        });
+    if (signal?.eligible !== true) {
+      result = {
+        state: "skipped",
+        reason: pressure === undefined
+          ? "capacity_obligation_unavailable"
+          : `capacity_protected:${signal?.protectionReasons.join(",") ?? "unknown"}`
+      };
+    } else {
+      await writeAgentRevision({
+        runtimeRoot: request.runtimeRoot,
+        vaultRoot: request.vaultRoot,
+        current: source,
+        runId: request.runId,
+        revisedAt: request.coverageThrough,
+        changes: {
+          lifecycle: "archived",
+          lifecycleDetails: {
+            archivedAt: request.coverageThrough,
+            reason: `governance:${request.runId}:capacity:${request.action.reason}`
+          }
+        }
+      });
+      result = { state: "archived" };
+    }
   } else if (request.action.kind === "archive") {
     await writeAgentRevision({
       runtimeRoot: request.runtimeRoot,
@@ -478,7 +827,13 @@ async function applyAgentAction(request: {
       request.runId,
       request.checkpointId,
       request.actionKey,
-      request.action.kind === "add_relationship" ? "relationship" : request.action.kind,
+      request.action.kind === "add_relationship"
+        ? "relationship"
+        : request.action.kind === "archive_for_capacity"
+          ? "archive"
+          : request.action.kind === "supersede_for_capacity"
+            ? "supersede"
+          : request.action.kind,
       sourceId,
       JSON.stringify(result),
       request.coverageThrough
@@ -609,6 +964,47 @@ async function finalizeRun(runtimeRoot: string, run: RunRow, now: string): Promi
           `UPDATE governance_cursors SET successful_through = ?, updated_at = ?
            WHERE cadence = 'monthly'`
         ).run(run.coverageThrough, now);
+      }
+      const capacityObligations = database.prepare(
+        `SELECT space_key, scope_kind, project_id, low_water
+         FROM memory_capacity_obligations
+         WHERE run_id = ? AND state = 'linked'`
+      ).all(run.runId);
+      for (const obligation of capacityObligations) {
+        const scopeKind = z.enum(["project", "global"]).parse(obligation.scope_kind);
+        const projectId = typeof obligation.project_id === "string"
+          ? obligation.project_id
+          : null;
+        const spaceKey = z.string().min(1).parse(obligation.space_key);
+        const countRow = database.prepare(
+          `SELECT COUNT(*) AS count FROM memory_catalog
+           WHERE lifecycle = 'active' AND authority = 'agent_derived'
+             AND scope_kind = ?
+             AND (? = 'global' OR project_id = ?)`
+        ).get(scopeKind, scopeKind, projectId);
+        const count = z.number().int().nonnegative().parse(countRow?.count);
+        const lowWater = z.number().int().nonnegative().parse(obligation.low_water);
+        if (count <= lowWater) {
+          database.prepare(
+            `UPDATE memory_capacity_obligations
+             SET state = 'satisfied', active_count = ?, last_observed_at = ?,
+                 next_review_at = NULL, run_id = NULL, satisfied_at = ?
+             WHERE space_key = ? AND run_id = ?`
+          ).run(count, now, now, spaceKey, run.runId);
+        } else {
+          database.prepare(
+            `UPDATE memory_capacity_obligations
+             SET state = 'pending', active_count = ?, last_observed_at = ?,
+                 next_review_at = ?, run_id = NULL, satisfied_at = NULL
+             WHERE space_key = ? AND run_id = ?`
+          ).run(
+            count,
+            now,
+            new Date(Date.parse(now) + 7 * 24 * 60 * 60 * 1_000).toISOString(),
+            spaceKey,
+            run.runId
+          );
+        }
       }
       database.prepare(
         `UPDATE governance_runs
@@ -746,6 +1142,9 @@ export async function runNextGovernanceStep(request: {
   }
   let preparedInput: { readonly source: string; readonly lastMemoryId: string } | undefined;
   if (checkpoint === undefined) {
+    const capacityPressures = run.capacityTriggered
+      ? await loadCapacityPressures(request.runtimeRoot, run.runId)
+      : [];
     const memories: GovernanceMemoryInput[] = [];
     for (const member of members) {
       const memory = await snapshotRevision({
@@ -754,7 +1153,19 @@ export async function runNextGovernanceStep(request: {
         memoryId: z.string().parse(member.memory_id),
         revisionId: z.string().parse(member.revision_id)
       });
-      memories.push(memoryInput(memory));
+      const pressure = capacityPressures.find((item) => pressureMatchesMemory(item, memory));
+      const capacity = pressure === undefined
+        ? undefined
+        : await capacitySignal({
+            runtimeRoot: request.runtimeRoot,
+            memory,
+            pressure,
+            through: run.coverageThrough
+          });
+      memories.push({
+        ...memoryInput(memory),
+        ...(capacity === undefined ? {} : { capacity })
+      });
     }
     const from = run.currentPhase === "weekly" ? run.weeklyFrom : run.monthlyFrom;
     if (from === null) throw new Error("Governance phase has no coverage start.");
@@ -770,6 +1181,18 @@ export async function runNextGovernanceStep(request: {
         coverage: { from, through: run.coverageThrough },
         pageOrdinal,
         memories,
+        ...(capacityPressures.length === 0
+          ? {}
+          : {
+              capacityPressures: capacityPressures.map((pressure) => ({
+                scope: pressure.scope,
+                activeCount: pressure.activeCount,
+                target: pressure.target,
+                hardLimit: pressure.hardLimit,
+                lowWater: pressure.lowWater,
+                requiredReduction: pressure.requiredReduction
+              }))
+            }),
         ...(auditSignals === undefined ? {} : { auditSignals })
       } satisfies GovernancePageRequest),
       lastMemoryId: z.string().parse(memories.at(-1)?.memoryId)
@@ -837,7 +1260,13 @@ export async function runNextGovernanceStep(request: {
   const input = JSON.parse(inputSource) as GovernancePageRequest;
   try {
     const output = governanceOutputSchema.parse(await request.adapter.reviewPage(input));
-    await validateReview(request.runtimeRoot, run.runId, output);
+    await validateReview(
+      request.runtimeRoot,
+      request.vaultRoot,
+      run.runId,
+      run.coverageThrough,
+      output
+    );
     const outputSource = JSON.stringify(output);
     const resultDatabase = await openRuntimeDatabase(request.runtimeRoot);
     try {

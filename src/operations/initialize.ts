@@ -110,6 +110,12 @@ export async function initializeMemStore(
     retention: { archive_months: 6, candidate_tombstone_days: 180 },
     lifecycle: {},
     promotion: {},
+    capacity: {
+      project: { target: 2_500, hard_limit: 3_500, low_water: 2_200 },
+      global: { target: 300, hard_limit: 500, low_water: 270 },
+      cold_days: 180,
+      governance_batch_size: 50
+    },
     injection: {},
     governance: {
       timezone,

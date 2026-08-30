@@ -238,6 +238,42 @@ test("UserPromptSubmit uses relevance bands, upgrades exact high matches, and su
   expect(repeated.emptyReason).toBe("already_present");
 });
 
+test("UserPromptSubmit can recall a Memory from a bounded structured file signal", async () => {
+  const roots = await createRoot();
+  const fileRule = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174423",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174433",
+    scope: { kind: "project", projectId },
+    body: "When editing src/queue.ts, run the durable queue recovery test.",
+    compact: "Run the recovery test after editing src/queue.ts.",
+    startup: "never"
+  });
+  await writeAll(roots, [fileRule]);
+  await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "structured-signal-pack",
+    requestedAt: "2026-08-07T12:02:00.000Z"
+  });
+
+  const prompt = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "structured-signal-pack",
+    prompt: "Quantum orbital symmetry.",
+    signals: { files: ["src/queue.ts"], symbols: [], errors: [], commands: [] },
+    requestedAt: "2026-08-07T12:02:01.000Z"
+  });
+
+  expect(prompt.items).toEqual([
+    expect.objectContaining({
+      memoryId: fileRule.memoryId,
+      relevanceBand: "high"
+    })
+  ]);
+  expect(prompt.items[0]?.reasons).toContain("session_signal");
+});
+
 test("automatic packs explain compact fields only once per Context Epoch", async () => {
   const roots = await createRoot();
   const startup = makeCanonicalMemory({

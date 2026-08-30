@@ -140,6 +140,18 @@ _Avoid_: Memory Vault、跨机权威路径、Project Marker
 预期可以跨项目复用的稳定知识，其成立不能只依赖一个项目中的偶然情况。
 _Avoid_: Project Memory、默认知识
 
+**Memory Space（记忆空间）**:
+共享一个 Active Memory 容量与治理范围的知识集合；每个 Project Identity 对应一个 Project Space，Global Memory 单独构成 Global Space。共享 Project Identity 的多个本地目录属于同一个 Space。
+_Avoid_: 本地目录、Obsidian 文件夹、整个 Memory Vault
+
+**Active Memory Capacity（活跃记忆容量）**:
+一个 Memory Space 中可参与正常检索和注入的 Active Agent-derived Durable Memory 数量。Archived Memory、Candidate、Tombstone 和 Human-authored Memory 不占用该受管容量。
+_Avoid_: Vault 文件总数、物理存储上限、删除配额
+
+**Capacity Governance Obligation（容量治理义务）**:
+Memory Space 超过活跃记忆软目标后产生的可恢复治理工作。它优先合并、取代或归档不再适用的 Agent-derived Memory，并且不能仅按年龄、召回次数或模型重要性分数处理知识。
+_Avoid_: 按最旧顺序删除、Human-authored 自动归档、一次性清空
+
 **Independent Project Evidence（独立项目证据）**:
 来自不同 `project_id`、且各自不依赖同一上游结论或 MemStore 注入内容的可追溯支持证据。同一 Project 的多个 Session、共享 marker 的 worktree/clone，以及由已有 Memory 回声产生的再次提炼都不能增加独立项目计数。
 _Avoid_: Session 数量、路径数量、Memory Echo

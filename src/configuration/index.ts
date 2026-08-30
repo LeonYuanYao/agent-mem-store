@@ -11,6 +11,7 @@ const policyOwnedKeys = [
   "retention",
   "lifecycle",
   "promotion",
+  "capacity",
   "injection",
   "governance",
   "review",
@@ -28,6 +29,35 @@ const machineOwnedKeys = [
   "launch_agent"
 ] as const;
 
+const memorySpaceCapacitySchema = z.object({
+  target: z.number().int().positive(),
+  hard_limit: z.number().int().positive(),
+  low_water: z.number().int().nonnegative()
+}).refine(
+  (capacity) => capacity.low_water < capacity.target && capacity.target < capacity.hard_limit,
+  { message: "Memory capacity must satisfy low_water < target < hard_limit." }
+);
+
+const memoryCapacitySchema = z.object({
+  project: memorySpaceCapacitySchema.default({
+    target: 2_500,
+    hard_limit: 3_500,
+    low_water: 2_200
+  }),
+  global: memorySpaceCapacitySchema.default({
+    target: 300,
+    hard_limit: 500,
+    low_water: 270
+  }),
+  cold_days: z.number().int().positive().default(180),
+  governance_batch_size: z.number().int().min(1).max(50).default(50)
+}).default({
+  project: { target: 2_500, hard_limit: 3_500, low_water: 2_200 },
+  global: { target: 300, hard_limit: 500, low_water: 270 },
+  cold_days: 180,
+  governance_batch_size: 50
+});
+
 const policySchema = z.object({
   schema_version: z.literal(1),
   retention: z.object({
@@ -36,6 +66,7 @@ const policySchema = z.object({
   }),
   lifecycle: extensibleSectionSchema,
   promotion: extensibleSectionSchema,
+  capacity: memoryCapacitySchema,
   injection: extensibleSectionSchema,
   governance: z.object({
     timezone: z.string().min(1),
@@ -85,6 +116,20 @@ export interface LoadedConfiguration {
     readonly governanceTimezone: string;
     readonly weeklyGovernance: "MONDAY 19:00";
     readonly monthlyGovernance: "FIRST_MONDAY 19:00";
+    readonly memoryCapacity: {
+      readonly project: {
+        readonly target: number;
+        readonly hardLimit: number;
+        readonly lowWater: number;
+      };
+      readonly global: {
+        readonly target: number;
+        readonly hardLimit: number;
+        readonly lowWater: number;
+      };
+      readonly coldDays: number;
+      readonly governanceBatchSize: number;
+    };
     readonly indexQuietPeriodSeconds: number;
     readonly indexMaximumStalenessSeconds: number;
   };
@@ -312,6 +357,20 @@ export async function loadConfiguration(
       governanceTimezone: policy.governance.timezone,
       weeklyGovernance: policy.governance.weekly,
       monthlyGovernance: policy.governance.monthly,
+      memoryCapacity: {
+        project: {
+          target: policy.capacity.project.target,
+          hardLimit: policy.capacity.project.hard_limit,
+          lowWater: policy.capacity.project.low_water
+        },
+        global: {
+          target: policy.capacity.global.target,
+          hardLimit: policy.capacity.global.hard_limit,
+          lowWater: policy.capacity.global.low_water
+        },
+        coldDays: policy.capacity.cold_days,
+        governanceBatchSize: policy.capacity.governance_batch_size
+      },
       indexQuietPeriodSeconds: retrievalIndexPolicy.index_quiet_period_seconds,
       indexMaximumStalenessSeconds: retrievalIndexPolicy.index_max_staleness_seconds
     },

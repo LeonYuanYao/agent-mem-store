@@ -4,6 +4,10 @@ import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 
+import {
+  inspectMemoryCapacity,
+  loadMemoryCapacityPolicy
+} from "../capacity/index.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { inspectHookSqliteBusyDiagnostics } from "../capture/index.js";
 import { inspectCaptureInbox } from "../capture/inbox.js";
@@ -91,6 +95,7 @@ export async function inspectStatus(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
 }) {
+  const memoryCapacityPolicy = await loadMemoryCapacityPolicy(request);
   const hookSqliteBusy = await inspectHookSqliteBusyDiagnostics(request.runtimeRoot);
   const captureInbox = await inspectCaptureInbox(request.runtimeRoot);
   const [foregroundAttempts, catalogGeneration, foregroundSocketAvailable] = await Promise.all([
@@ -177,6 +182,10 @@ export async function inspectStatus(request: {
       active_operation_count: operationCounts.get(kind)?.active ?? 0,
       blocked_operation_count: operationCounts.get(kind)?.blocked ?? 0
     });
+    const memoryCapacity = inspectMemoryCapacity({
+      runtimeRoot: request.runtimeRoot,
+      policy: memoryCapacityPolicy
+    });
     return {
       mode: "read_only_inspection",
       runtime_root: request.runtimeRoot,
@@ -229,6 +238,7 @@ export async function inspectStatus(request: {
         phase: governance.current_phase,
         coverage_through: governance.coverage_through
       },
+      memory_capacity: memoryCapacity,
       pipelines: {
         capture: {
           unbatched_event_count: z.number().int().nonnegative().parse(unbatchedCapture?.count),

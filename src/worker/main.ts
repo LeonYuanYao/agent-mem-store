@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Temporal } from "@js-temporal/polyfill";
 
+import { loadMemoryCapacityPolicy } from "../capacity/index.js";
 import { pruneExpiredAdmissionAudit } from "../admission/audit.js";
 import type { GovernanceAdapter } from "../governance/worker.js";
 import { runNextGovernanceStep } from "../governance/worker.js";
@@ -378,10 +379,15 @@ export async function runWorkerOnce(request: {
     }
   }
   if (scheduleExists && request.adapters?.governance !== undefined) {
+    const capacityPolicy = await loadMemoryCapacityPolicy({
+      runtimeRoot: request.runtimeRoot,
+      vaultRoot: request.vaultRoot
+    });
     const scheduled = await scheduleDueGovernance({
       runtimeRoot: request.runtimeRoot,
       now,
-      workerStartedAt
+      workerStartedAt,
+      capacityPolicy
     });
     if (scheduled.state !== "idle") activities.push(`governance-schedule:${scheduled.state}`);
     const governance = await runNextGovernanceStep({

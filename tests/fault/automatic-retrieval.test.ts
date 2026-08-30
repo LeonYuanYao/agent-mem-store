@@ -9,6 +9,10 @@ import {
   prepareSessionStartShadowPack,
   prepareUserPromptShadowPack
 } from "../../src/retrieval/packs.js";
+import {
+  loadRetrievalSnapshot,
+  validateRetrievalSnapshot
+} from "../../src/retrieval/snapshot.js";
 import { writeCanonicalMemory } from "../../src/vault/index.js";
 import { makeCanonicalMemory } from "../helpers/canonical-memory.js";
 
@@ -318,6 +322,108 @@ test("large Project scope is parsed before the semantic deadline", async () => {
 
   expect(result.semanticStage).toBe("complete");
 });
+
+test("a long prompt over a production-sized snapshot stays inside the warm-path budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-pack-large-prompt-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const targetMemoryId = "msmem_123e4567-e89b-42d3-a456-426614174581";
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: targetMemoryId,
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174591",
+      scope: { kind: "project", projectId },
+      body: "Use SQLite WAL for durable state.",
+      compact: "Use SQLite WAL.",
+      startup: "never"
+    })
+  });
+  const fast: EmbeddingAdapter = {
+    identity,
+    embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: fast,
+    builtAt: "2026-08-07T13:11:00.000Z"
+  });
+  const baseSnapshot = await loadRetrievalSnapshot({ runtimeRoot });
+  const baseMemory = baseSnapshot.documents[0];
+  if (baseMemory === undefined) throw new Error("Expected an indexed Memory fixture.");
+  const documents = Array.from({ length: 2_700 }, (_, ordinal) => ordinal === 0
+    ? baseMemory
+    : {
+        ...baseMemory,
+        memoryId: `large-prompt-memory-${String(ordinal)}`,
+        memoryRef: ordinal + 1,
+        revisionId: `large-prompt-revision-${String(ordinal)}`,
+        sessionOrderKey: `large-prompt-order-${String(ordinal).padStart(4, "0")}`,
+        applicabilitySummary: `Archived deployment procedure ${String(ordinal)}`,
+        applicabilityConditions: [
+          `Only for archived deployment environment ${String(ordinal)}`,
+          `Requires unrelated release train ${String(ordinal)}`,
+          `Excludes the durable database queue ${String(ordinal)}`
+        ],
+        compactText: `Archived deployment procedure ${String(ordinal)}.`,
+        standardText: `Archived deployment procedure ${String(ordinal)} for an unrelated release train.`,
+        searchableText: `archived deployment procedure release train ${String(ordinal)}`,
+        vectorOrdinal: ordinal
+      });
+  const vectors = new Float32Array(documents.length * baseSnapshot.dimensions);
+  vectors[0] = 1;
+  for (let ordinal = 1; ordinal < documents.length; ordinal += 1) {
+    vectors[ordinal * baseSnapshot.dimensions + 1] = 1;
+  }
+  const snapshot = validateRetrievalSnapshot({
+    ...baseSnapshot,
+    documents,
+    vectors,
+    globalOrdinals: [],
+    projectOrdinals: [{
+      projectId,
+      ordinals: documents.map((_, ordinal) => ordinal)
+    }],
+    sessionBuckets: [],
+    relationships: []
+  });
+  await prepareSessionStartShadowPack({
+    runtimeRoot,
+    vaultRoot,
+    projectId,
+    sessionId: "large-prompt",
+    requestedAt: "2026-08-07T13:11:01.000Z",
+    snapshot
+  });
+  const noise = Array.from(
+    { length: 350 },
+    (_, ordinal) => `querytoken${String(ordinal).padStart(4, "0")}`
+  ).join(" ");
+  const prompt = `${noise} How should SQLite WAL be configured? ${noise}`;
+
+  const started = performance.now();
+  const result = await prepareUserPromptShadowPack({
+    runtimeRoot,
+    vaultRoot,
+    projectId,
+    sessionId: "large-prompt",
+    prompt,
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter: fast,
+    requestedAt: "2026-08-07T13:11:02.000Z",
+    snapshot
+  });
+  const elapsedMilliseconds = performance.now() - started;
+
+  expect(result.items).toEqual(expect.arrayContaining([
+    expect.objectContaining({ memoryId: targetMemoryId })
+  ]));
+  expect(elapsedMilliseconds).toBeLessThan(500);
+}, 15_000);
 
 test("automatic SessionStart fails open when Runtime SQLite is temporarily busy", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-pack-busy-runtime-"));

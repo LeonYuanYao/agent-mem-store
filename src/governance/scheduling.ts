@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
 
+import {
+  reconcileMemoryCapacity,
+  type MemoryCapacityPolicy
+} from "../capacity/index.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 
 const cadenceSchema = z.enum(["weekly", "monthly"]);
@@ -109,6 +113,7 @@ export type ScheduleGovernanceResult =
       readonly runId: string;
       readonly kind: Cadence;
       readonly includesWeekly: boolean;
+      readonly capacityTriggered: boolean;
       readonly coverageThrough: string;
       readonly recoveredOccurrenceCount: number;
     };
@@ -117,9 +122,17 @@ export async function scheduleDueGovernance(request: {
   readonly runtimeRoot: string;
   readonly now: string;
   readonly workerStartedAt: string;
+  readonly capacityPolicy?: MemoryCapacityPolicy;
 }): Promise<ScheduleGovernanceResult> {
   const now = z.iso.datetime().parse(request.now);
   const workerStartedAt = z.iso.datetime().parse(request.workerStartedAt);
+  if (request.capacityPolicy !== undefined) {
+    await reconcileMemoryCapacity({
+      runtimeRoot: request.runtimeRoot,
+      policy: request.capacityPolicy,
+      observedAt: now
+    });
+  }
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     const preflightSchedule = database.prepare(
@@ -143,13 +156,19 @@ export async function scheduleDueGovernance(request: {
       `SELECT run_id FROM governance_runs
        WHERE state IN ('pending', 'processing', 'retrying', 'blocked') LIMIT 1`
     ).get();
-    if (typeof active?.run_id === "string" && !occurrenceIsDue) {
+    const capacityIsDue = database.prepare(
+      `SELECT 1 AS present FROM memory_capacity_obligations
+       WHERE state = 'pending' AND next_review_at <= ? LIMIT 1`
+    ).get(now) !== undefined;
+    if (typeof active?.run_id === "string" && !occurrenceIsDue && !capacityIsDue) {
       return { state: "active_run", runId: active.run_id };
     }
     const pendingObligation = database.prepare(
       "SELECT 1 AS present FROM governance_obligations WHERE state = 'pending' LIMIT 1"
     ).get();
-    if (pendingObligation === undefined && !occurrenceIsDue) return { state: "idle" };
+    if (pendingObligation === undefined && !occurrenceIsDue && !capacityIsDue) {
+      return { state: "idle" };
+    }
     database.exec("BEGIN IMMEDIATE");
     try {
       const schedule = database.prepare(
@@ -187,7 +206,11 @@ export async function scheduleDueGovernance(request: {
       const pendingCount = database.prepare(
         "SELECT COUNT(*) AS count FROM governance_obligations WHERE state = 'pending'"
       ).get();
-      if (pendingCount?.count === 0) {
+      const readyCapacityCount = database.prepare(
+        `SELECT COUNT(*) AS count FROM memory_capacity_obligations
+         WHERE state = 'pending' AND next_review_at <= ?`
+      ).get(now);
+      if (pendingCount?.count === 0 && readyCapacityCount?.count === 0) {
         database.exec("COMMIT");
         return { state: "idle" };
       }
@@ -206,7 +229,10 @@ export async function scheduleDueGovernance(request: {
         `SELECT 1 FROM retrieval_index_build_activity
          WHERE singleton = 1 AND state = 'building' AND lease_until > ?`
       ).get(now);
-      if (captureBacklog !== undefined || indexBacklog !== undefined) {
+      const capacityReady = z.number().int().nonnegative().parse(
+        readyCapacityCount?.count
+      ) > 0;
+      if (indexBacklog !== undefined || (captureBacklog !== undefined && !capacityReady)) {
         database.exec("COMMIT");
         return { state: "deferred", reason: "foreground_backlog" };
       }
@@ -221,7 +247,13 @@ export async function scheduleDueGovernance(request: {
            AND (? = 'monthly' OR cadence = 'weekly')
          ORDER BY due_at, cadence`
       ).all(now, kind);
-      const recoveredOccurrenceCount = linked.length;
+      const linkedCapacity = database.prepare(
+        `SELECT * FROM memory_capacity_obligations
+         WHERE state = 'pending' AND next_review_at <= ?
+         ORDER BY active_count DESC, space_key`
+      ).all(now);
+      const capacityTriggered = linkedCapacity.length > 0;
+      const recoveredOccurrenceCount = linked.length + linkedCapacity.length;
       if (recoveredOccurrenceCount === 0) {
         database.exec("COMMIT");
         return { state: "idle" };
@@ -238,19 +270,20 @@ export async function scheduleDueGovernance(request: {
         `INSERT INTO governance_runs(
            run_id, run_kind, state, includes_weekly, weekly_from, monthly_from,
            coverage_through, recovered_occurrence_count, current_phase,
-           created_at, updated_at
-         ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`
+           created_at, updated_at, capacity_triggered
+         ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         runId,
         kind,
         includesWeekly ? 1 : 0,
-        includesWeekly ? weeklyCursor.successful_through : null,
+        includesWeekly ? weeklyCursor.successful_through : now,
         kind === "monthly" ? monthlyCursor.successful_through : null,
         now,
         recoveredOccurrenceCount,
-        includesWeekly ? "weekly" : "monthly",
+        includesWeekly || capacityTriggered ? "weekly" : "monthly",
         now,
-        now
+        now,
+        capacityTriggered ? 1 : 0
       );
       if (includesWeekly) {
         database.prepare(
@@ -290,6 +323,117 @@ export async function scheduleDueGovernance(request: {
            ORDER BY memory_id`
         ).run(runId);
       }
+      if (capacityTriggered) {
+        for (const obligation of linkedCapacity) {
+          const scopeKind = z.enum(["project", "global"]).parse(obligation.scope_kind);
+          const projectId = typeof obligation.project_id === "string"
+            ? obligation.project_id
+            : null;
+          const spaceKey = z.string().min(1).parse(obligation.space_key);
+          const batchSize = z.number().int().min(1).max(50).parse(
+            obligation.governance_batch_size
+          );
+          const coldSince = new Date(
+            Date.parse(now) - z.number().int().positive().parse(obligation.cold_days) *
+              24 * 60 * 60 * 1_000
+          ).toISOString();
+          const offset = z.number().int().nonnegative().parse(database.prepare(
+            `SELECT COUNT(*) AS count FROM governance_run_members
+             WHERE run_id = ? AND phase = 'weekly'`
+          ).get(runId)?.count);
+          database.prepare(
+            `WITH redundant_target(memory_id, revision_id) AS (
+               SELECT left_memory_id, left_revision_id
+               FROM memory_duplicate_clusters
+               WHERE state = 'completed' AND decision = 'right_subsumes_left'
+               UNION
+               SELECT right_memory_id, right_revision_id
+               FROM memory_duplicate_clusters
+               WHERE state = 'completed' AND decision = 'left_subsumes_right'
+             )
+             INSERT OR IGNORE INTO governance_run_members(
+               run_id, phase, memory_id, revision_id, member_ordinal
+             )
+             SELECT ?, 'weekly', catalog.memory_id, catalog.current_revision_id,
+                    ? + ROW_NUMBER() OVER (
+                      ORDER BY CASE
+                                 WHEN redundant_target.memory_id IS NOT NULL THEN 0
+                                 WHEN document.importance_tags_json = '[]' THEN 1
+                                 ELSE 2
+                               END,
+                               catalog.revised_at, catalog.memory_id
+                    ) - 1
+             FROM memory_catalog AS catalog
+             LEFT JOIN active_retrieval_index AS active_index ON active_index.singleton = 1
+             LEFT JOIN retrieval_documents AS document
+               ON document.index_revision_id = active_index.index_revision_id
+              AND document.memory_id = catalog.memory_id
+             LEFT JOIN redundant_target
+               ON redundant_target.memory_id = catalog.memory_id
+              AND redundant_target.revision_id = catalog.current_revision_id
+             WHERE catalog.lifecycle = 'active' AND catalog.authority = 'agent_derived'
+               AND catalog.scope_kind = ?
+               AND (? = 'global' OR catalog.project_id = ?)
+               AND (redundant_target.memory_id IS NOT NULL OR catalog.revised_at <= ?)
+               AND (document.memory_id IS NULL OR document.startup != 'always')
+               AND NOT EXISTS (
+                 SELECT 1 FROM memory_relationships AS relationship
+                 WHERE relationship.source_memory_id = catalog.memory_id
+                    OR relationship.target_memory_id = catalog.memory_id
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM retrieval_receipt_items AS item
+                 JOIN retrieval_receipts AS receipt ON receipt.receipt_id = item.receipt_id
+                 WHERE item.memory_id = catalog.memory_id AND item.outcome = 'selected'
+                   AND receipt.created_at > ?
+               )
+               AND (
+                 redundant_target.memory_id IS NOT NULL
+                 OR NOT EXISTS (
+                   SELECT 1 FROM memory_candidates AS candidate
+                   WHERE candidate.promoted_memory_id = catalog.memory_id
+                     AND (
+                       candidate.high_value = 1 OR candidate.pinned = 1 OR
+                       EXISTS(
+                         SELECT 1 FROM candidate_evidence AS evidence
+                         WHERE evidence.candidate_id = candidate.candidate_id
+                         GROUP BY evidence.candidate_id HAVING COUNT(*) > 1
+                       ) OR EXISTS(
+                         SELECT 1 FROM verification_requests AS verification
+                         WHERE verification.candidate_id = candidate.candidate_id
+                           AND verification.state = 'open'
+                       )
+                     )
+                 )
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM governance_review_suggestions AS suggestion
+                 WHERE suggestion.target_memory_id = catalog.memory_id
+                   AND suggestion.state = 'open'
+             )
+             ORDER BY CASE
+                        WHEN redundant_target.memory_id IS NOT NULL THEN 0
+                        WHEN document.importance_tags_json = '[]' THEN 1
+                        ELSE 2
+                      END,
+                      catalog.revised_at, catalog.memory_id
+             LIMIT ?`
+          ).run(
+            runId,
+            offset,
+            scopeKind,
+            scopeKind,
+            projectId,
+            coldSince,
+            coldSince,
+            batchSize
+          );
+          database.prepare(
+            `UPDATE memory_capacity_obligations
+             SET state = 'linked', run_id = ? WHERE space_key = ? AND state = 'pending'`
+          ).run(runId, spaceKey);
+        }
+      }
       for (const obligation of linked) {
         const selectedObligationId = z.string().min(1).parse(obligation.obligation_id);
         database.prepare(
@@ -303,6 +447,7 @@ export async function scheduleDueGovernance(request: {
         runId,
         kind,
         includesWeekly,
+        capacityTriggered,
         coverageThrough: now,
         recoveredOccurrenceCount
       };
