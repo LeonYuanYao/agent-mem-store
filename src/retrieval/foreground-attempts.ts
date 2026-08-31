@@ -73,7 +73,10 @@ export async function recordForegroundAttempt(request: {
   }
 }
 
-export async function inspectForegroundAttempts(runtimeRoot: string): Promise<{
+export async function inspectForegroundAttempts(
+  runtimeRoot: string,
+  options: { readonly since?: string } = {}
+): Promise<{
   readonly totalCount: number;
   readonly outcomes: Readonly<Record<string, number>>;
   readonly deadlineCount: number;
@@ -81,21 +84,25 @@ export async function inspectForegroundAttempts(runtimeRoot: string): Promise<{
   readonly postDeadlineCount: number;
   readonly maximumPostDeadlineWorkMs: number;
 }> {
+  const since = options.since === undefined ? undefined : z.iso.datetime().parse(options.since);
+  const attemptWhere = since === undefined ? "" : " WHERE created_at >= ?";
+  const attemptArguments = since === undefined ? [] : [since];
   const database = await openRuntimeDatabaseReadOnly(runtimeRoot);
   try {
     const rows = database.prepare(
       `SELECT outcome, COUNT(*) AS count,
               MAX(post_deadline_work_ms) AS maximum_post_deadline_work_ms
-       FROM foreground_attempts GROUP BY outcome`
-    ).all();
+       FROM foreground_attempts${attemptWhere} GROUP BY outcome`
+    ).all(...attemptArguments);
     const outcomes: Record<string, number> = Object.fromEntries(rows.map((row) => [
       outcomeSchema.parse(row.outcome),
       z.number().int().nonnegative().parse(row.count)
     ]));
     const overflowRows = database.prepare(
       `SELECT outcome, SUM(occurrence_count) AS count
-       FROM foreground_attempt_overflow GROUP BY outcome`
-    ).all();
+       FROM foreground_attempt_overflow${since === undefined ? "" : " WHERE bucket_at >= ?"}
+       GROUP BY outcome`
+    ).all(...attemptArguments);
     for (const row of overflowRows) {
       const outcome = outcomeSchema.parse(row.outcome);
       outcomes[outcome] = (outcomes[outcome] ?? 0) +
@@ -107,8 +114,9 @@ export async function inspectForegroundAttempts(runtimeRoot: string): Promise<{
       z.number().nonnegative().parse(row.maximum_post_deadline_work_ms ?? 0)
     ), 0);
     const postDeadline = database.prepare(
-      "SELECT COUNT(*) AS count FROM foreground_attempts WHERE post_deadline_work_ms > 0"
-    ).get();
+      `SELECT COUNT(*) AS count FROM foreground_attempts
+       WHERE post_deadline_work_ms > 0${since === undefined ? "" : " AND created_at >= ?"}`
+    ).get(...attemptArguments);
     return {
       totalCount,
       outcomes,

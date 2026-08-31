@@ -64,6 +64,7 @@ async function prepareResponse(request: ForegroundRequest, options: {
           projectId: request.projectId,
           sessionId: request.sessionId,
           requestedAt: request.requestedAt,
+          ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
           snapshot: options.snapshot,
           foregroundControl: options.control
         })
@@ -76,22 +77,13 @@ async function prepareResponse(request: ForegroundRequest, options: {
           signals: request.signals,
           adapter: options.adapter,
           requestedAt: request.requestedAt,
+          ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
           snapshot: options.snapshot,
           foregroundControl: options.control
         });
     options.onReceiptCommitted(pack.receiptCommitMs);
-    await options.control.checkpoint("after_pack");
     if (pack.receiptId.startsWith("msreceipt_unrecorded_")) {
       throw new Error("Foreground retrieval receipt was not recorded.");
-    }
-    if (request.eventId !== undefined) {
-      await finishForegroundEvaluation({
-        runtimeRoot: options.runtimeRoot,
-        eventId: request.eventId,
-        state: "completed",
-        receiptId: pack.receiptId,
-        updatedAt: request.requestedAt
-      });
     }
     if (pack.text.length === 0) {
       return {

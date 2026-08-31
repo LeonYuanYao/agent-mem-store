@@ -9,6 +9,7 @@ import { MemStoreCommandError } from "../contracts/envelope.js";
 import { inspectCaptureInbox } from "../capture/inbox.js";
 import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
 import { inspectRetrievalCatalogGeneration } from "../retrieval/index-coordinator.js";
+import { inspectBackgroundRecovery } from "../worker/recovery-policy.js";
 
 export interface DoctorCheck {
   readonly name: string;
@@ -55,6 +56,7 @@ export async function inspectDoctor(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
   readonly deep: boolean;
+  readonly now?: string;
 }): Promise<{
   readonly state: "healthy" | "degraded" | "error";
   readonly repaired: false;
@@ -62,6 +64,9 @@ export async function inspectDoctor(request: {
 }> {
   const runtimeRoot = resolve(request.runtimeRoot);
   const vaultRoot = resolve(request.vaultRoot);
+  const now = request.now === undefined
+    ? new Date().toISOString()
+    : z.iso.datetime().parse(request.now);
   const checks: DoctorCheck[] = [];
   try {
     const configuration = await loadConfiguration({ runtimeRoot, vaultRoot });
@@ -84,11 +89,19 @@ export async function inspectDoctor(request: {
 
   try {
     const attempts = await inspectForegroundAttempts(runtimeRoot);
-    const warning = attempts.deadlineCount >= 3 || attempts.postDeadlineCount > 0;
+    const recent = await inspectForegroundAttempts(runtimeRoot, {
+      since: new Date(Date.parse(now) - 6 * 60 * 60 * 1_000).toISOString()
+    });
+    const recentDeadlineRate = recent.totalCount === 0
+      ? 0
+      : recent.deadlineCount / recent.totalCount;
+    const warning = recent.deadlineCount >= 3 ||
+      recent.postDeadlineCount >= 3 ||
+      (recent.totalCount >= 20 && recentDeadlineRate >= 0.02);
     checks.push({
       name: "foreground_retrieval",
       state: warning ? "warning" : "ok",
-      detail: `${String(attempts.totalCount)} foreground attempts; ${String(attempts.deadlineCount)} deadlines; ${String(attempts.cancellationCount)} cancellations; ${String(attempts.postDeadlineCount)} with post-deadline work.`
+      detail: `${String(recent.totalCount)} recent six-hour attempts; ${String(recent.deadlineCount)} recent deadlines; ${String(recent.postDeadlineCount)} with recent post-deadline work; ${String(attempts.deadlineCount)} lifetime deadlines across ${String(attempts.totalCount)} retained attempts.`
     });
   } catch (error) {
     checks.push({
@@ -100,13 +113,14 @@ export async function inspectDoctor(request: {
 
   try {
     const generation = await inspectRetrievalCatalogGeneration(runtimeRoot);
+    const recovery = await inspectBackgroundRecovery(runtimeRoot);
     const forceOverdue = generation.forceDueAt !== null &&
-      Date.parse(generation.forceDueAt) <= Date.now() &&
+      Date.parse(generation.forceDueAt) <= Date.parse(now) &&
       generation.dirtyGeneration > generation.publishedGeneration;
     checks.push({
       name: "retrieval_catalog_generation",
-      state: forceOverdue ? "warning" : "ok",
-      detail: `Retrieval catalog generation ${String(generation.publishedGeneration)}/${String(generation.dirtyGeneration)} published; building: ${generation.buildingGeneration === null ? "none" : String(generation.buildingGeneration)}.`
+      state: forceOverdue && !recovery.active ? "warning" : "ok",
+      detail: `Retrieval catalog generation ${String(generation.publishedGeneration)}/${String(generation.dirtyGeneration)} published; building: ${generation.buildingGeneration === null ? "none" : String(generation.buildingGeneration)}${recovery.active ? "; recovery coalescing active" : ""}.`
     });
   } catch (error) {
     checks.push({
@@ -159,7 +173,14 @@ export async function inspectDoctor(request: {
     ).get();
     const lunaOperations = database.prepare(
       `SELECT COUNT(*) AS active_count,
-              SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) AS blocked_count
+              SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) AS blocked_count,
+              SUM(CASE WHEN state = 'blocked' AND last_error_category IN
+                ('timeout', 'unavailable', 'rate_limited') THEN 1 ELSE 0 END)
+                AS offline_blocked_count,
+              SUM(CASE WHEN state = 'blocked' AND (last_error_category IS NULL OR
+                last_error_category NOT IN ('timeout', 'unavailable', 'rate_limited'))
+                THEN 1 ELSE 0 END)
+                AS actionable_blocked_count
        FROM luna_operations
        WHERE state IN ('pending', 'processing', 'retrying', 'blocked')`
     ).get();
@@ -184,11 +205,21 @@ export async function inspectDoctor(request: {
     const blockedLunaOperationCount = z.number().int().nonnegative().parse(
       lunaOperations?.blocked_count ?? 0
     );
+    const offlineBlockedLunaOperationCount = z.number().int().nonnegative().parse(
+      lunaOperations?.offline_blocked_count ?? 0
+    );
+    const actionableBlockedLunaOperationCount = z.number().int().nonnegative().parse(
+      lunaOperations?.actionable_blocked_count ?? 0
+    );
     checks.push({
       name: "luna_operations",
-      state: blockedLunaOperationCount > 0 ? "warning" : "ok",
-      detail: blockedLunaOperationCount > 0
-        ? `${String(blockedLunaOperationCount)} blocked of ${String(activeLunaOperationCount)} active Luna operations.`
+      state: actionableBlockedLunaOperationCount > 0 ? "warning" : "ok",
+      detail: actionableBlockedLunaOperationCount > 0
+        ? `${String(actionableBlockedLunaOperationCount)} blocked actionable of ${String(activeLunaOperationCount)} active Luna operations.`
+        : offlineBlockedLunaOperationCount > 0
+          ? `${String(offlineBlockedLunaOperationCount)} Luna operations have background work paused by connectivity; local capture and recall remain available.`
+          : blockedLunaOperationCount > 0
+            ? `${String(blockedLunaOperationCount)} blocked Luna operations require classification.`
         : `${String(activeLunaOperationCount)} active Luna operations; none blocked.`
     });
     if (request.deep) checks.push(await inspectCatalogFiles(database, vaultRoot));

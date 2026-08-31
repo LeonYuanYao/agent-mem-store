@@ -16,6 +16,7 @@ import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
 import { inspectRetrievalCatalogGeneration } from "../retrieval/index-coordinator.js";
 import { foregroundRetrievalSocketPath } from "../retrieval/foreground-protocol.js";
 import { loadArchiveRetentionMonths } from "../lifecycle/archive-retention.js";
+import { inspectBackgroundRecovery } from "../worker/recovery-policy.js";
 
 async function databasePath(runtimeRoot: string): Promise<string> {
   const path = join(runtimeRoot, "state", "memstore.sqlite");
@@ -101,10 +102,11 @@ export async function inspectStatus(request: {
   const archiveRetentionMonths = await loadArchiveRetentionMonths(request);
   const hookSqliteBusy = await inspectHookSqliteBusyDiagnostics(request.runtimeRoot);
   const captureInbox = await inspectCaptureInbox(request.runtimeRoot);
-  const [foregroundAttempts, catalogGeneration, foregroundSocketAvailable] = await Promise.all([
+  const [foregroundAttempts, catalogGeneration, foregroundSocketAvailable, backgroundRecovery] = await Promise.all([
     inspectForegroundAttempts(request.runtimeRoot),
     inspectRetrievalCatalogGeneration(request.runtimeRoot),
-    foregroundEndpointAcceptsConnections(request.runtimeRoot)
+    foregroundEndpointAcceptsConnections(request.runtimeRoot),
+    inspectBackgroundRecovery(request.runtimeRoot)
   ]);
   const workingSetGeneration = await inspectMemoryWorkingSetGeneration(request.runtimeRoot);
   const database = new DatabaseSync(await databasePath(request.runtimeRoot), { readOnly: true });
@@ -338,7 +340,11 @@ export async function inspectStatus(request: {
           dirty_at: catalogGeneration.dirtyAt,
           force_due_at: catalogGeneration.forceDueAt,
           last_completed_at: catalogGeneration.lastCompletedAt,
-          last_failed_at: catalogGeneration.lastFailedAt
+          last_failed_at: catalogGeneration.lastFailedAt,
+          recovery_mode: backgroundRecovery.active,
+          recovery_reasons: backgroundRecovery.reasons,
+          recovery_luna_backlog_count: backgroundRecovery.lunaBacklogCount,
+          recovery_capture_backlog_count: backgroundRecovery.captureBacklogCount
         },
         distillation: pipeline("distill_batch"),
         session_consolidation: pipeline("consolidate_session"),

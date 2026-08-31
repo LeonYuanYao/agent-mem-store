@@ -12,6 +12,7 @@ import { captureEvent } from "../../../src/capture/index.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { inspectStatus } from "../../../src/operations/status.js";
 import { runWorkerOnce } from "../../../src/worker/main.js";
+import { recordForegroundAttempt } from "../../../src/retrieval/foreground-attempts.js";
 
 const roots: string[] = [];
 
@@ -38,6 +39,136 @@ test("doctor diagnoses an initialized isolated installation without repairing it
     ["luna_operations", "ok"],
     ["vault_catalog", "ok"]
   ]);
+});
+
+test("doctor keeps recovered historical foreground deadlines as information instead of permanent degradation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-doctor-recovered-foreground-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  for (let ordinal = 0; ordinal < 3; ordinal += 1) {
+    await recordForegroundAttempt({
+      runtimeRoot,
+      attempt: {
+        requestId: `historical-deadline-${String(ordinal)}`,
+        eventKind: "UserPromptSubmit",
+        outcome: "deadline_exceeded",
+        admissionDelayMs: 0,
+        computeMs: 1_100,
+        receiptCommitMs: 0,
+        observedClientElapsedMs: 1_100,
+        postDeadlineWorkMs: 100,
+        createdAt: `2026-08-01T00:00:0${String(ordinal)}.000Z`,
+        completedAt: `2026-08-01T00:00:0${String(ordinal)}.000Z`
+      }
+    });
+  }
+  for (let ordinal = 0; ordinal < 20; ordinal += 1) {
+    await recordForegroundAttempt({
+      runtimeRoot,
+      attempt: {
+        requestId: `recent-completed-${String(ordinal)}`,
+        eventKind: "UserPromptSubmit",
+        outcome: "completed",
+        admissionDelayMs: 0,
+        computeMs: 80,
+        receiptCommitMs: 5,
+        observedClientElapsedMs: 80,
+        postDeadlineWorkMs: 0,
+        createdAt: `2026-08-20T00:00:${String(ordinal).padStart(2, "0")}.000Z`,
+        completedAt: `2026-08-20T00:00:${String(ordinal).padStart(2, "0")}.000Z`
+      }
+    });
+  }
+
+  const result = await inspectDoctor({
+    runtimeRoot,
+    vaultRoot,
+    deep: false,
+    now: "2026-08-20T01:00:00.000Z"
+  });
+  expect(result.state).toBe("healthy");
+  expect(result.checks.find((check) => check.name === "foreground_retrieval"))
+    .toMatchObject({ state: "ok" });
+  expect(result.checks.find((check) => check.name === "foreground_retrieval")?.detail)
+    .toContain("3 lifetime deadlines");
+});
+
+test("doctor reports an offline Luna backlog as paused background work without degrading local recall", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-doctor-offline-luna-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  const operation = await enqueueLunaOperation({
+    runtimeRoot,
+    kind: "semantic_assessment",
+    idempotencyKey: "doctor-offline-luna",
+    payload: { candidateId: "candidate-offline" },
+    createdAt: "2026-08-20T00:00:00.000Z"
+  });
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare(
+      `UPDATE luna_operations
+       SET state = 'blocked', last_error_category = 'timeout', updated_at = ?
+       WHERE operation_id = ?`
+    ).run("2026-08-20T00:10:00.000Z", operation.operationId);
+  } finally {
+    database.close();
+  }
+
+  const result = await inspectDoctor({
+    runtimeRoot,
+    vaultRoot,
+    deep: false,
+    now: "2026-08-20T01:00:00.000Z"
+  });
+  expect(result.state).toBe("healthy");
+  expect(result.checks.find((check) => check.name === "luna_operations"))
+    .toMatchObject({ state: "ok" });
+  expect(result.checks.find((check) => check.name === "luna_operations")?.detail)
+    .toContain("background work paused");
+});
+
+test("doctor treats an overdue normal index deadline as expected while recovery coalescing is active", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-doctor-index-recovery-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  for (let ordinal = 0; ordinal < 32; ordinal += 1) {
+    await enqueueLunaOperation({
+      runtimeRoot,
+      kind: "semantic_assessment",
+      idempotencyKey: `doctor-index-recovery-${String(ordinal)}`,
+      payload: { candidateId: `candidate-${String(ordinal)}` },
+      createdAt: "2026-08-20T00:00:00.000Z"
+    });
+  }
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare(
+      `UPDATE retrieval_catalog_generations
+       SET dirty_generation = 10, published_generation = 0,
+           dirty_at = ?, force_due_at = ? WHERE singleton = 1`
+    ).run("2026-08-20T00:00:00.000Z", "2026-08-20T00:02:00.000Z");
+  } finally {
+    database.close();
+  }
+
+  const result = await inspectDoctor({
+    runtimeRoot,
+    vaultRoot,
+    deep: false,
+    now: "2026-08-20T00:10:00.000Z"
+  });
+  expect(result.state).toBe("healthy");
+  expect(result.checks.find((check) => check.name === "retrieval_catalog_generation"))
+    .toMatchObject({ state: "ok" });
+  expect(result.checks.find((check) => check.name === "retrieval_catalog_generation")?.detail)
+    .toContain("recovery coalescing");
 });
 
 test("doctor reports a pending Runtime migration without applying it", async () => {

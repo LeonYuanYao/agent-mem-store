@@ -6,7 +6,10 @@ import { z } from "zod";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import type { EmbeddingAdapter } from "./index.js";
 import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
-import type { ForegroundExecutionControl } from "./foreground-lane.js";
+import {
+  ForegroundExecutionAborted,
+  type ForegroundExecutionControl
+} from "./foreground-lane.js";
 import {
   buildRetrievalSearchIndex,
   rowToIndexedMemory,
@@ -438,39 +441,6 @@ async function loadActiveIndex(
   }
 }
 
-async function startEpoch(request: {
-  readonly runtimeRoot: string;
-  readonly sessionId: string;
-  readonly projectId: string;
-  readonly requestedAt: string;
-  readonly foregroundControl?: ForegroundExecutionControl;
-}): Promise<string> {
-  const epochId = `msepoch_${randomUUID()}`;
-  const database = await openRuntimeDatabase(
-    request.runtimeRoot,
-    request.foregroundControl === undefined ? {} : { busyTimeoutMilliseconds: 50 }
-  );
-  try {
-    database.exec("BEGIN IMMEDIATE");
-    await request.foregroundControl?.checkpoint("before_session_epoch_commit");
-    database.prepare(
-      "UPDATE context_epochs SET state = 'closed', closed_at = ? WHERE session_id = ? AND state = 'active'"
-    ).run(request.requestedAt, request.sessionId);
-    database.prepare(
-      `INSERT INTO context_epochs(
-         epoch_id, session_id, project_id, state, automatic_token_total, started_at
-       ) VALUES (?, ?, ?, 'active', 0, ?)`
-    ).run(epochId, request.sessionId, request.projectId, request.requestedAt);
-    database.exec("COMMIT");
-  } catch (error) {
-    database.exec("ROLLBACK");
-    throw error;
-  } finally {
-    database.close();
-  }
-  return epochId;
-}
-
 async function loadEpoch(runtimeRoot: string, sessionId: string): Promise<{
   readonly epochId: string;
   readonly tokenTotal: number;
@@ -533,6 +503,10 @@ async function recordAutomaticReceipt(request: {
   readonly timingStartedAt?: number;
   readonly preReceiptTimings?: RetrievalPreReceiptTimings;
   readonly requestedAt: string;
+  readonly eventId?: string;
+  readonly startSessionEpoch?: {
+    readonly sessionId: string;
+  };
   readonly foregroundControl?: ForegroundExecutionControl;
 }): Promise<{
   readonly receiptId: string;
@@ -541,16 +515,35 @@ async function recordAutomaticReceipt(request: {
 }> {
   const receiptId = `msreceipt_${randomUUID()}`;
   const receiptStarted = performance.now();
+  await request.foregroundControl?.checkpoint("before_receipt_transaction", 100);
   const database = await openRuntimeDatabase(request.runtimeRoot, {
     busyTimeoutMilliseconds: 50
   });
   try {
+    await request.foregroundControl?.checkpoint("receipt_database_opened", 100);
     database.exec("BEGIN IMMEDIATE");
-    await request.foregroundControl?.checkpoint("receipt_transaction_started");
-    const epoch = database.prepare(
-      `SELECT automatic_token_total, memory_legend_version
-       FROM context_epochs WHERE epoch_id = ? AND state = 'active'`
-    ).get(request.epochId);
+    let epoch: Record<string, unknown> | undefined;
+    if (request.startSessionEpoch !== undefined) {
+      database.prepare(
+        "UPDATE context_epochs SET state = 'closed', closed_at = ? WHERE session_id = ? AND state = 'active'"
+      ).run(request.requestedAt, request.startSessionEpoch.sessionId);
+      database.prepare(
+        `INSERT INTO context_epochs(
+           epoch_id, session_id, project_id, state, automatic_token_total, started_at
+         ) VALUES (?, ?, ?, 'active', 0, ?)`
+      ).run(
+        request.epochId,
+        request.startSessionEpoch.sessionId,
+        request.projectId,
+        request.requestedAt
+      );
+      epoch = { automatic_token_total: 0, memory_legend_version: 0 };
+    } else {
+      epoch = database.prepare(
+        `SELECT automatic_token_total, memory_legend_version
+         FROM context_epochs WHERE epoch_id = ? AND state = 'active'`
+      ).get(request.epochId);
+    }
     if (epoch === undefined) throw new Error("Context Epoch changed before Receipt commit.");
     const previousTotal = z.number().int().nonnegative().parse(epoch.automatic_token_total);
     const epochTotal = previousTotal + request.renderedTokenCount;
@@ -647,6 +640,18 @@ async function recordAutomaticReceipt(request: {
         "UPDATE retrieval_receipts SET latency_ms = ?, timing_json = ? WHERE receipt_id = ?"
       ).run(totalMs, JSON.stringify(timings), receiptId);
     }
+    if (request.eventId !== undefined) {
+      const reservation = database.prepare(
+        `UPDATE foreground_event_reservations
+         SET state = 'completed', receipt_id = ?, last_error_code = NULL,
+             next_retry_at = NULL, updated_at = ?
+         WHERE event_id = ? AND state = 'processing'`
+      ).run(receiptId, request.requestedAt, request.eventId);
+      if (reservation.changes !== 1) {
+        throw new Error("Foreground event reservation changed before Receipt commit.");
+      }
+    }
+    await request.foregroundControl?.checkpoint("before_receipt_commit", 100);
     database.exec("COMMIT");
     return {
       receiptId,
@@ -654,7 +659,7 @@ async function recordAutomaticReceipt(request: {
       receiptCommitMs: Math.max(0, performance.now() - receiptStarted)
     };
   } catch (error) {
-    database.exec("ROLLBACK");
+    if (database.isTransaction) database.exec("ROLLBACK");
     throw error;
   } finally {
     database.close();
@@ -667,6 +672,7 @@ export interface SessionStartShadowPackRequest {
   readonly projectId: string;
   readonly sessionId: string;
   readonly requestedAt: string;
+  readonly eventId?: string;
   readonly snapshot?: RetrievalSnapshot;
   readonly foregroundControl?: ForegroundExecutionControl;
 }
@@ -676,8 +682,7 @@ async function prepareSessionStartShadowPackCore(
 ): Promise<ShadowPack> {
   const started = performance.now();
   const requestedAt = z.iso.datetime().parse(request.requestedAt);
-  const epochId = await startEpoch({ ...request, requestedAt });
-  await request.foregroundControl?.checkpoint("session_epoch_loaded");
+  const epochId = `msepoch_${randomUUID()}`;
   let active: Record<string, unknown>;
   try {
     active = await loadActiveIndex(request.runtimeRoot, request.snapshot);
@@ -696,6 +701,8 @@ async function prepareSessionStartShadowPackCore(
       emptyReason: "index_unavailable",
       latencyMs: Math.max(0, performance.now() - started),
       requestedAt,
+      startSessionEpoch: { sessionId: request.sessionId },
+      ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
       ...(request.foregroundControl === undefined
         ? {}
         : { foregroundControl: request.foregroundControl })
@@ -825,6 +832,8 @@ async function prepareSessionStartShadowPackCore(
     ...(selected.length === 0 ? { emptyReason: "no_eligible_memory" } : {}),
     latencyMs: Math.max(0, performance.now() - started),
     requestedAt,
+    startSessionEpoch: { sessionId: request.sessionId },
+    ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
     ...(request.foregroundControl === undefined
       ? {}
       : { foregroundControl: request.foregroundControl })
@@ -1154,6 +1163,7 @@ export interface UserPromptShadowPackRequest {
   };
   readonly adapter?: EmbeddingAdapter;
   readonly requestedAt: string;
+  readonly eventId?: string;
   readonly snapshot?: RetrievalSnapshot;
   readonly foregroundControl?: ForegroundExecutionControl;
   readonly policy?: {
@@ -1201,6 +1211,7 @@ async function prepareUserPromptShadowPackCore(
         rankingAndRelationshipMs: 0
       },
       requestedAt,
+      ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
       ...(request.foregroundControl === undefined
         ? {}
         : { foregroundControl: request.foregroundControl })
@@ -1483,6 +1494,7 @@ async function prepareUserPromptShadowPackCore(
       rankingAndRelationshipMs: Math.max(0, performance.now() - rankingAndRelationshipStarted)
     },
     requestedAt,
+    ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
     ...(request.foregroundControl === undefined
       ? {}
       : { foregroundControl: request.foregroundControl })
@@ -1526,7 +1538,8 @@ export async function prepareSessionStartShadowPack(
 ): Promise<ShadowPack> {
   try {
     return await prepareSessionStartShadowPackCore(request);
-  } catch {
+  } catch (error) {
+    if (error instanceof ForegroundExecutionAborted) throw error;
     return failOpenPack("session_start", "runtime_unavailable");
   }
 }
@@ -1536,7 +1549,8 @@ export async function prepareUserPromptShadowPack(
 ): Promise<ShadowPack> {
   try {
     return await prepareUserPromptShadowPackCore(request);
-  } catch {
+  } catch (error) {
+    if (error instanceof ForegroundExecutionAborted) throw error;
     return failOpenPack("user_prompt", "runtime_unavailable");
   }
 }

@@ -251,3 +251,95 @@ test("a completed index is coalesced during backlog and refreshes immediately af
     documentCount: 2
   });
 });
+
+test("a large recovered Luna backlog defers small index advances until the backlog drains", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-index-worker-recovery-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const builtAt = "2026-08-17T20:00:00.000Z";
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(builtAt));
+  const embedding: EmbeddingAdapter = {
+    identity: {
+      adapterVersion: "recovery-fixture-v1",
+      modelIdentity: "recovery-fixture",
+      artifactSha256: "c".repeat(64),
+      dimensions: 2,
+      normalization: "l2"
+    },
+    embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174901",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174911",
+      body: "The recovery fixture starts with one published memory."
+    })
+  });
+  await buildRetrievalIndex({ runtimeRoot, vaultRoot, adapter: embedding, builtAt });
+  for (let ordinal = 0; ordinal < 10; ordinal += 1) {
+    const suffix = String(ordinal).padStart(12, "0");
+    await writeCanonicalMemory({
+      runtimeRoot,
+      vaultRoot,
+      actor: "human",
+      memory: makeCanonicalMemory({
+        memoryId: `msmem_00000000-0000-4000-8000-${suffix}`,
+        revisionId: `msrev_00000000-0000-4001-8000-${suffix}`,
+        body: `Recovered memory ${String(ordinal)} should be coalesced.`
+      })
+    });
+  }
+  const operationIds: string[] = [];
+  for (let ordinal = 0; ordinal < 32; ordinal += 1) {
+    const operation = await enqueueLunaOperation({
+      runtimeRoot,
+      kind: "semantic_assessment",
+      idempotencyKey: `retrieval-recovery-${String(ordinal)}`,
+      payload: { candidateId: `candidate-${String(ordinal)}` },
+      createdAt: "2026-08-17T20:00:30.000Z"
+    });
+    operationIds.push(operation.operationId);
+  }
+
+  await expect(runWorkerOnce({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "recovery-worker",
+    now: "2026-08-17T20:10:00.000Z",
+    workerStartedAt: builtAt,
+    adapters: { embedding }
+  })).resolves.toEqual({ state: "idle" });
+  await expect(inspectActiveRetrievalIndex(runtimeRoot)).resolves.toMatchObject({
+    documentCount: 1
+  });
+
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    const placeholders = operationIds.map(() => "?").join(", ");
+    database.prepare(
+      `UPDATE luna_operations SET state = 'completed', completed_at = ?, updated_at = ?
+       WHERE operation_id IN (${placeholders})`
+    ).run("2026-08-17T20:10:30.000Z", "2026-08-17T20:10:30.000Z", ...operationIds);
+  } finally {
+    database.close();
+  }
+  await expect(runWorkerOnce({
+    runtimeRoot,
+    vaultRoot,
+    workerId: "recovery-drained-worker",
+    now: "2026-08-17T20:11:00.000Z",
+    workerStartedAt: builtAt,
+    adapters: { embedding }
+  })).resolves.toMatchObject({
+    state: "worked",
+    activities: ["retrieval-index:published"]
+  });
+  await expect(inspectActiveRetrievalIndex(runtimeRoot)).resolves.toMatchObject({
+    documentCount: 11
+  });
+});

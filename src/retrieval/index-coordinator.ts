@@ -6,6 +6,8 @@ import {
 } from "../runtime/database.js";
 
 const failureCooldownMilliseconds = 5 * 60_000;
+const recoveryMinimumGenerationDelta = 32;
+const recoveryMaximumStalenessMilliseconds = 30 * 60_000;
 
 const generationRowSchema = z.object({
   dirty_generation: z.number().int().nonnegative(),
@@ -63,13 +65,35 @@ export type BeginRetrievalIndexBuildResult =
   | {
       readonly state: "started";
       readonly targetGeneration: number;
-      readonly reason: "index_unavailable" | "adapter_changed" | "quiet_period" | "force_due";
+      readonly reason: "index_unavailable" | "adapter_changed" | "quiet_period" | "force_due" |
+        "recovery_batch" | "recovery_staleness";
     }
   | {
       readonly state: "not_due";
       readonly reason: "clean" | "building" | "quiet_period" | "foreground_pressure" |
-        "failure_cooldown";
+        "failure_cooldown" | "recovery_coalescing";
     };
+
+function recoveryBuildDecision(
+  row: z.infer<typeof generationRowSchema>,
+  nowMilliseconds: number,
+  foregroundPressure: boolean
+): { readonly due: false; readonly reason: "foreground_pressure" | "recovery_coalescing" } |
+  { readonly due: true; readonly reason: "recovery_batch" | "recovery_staleness" } {
+  if (foregroundPressure) return { due: false, reason: "foreground_pressure" };
+  const generationDelta = row.dirty_generation - row.published_generation;
+  if (generationDelta >= recoveryMinimumGenerationDelta) {
+    return { due: true, reason: "recovery_batch" };
+  }
+  const stalenessAnchor = row.last_completed_at ?? row.dirty_at;
+  if (
+    stalenessAnchor !== null &&
+    Date.parse(stalenessAnchor) + recoveryMaximumStalenessMilliseconds > nowMilliseconds
+  ) {
+    return { due: false, reason: "recovery_coalescing" };
+  }
+  return { due: true, reason: "recovery_staleness" };
+}
 
 export async function beginRetrievalIndexBuild(request: {
   readonly runtimeRoot: string;
@@ -77,6 +101,7 @@ export async function beginRetrievalIndexBuild(request: {
   readonly activeIndexExists: boolean;
   readonly adapterMatches: boolean;
   readonly foregroundPressure: boolean;
+  readonly recoveryMode?: boolean;
 }): Promise<BeginRetrievalIndexBuildResult> {
   const now = z.iso.datetime().parse(request.now);
   const nowMilliseconds = Date.parse(now);
@@ -102,6 +127,14 @@ export async function beginRetrievalIndexBuild(request: {
       request.activeIndexExists && request.adapterMatches &&
       initial.dirty_generation <= initial.published_generation
     ) return { state: "not_due", reason: "clean" };
+    if (request.activeIndexExists && request.adapterMatches && request.recoveryMode === true) {
+      const recovery = recoveryBuildDecision(
+        initial,
+        nowMilliseconds,
+        request.foregroundPressure
+      );
+      if (!recovery.due) return { state: "not_due", reason: recovery.reason };
+    }
     if (request.activeIndexExists && request.adapterMatches) {
       const forceDue = initial.force_due_at !== null &&
         Date.parse(initial.force_due_at) <= nowMilliseconds;
@@ -141,12 +174,24 @@ export async function beginRetrievalIndexBuild(request: {
         return { state: "not_due", reason: "failure_cooldown" };
       }
 
-      let reason: "index_unavailable" | "adapter_changed" | "quiet_period" | "force_due";
+      let reason: "index_unavailable" | "adapter_changed" | "quiet_period" | "force_due" |
+        "recovery_batch" | "recovery_staleness";
       if (!request.activeIndexExists) reason = "index_unavailable";
       else if (!request.adapterMatches) reason = "adapter_changed";
       else if (row.dirty_generation <= row.published_generation) {
         database.exec("COMMIT");
         return { state: "not_due", reason: "clean" };
+      } else if (request.recoveryMode === true) {
+        const recovery = recoveryBuildDecision(
+          row,
+          nowMilliseconds,
+          request.foregroundPressure
+        );
+        if (!recovery.due) {
+          database.exec("COMMIT");
+          return { state: "not_due", reason: recovery.reason };
+        }
+        reason = recovery.reason;
       } else if (row.force_due_at !== null && Date.parse(row.force_due_at) <= nowMilliseconds) {
         reason = "force_due";
       } else if (

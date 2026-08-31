@@ -159,6 +159,18 @@ async function hasActiveEpoch(runtimeRoot: string, sessionId: string): Promise<b
   }
 }
 
+async function foregroundDeliveryFailed(runtimeRoot: string, eventId: string): Promise<boolean> {
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    return database.prepare(
+      `SELECT 1 AS present FROM foreground_event_reservations
+       WHERE event_id = ? AND state = 'retrying'`
+    ).get(eventId) !== undefined;
+  } finally {
+    database.close();
+  }
+}
+
 function failureCode(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) {
     return createCompactCode(error.message);
@@ -183,6 +195,17 @@ export async function runNextShadowEvaluation(request: {
   try {
     const event = await readCapturedEvent(request.runtimeRoot, eventId);
     if (event === undefined) throw new Error("Captured event disappeared before Shadow evaluation.");
+    if (await foregroundDeliveryFailed(request.runtimeRoot, eventId)) {
+      const reason = "foreground_delivery_failed";
+      await finishShadowEvaluation({
+        runtimeRoot: request.runtimeRoot,
+        eventId,
+        state: "skipped",
+        errorCode: reason,
+        updatedAt: now
+      });
+      return { state: "skipped", eventId, reason };
+    }
     if (event.projectId === undefined || event.sessionId === undefined) {
       const reason = event.projectId === undefined ? "project_unresolved" : "session_unavailable";
       await finishShadowEvaluation({

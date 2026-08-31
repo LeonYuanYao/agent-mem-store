@@ -7,7 +7,7 @@ export interface ForegroundLaneRequest {
 
 export interface ForegroundExecutionControl {
   readonly signal: AbortSignal;
-  checkpoint(stage: string): Promise<void>;
+  checkpoint(stage: string, minimumRemainingMilliseconds?: number): Promise<void>;
 }
 
 export interface ForegroundLaneAttempt {
@@ -27,7 +27,7 @@ type ForegroundLaneInterruption =
   | { readonly state: "cancelled"; readonly requestId: string }
   | { readonly state: "unavailable"; readonly requestId: string };
 
-class ForegroundExecutionAborted extends Error {
+export class ForegroundExecutionAborted extends Error {
   constructor(readonly outcome: "deadline_exceeded" | "cancelled") {
     super(outcome);
   }
@@ -100,10 +100,14 @@ export function createForegroundRetrievalLane<
       const timer = setTimeout(() => { controller.abort("deadline"); }, remainingMilliseconds);
       const control: ForegroundExecutionControl = {
         signal: controller.signal,
-        checkpoint: async () => {
+        checkpoint: async (_stage, minimumRemainingMilliseconds = 0) => {
           await new Promise<void>((resolve) => { setImmediate(resolve); });
           if (controller.signal.aborted) {
             throw new ForegroundExecutionAborted(abortOutcome(controller.signal));
+          }
+          if (performance.now() + minimumRemainingMilliseconds >= monotonicDeadline) {
+            controller.abort("deadline");
+            throw new ForegroundExecutionAborted("deadline_exceeded");
           }
         }
       };
@@ -112,7 +116,6 @@ export function createForegroundRetrievalLane<
       try {
         await control.checkpoint("admission");
         const result = await options.execute(request, control);
-        await control.checkpoint("completion");
         outcome = result.state === "completed" || result.state === "empty"
           ? result.state
           : "unavailable";

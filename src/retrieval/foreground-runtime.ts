@@ -44,6 +44,8 @@ interface PendingRequest {
   readonly reject: (error: Error) => void;
 }
 
+const foregroundPressureCooldownMilliseconds = 5_000;
+
 export interface ForegroundRuntime {
   readonly embedding: EmbeddingAdapter;
   readonly threadId: number;
@@ -240,7 +242,7 @@ export async function startForegroundRuntime(request: {
     },
     get threadId() { return replacement?.threadId ?? worker.threadId; },
     hasRecentPressure: () => replacement?.hasRecentPressure() ??
-      performance.now() - lastPressureAt <= 250,
+      performance.now() - lastPressureAt <= foregroundPressureCooldownMilliseconds,
     publishSnapshot: (snapshot) => new Promise<void>((resolvePublication, rejectPublication) => {
       if (closed) {
         rejectPublication(new Error("Foreground Runtime is closed."));

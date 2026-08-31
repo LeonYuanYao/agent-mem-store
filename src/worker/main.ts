@@ -71,6 +71,7 @@ import {
   runNextDuplicateAssessment,
   type DuplicateAssessmentAdapter
 } from "../quality/duplicates.js";
+import { inspectBackgroundRecovery } from "./recovery-policy.js";
 
 export interface WorkerAdapters {
   readonly luna?: LunaWorkerAdapter & CandidateAssessmentAdapter & HumanConflictAssessmentAdapter;
@@ -336,6 +337,7 @@ export async function runWorkerOnce(request: {
   }
   if (request.adapters?.embedding !== undefined) {
     const foregroundPressure = request.adapters.foregroundPressure?.() === true;
+    const recoveryMode = (await inspectBackgroundRecovery(request.runtimeRoot)).active;
     const activeIndex = await inspectActiveRetrievalIndex(request.runtimeRoot);
     const identity = request.adapters.embedding.identity;
     const adapterMatches = activeIndex !== undefined &&
@@ -347,7 +349,8 @@ export async function runWorkerOnce(request: {
           now,
           activeIndexExists: activeIndex !== undefined,
           adapterMatches,
-          foregroundPressure
+          foregroundPressure,
+          recoveryMode
         });
     if (indexBuild.state === "started") {
       try {

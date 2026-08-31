@@ -270,6 +270,68 @@ test("foreground reservation succeeds before a Capture Inbox event reaches SQLit
   }
 });
 
+test("Shadow skips a failed foreground event instead of replacing a newer Session epoch", async () => {
+  const roots = await fixture();
+  const sessionId = "foreground-shadow-recovery";
+  const failedEventId = "msevent_foreground_shadow_failed";
+  await captureEvent({
+    runtimeRoot: roots.runtimeRoot,
+    event: {
+      schemaVersion: 1,
+      eventId: failedEventId,
+      deduplicationKey: "foreground:shadow-failed",
+      agent: "codex",
+      eventKind: "SessionStart",
+      occurredAt: "2026-08-25T12:00:00.000Z",
+      sessionId,
+      projectId,
+      payload: { source: "startup" }
+    }
+  });
+  const server = await startForegroundRetrievalServer({ ...roots, adapter });
+  try {
+    await expect(requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      eventId: failedEventId,
+      projectId,
+      sessionId,
+      requestedAt: "2026-08-25T12:00:00.000Z",
+      timeoutMilliseconds: 10
+    })).resolves.toMatchObject({ state: "deadline_exceeded" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await expect(requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      eventId: "msevent_foreground_shadow_newer",
+      projectId,
+      sessionId,
+      requestedAt: "2026-08-25T12:10:00.000Z"
+    })).resolves.toMatchObject({ state: "completed" });
+
+    await expect(runNextShadowEvaluation({
+      ...roots,
+      adapter,
+      now: "2026-08-25T12:20:00.000Z"
+    })).resolves.toEqual({
+      state: "skipped",
+      eventId: failedEventId,
+      reason: "foreground_delivery_failed"
+    });
+    const database = await openRuntimeDatabase(roots.runtimeRoot);
+    try {
+      expect(database.prepare(
+        `SELECT started_at FROM context_epochs
+         WHERE session_id = ? AND state = 'active'`
+      ).get(sessionId)?.started_at).toBe("2026-08-25T12:10:00.000Z");
+    } finally {
+      database.close();
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 async function rawSocketRequest(socketPath: string, source: string | Buffer): Promise<Record<string, unknown>> {
   return new Promise<Record<string, unknown>>((resolveResponse, rejectResponse) => {
     const socket = createConnection(socketPath);
@@ -354,6 +416,42 @@ test("the client rejects malformed responses and enforces its deadline", async (
         else rejectClose(error);
       }));
     }
+  }
+});
+
+test("a SessionStart deadline leaves no Context Epoch or Receipt side effects", async () => {
+  const roots = await fixture();
+  const eventId = "msevent_foreground_session_deadline";
+  const sessionId = "foreground-session-deadline";
+  const server = await startForegroundRetrievalServer({ ...roots, adapter });
+  try {
+    await expect(requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      eventId,
+      projectId,
+      sessionId,
+      requestedAt: "2026-08-25T12:09:00.000Z",
+      timeoutMilliseconds: 10
+    })).resolves.toMatchObject({ state: "deadline_exceeded" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const database = await openRuntimeDatabase(roots.runtimeRoot);
+    try {
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM context_epochs WHERE session_id = ?"
+      ).get(sessionId)?.count).toBe(0);
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM retrieval_receipts WHERE caller_identity = ?"
+      ).get(`session:${sessionId}`)?.count).toBe(0);
+    } finally {
+      database.close();
+    }
+    await expect(inspectShadowEvaluation(roots.runtimeRoot, eventId)).resolves.toMatchObject({
+      state: "retrying"
+    });
+  } finally {
+    await server.close();
   }
 });
 

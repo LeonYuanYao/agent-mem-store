@@ -136,6 +136,73 @@ test("foreground pressure yields quiet builds but not force-due work", async () 
   })).resolves.toEqual({ state: "started", targetGeneration: 1, reason: "force_due" });
 });
 
+test("recovery mode coalesces small generation advances and always yields to foreground pressure", async () => {
+  const runtimeRoot = await createRoot();
+  const database = await openRuntimeDatabase(runtimeRoot);
+  insertCatalogRows(database, 100);
+  database.prepare(
+    `UPDATE retrieval_catalog_generations
+     SET dirty_at = ?, force_due_at = ? WHERE singleton = 1`
+  ).run("2026-08-26T18:00:00.000Z", "2026-08-26T18:02:00.000Z");
+  database.close();
+
+  const initial = await beginRetrievalIndexBuild({
+    runtimeRoot,
+    now: "2026-08-26T18:05:00.000Z",
+    activeIndexExists: true,
+    adapterMatches: true,
+    foregroundPressure: false,
+    recoveryMode: true
+  });
+  expect(initial).toEqual({
+    state: "started",
+    targetGeneration: 100,
+    reason: "recovery_batch"
+  });
+  await completeRetrievalIndexBuild({
+    runtimeRoot,
+    targetGeneration: 100,
+    completedAt: "2026-08-26T18:05:05.000Z"
+  });
+
+  const changing = await openRuntimeDatabase(runtimeRoot);
+  insertCatalogRows(changing, 10, 100);
+  changing.prepare(
+    `UPDATE retrieval_catalog_generations
+     SET dirty_at = ?, force_due_at = ? WHERE singleton = 1`
+  ).run("2026-08-26T18:06:00.000Z", "2026-08-26T18:08:00.000Z");
+  changing.close();
+
+  await expect(beginRetrievalIndexBuild({
+    runtimeRoot,
+    now: "2026-08-26T18:15:00.000Z",
+    activeIndexExists: true,
+    adapterMatches: true,
+    foregroundPressure: false,
+    recoveryMode: true
+  })).resolves.toEqual({ state: "not_due", reason: "recovery_coalescing" });
+  await expect(beginRetrievalIndexBuild({
+    runtimeRoot,
+    now: "2026-08-26T18:36:00.000Z",
+    activeIndexExists: true,
+    adapterMatches: true,
+    foregroundPressure: true,
+    recoveryMode: true
+  })).resolves.toEqual({ state: "not_due", reason: "foreground_pressure" });
+  await expect(beginRetrievalIndexBuild({
+    runtimeRoot,
+    now: "2026-08-26T18:36:00.000Z",
+    activeIndexExists: true,
+    adapterMatches: true,
+    foregroundPressure: false,
+    recoveryMode: true
+  })).resolves.toEqual({
+    state: "started",
+    targetGeneration: 110,
+    reason: "recovery_staleness"
+  });
+});
+
 test("failed builds respect a five-minute cooldown", async () => {
   const runtimeRoot = await createRoot();
   const database = await openRuntimeDatabase(runtimeRoot);

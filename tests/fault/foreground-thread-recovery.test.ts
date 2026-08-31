@@ -10,7 +10,7 @@ const identity = {
   normalization: "l2"
 };
 
-function fixtureWorkerUrl(): URL {
+function fixtureWorkerUrl(pressureOnStart = false): URL {
   const source = `
     import { parentPort } from "node:worker_threads";
     const identity = ${JSON.stringify(identity)};
@@ -29,6 +29,9 @@ function fixtureWorkerUrl(): URL {
         parentPort.close();
       }
     });
+    if (${JSON.stringify(pressureOnStart)}) {
+      parentPort.postMessage({ state: "foreground_pressure" });
+    }
     parentPort.postMessage({ state: "ready", identity });
   `;
   return new URL(`data:text/javascript,${encodeURIComponent(source)}`);
@@ -48,6 +51,22 @@ test("the Foreground Runtime exposes one thread-owned embedding Adapter and clos
   await runtime.close();
   await expect(runtime.embedding.embed(["after close"]))
     .rejects.toThrow("Foreground Runtime is closed");
+});
+
+test("foreground pressure keeps background writers cooled down beyond the immediate request", async () => {
+  const runtime = await startForegroundRuntime({
+    runtimeRoot: "/isolated/runtime-pressure",
+    vaultRoot: "/isolated/vault-pressure",
+    workerUrl: fixtureWorkerUrl(true),
+    startupTimeoutMilliseconds: 1_000
+  });
+  try {
+    expect(runtime.hasRecentPressure()).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(runtime.hasRecentPressure()).toBe(true);
+  } finally {
+    await runtime.close();
+  }
 });
 
 test("a Foreground Runtime startup crash is surfaced without hanging", async () => {
