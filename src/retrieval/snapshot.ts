@@ -85,10 +85,27 @@ function normalizeSearchText(text: string): string {
   return text.normalize("NFKC").toLocaleLowerCase("en-US");
 }
 
-function tokenizeSearchText(text: string): ReadonlySet<string> {
-  return new Set(
-    normalizeSearchText(text).match(/[\p{L}\p{N}_./:-]+/gu)?.filter((term) => term.length > 1) ?? []
-  );
+export function tokenizeSearchText(text: string): ReadonlySet<string> {
+  const terms = new Set<string>();
+  const normalized = normalizeSearchText(text);
+  for (const token of normalized.match(/[\p{L}\p{N}_./:-]+/gu) ?? []) {
+    if (Array.from(token).length > 1) terms.add(token);
+    for (const latinRun of token.match(/[a-z0-9_./:-]+/gu) ?? []) {
+      if (latinRun.length > 1) terms.add(latinRun);
+    }
+    for (const cjkRun of token.match(
+      /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]+/gu
+    ) ?? []) {
+      const characters = Array.from(cjkRun);
+      if (characters.length > 1) terms.add(cjkRun);
+      for (let index = 0; index + 1 < characters.length; index += 1) {
+        const left = characters[index];
+        const right = characters[index + 1];
+        if (left !== undefined && right !== undefined) terms.add(left + right);
+      }
+    }
+  }
+  return terms;
 }
 
 export function buildRetrievalSearchIndex(

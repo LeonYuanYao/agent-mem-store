@@ -14,8 +14,8 @@ import {
   buildRetrievalSearchIndex,
   rowToIndexedMemory,
   snapshotMemoriesForProject,
+  tokenizeSearchText,
   type IndexedMemory,
-  type RetrievalSearchDocument,
   type RetrievalSearchIndex,
   type RetrievalSnapshot
 } from "./snapshot.js";
@@ -37,6 +37,11 @@ const AUTOMATIC_LEXICAL_CANDIDATE_LIMIT = 128;
 const AUTOMATIC_SEMANTIC_CANDIDATE_LIMIT = 64;
 const AUTOMATIC_SIGNAL_TERM_LIMIT = 16;
 const AUTOMATIC_SIGNAL_CANDIDATE_LIMIT = 64;
+const AUTOMATIC_RARE_TERM_FRACTION = 0.01;
+const AUTOMATIC_SINGLE_RARE_TERM_MINIMUM_LENGTH = 3;
+const AUTOMATIC_STRONG_EXACT_COVERAGE = 0.5;
+const AUTOMATIC_STRONG_APPLICABILITY_COVERAGE = 0.25;
+const AUTOMATIC_RARE_APPLICABILITY_COVERAGE = 0.15;
 const MEMORY_LEGEND_VERSION = 1;
 const MINIMUM_SESSION_ITEM_INCREMENT = tokenizer.encode(
   "\n[M:1 S:G A:H R:C] x"
@@ -56,6 +61,22 @@ interface ScoredMemory {
   readonly reasons: readonly string[];
   readonly similarity: number;
 }
+
+interface TermEvidence {
+  readonly matchedCount: number;
+  readonly matchedWeight: number;
+  readonly totalWeight: number;
+  readonly weightedCoverage: number;
+  readonly rareMatch: boolean;
+}
+
+const EMPTY_TERM_EVIDENCE: TermEvidence = {
+  matchedCount: 0,
+  matchedWeight: 0,
+  totalWeight: 0,
+  weightedCoverage: 0,
+  rareMatch: false
+};
 
 interface RetrievalStageTimings {
   readonly epochLoadMs: number;
@@ -860,10 +881,7 @@ async function prepareSessionStartShadowPackCore(
 }
 
 function queryTerms(text: string): readonly string[] {
-  return [...new Set(
-    (text.normalize("NFKC").toLocaleLowerCase("en-US").match(/[\p{L}\p{N}_./:-]+/gu) ?? [])
-      .filter((term) => term.length > 1)
-  )];
+  return [...tokenizeSearchText(text)];
 }
 
 function termMatches(
@@ -876,16 +894,32 @@ function termMatches(
     : terms.has(term);
 }
 
-function lexicalCoverage(
+function weightedTermEvidence(
   query: readonly string[],
-  document: RetrievalSearchDocument
-): number {
-  if (query.length === 0) return 0;
-  return query.filter((term) => termMatches(
-    term,
-    document.searchableTerms,
-    document.normalizedSearchableText
-  )).length / query.length;
+  termWeights: ReadonlyMap<string, number>,
+  rareTerms: ReadonlySet<string>,
+  terms: ReadonlySet<string>,
+  normalizedText: string
+): TermEvidence {
+  let matchedCount = 0;
+  let matchedWeight = 0;
+  let totalWeight = 0;
+  let rareMatch = false;
+  for (const term of query) {
+    const weight = termWeights.get(term) ?? 0;
+    totalWeight += weight;
+    if (!termMatches(term, terms, normalizedText)) continue;
+    matchedCount += 1;
+    matchedWeight += weight;
+    rareMatch ||= rareTerms.has(term);
+  }
+  return {
+    matchedCount,
+    matchedWeight,
+    totalWeight,
+    weightedCoverage: totalWeight === 0 ? 0 : matchedWeight / totalWeight,
+    rareMatch
+  };
 }
 
 function directMemoryReferences(
@@ -922,15 +956,36 @@ async function automaticCandidates(request: {
   readonly foregroundControl?: ForegroundExecutionControl;
 }): Promise<{
   readonly memories: readonly IndexedMemory[];
-  readonly exactMemoryIds: ReadonlySet<string>;
+  readonly exactTerms: readonly string[];
+  readonly exactTermWeights: ReadonlyMap<string, number>;
+  readonly rareExactTerms: ReadonlySet<string>;
   readonly directMemoryIds: ReadonlySet<string>;
   readonly rankingTerms: readonly string[];
+  readonly rankingTermWeights: ReadonlyMap<string, number>;
+  readonly rareRankingTerms: ReadonlySet<string>;
 }> {
   const eligibleIds = new Set(request.memories.map((memory) => memory.memoryId));
-  const documentFrequency = (term: string): number =>
-    request.searchIndex.postingsByTerm.get(term)?.length ?? Number.POSITIVE_INFINITY;
+  const scopedPostingsByTerm = new Map<string, readonly string[]>();
+  const scopedPostings = (term: string): readonly string[] => {
+    const existing = scopedPostingsByTerm.get(term);
+    if (existing !== undefined) return existing;
+    const postings = (request.searchIndex.postingsByTerm.get(term) ?? [])
+      .filter((memoryId) => eligibleIds.has(memoryId));
+    scopedPostingsByTerm.set(term, postings);
+    return postings;
+  };
+  const documentFrequency = (term: string): number => scopedPostings(term).length;
+  const rareTermMaximumDocumentFrequency = Math.max(
+    1,
+    Math.floor(request.memories.length * AUTOMATIC_RARE_TERM_FRACTION)
+  );
+  const termWeight = (term: string): number =>
+    Math.log1p(request.memories.length / Math.max(1, documentFrequency(term)));
+  const coverageTermWeight = (term: string): number => documentFrequency(term) === 0
+    ? Math.log1p(1)
+    : termWeight(term);
   const retrievalTerms = request.terms
-    .filter((term) => request.searchIndex.postingsByTerm.has(term))
+    .filter((term) => documentFrequency(term) > 0)
     .sort((left, right) => documentFrequency(left) - documentFrequency(right) ||
       right.length - left.length || left.localeCompare(right))
     .slice(0, AUTOMATIC_QUERY_TERM_LIMIT);
@@ -939,11 +994,21 @@ async function automaticCandidates(request: {
     ...retrievalTerms,
     ...request.terms.filter((term) => !selectedRetrievalTerms.has(term))
   ].slice(0, AUTOMATIC_QUERY_TERM_LIMIT);
+  const rankingTermWeights = new Map(
+    rankingTerms.map((term) => [term, coverageTermWeight(term)] as const)
+  );
+  const rareRankingTerms = new Set(
+    rankingTerms.filter((term) =>
+      Array.from(term).length >= AUTOMATIC_SINGLE_RARE_TERM_MINIMUM_LENGTH &&
+      documentFrequency(term) > 0 &&
+      documentFrequency(term) <= rareTermMaximumDocumentFrequency
+    )
+  );
   const lexicalScores = new Map<string, { matchedCount: number; idf: number }>();
   let postingVisits = 0;
   for (const term of retrievalTerms) {
-    const postings = request.searchIndex.postingsByTerm.get(term) ?? [];
-    const idf = Math.log1p(request.memories.length / Math.max(1, postings.length));
+    const postings = scopedPostings(term);
+    const idf = termWeight(term);
     for (const memoryId of postings) {
       if (!eligibleIds.has(memoryId)) continue;
       const current = lexicalScores.get(memoryId) ?? { matchedCount: 0, idf: 0 };
@@ -971,13 +1036,13 @@ async function automaticCandidates(request: {
   }
   const signalScores = new Map<string, number>();
   const signalTerms = queryTerms(request.signals.join("\n"))
-    .filter((term) => request.searchIndex.postingsByTerm.has(term))
+    .filter((term) => documentFrequency(term) > 0)
     .sort((left, right) => documentFrequency(left) - documentFrequency(right) ||
       right.length - left.length || left.localeCompare(right))
     .slice(0, AUTOMATIC_SIGNAL_TERM_LIMIT);
   for (const term of signalTerms) {
-    const postings = request.searchIndex.postingsByTerm.get(term) ?? [];
-    const idf = Math.log1p(request.memories.length / Math.max(1, postings.length));
+    const postings = scopedPostings(term);
+    const idf = termWeight(term);
     for (const memoryId of postings) {
       if (!eligibleIds.has(memoryId)) continue;
       signalScores.set(memoryId, (signalScores.get(memoryId) ?? 0) + idf);
@@ -996,16 +1061,22 @@ async function automaticCandidates(request: {
   for (const memoryId of directMemoryIds) {
     if (eligibleIds.has(memoryId)) candidateIds.add(memoryId);
   }
-  const exactMemoryIds = new Set<string>();
-  const exactTerms = new Set(
+  const exactTerms = [...new Set(
     (request.prompt.match(/[A-Za-z][A-Za-z0-9_.:/-]{3,}|[A-Z]{2,}[0-9-]*/gu) ?? [])
       .map((term) => term.normalize("NFKC").toLocaleLowerCase("en-US"))
+  )].filter((term) => documentFrequency(term) > 0);
+  const exactTermWeights = new Map(
+    exactTerms.map((term) => [term, termWeight(term)] as const)
+  );
+  const rareExactTerms = new Set(
+    exactTerms.filter((term) =>
+      Array.from(term).length >= AUTOMATIC_SINGLE_RARE_TERM_MINIMUM_LENGTH &&
+      documentFrequency(term) <= rareTermMaximumDocumentFrequency
+    )
   );
   for (const term of exactTerms) {
-    const postings = request.searchIndex.postingsByTerm.get(term) ?? [];
+    const postings = scopedPostings(term);
     for (const memoryId of postings) {
-      if (!eligibleIds.has(memoryId)) continue;
-      exactMemoryIds.add(memoryId);
       candidateIds.add(memoryId);
     }
   }
@@ -1014,9 +1085,13 @@ async function automaticCandidates(request: {
     memories: [...candidateIds]
       .map((memoryId) => memoryById.get(memoryId))
       .filter((memory): memory is IndexedMemory => memory !== undefined),
-    exactMemoryIds,
+    exactTerms,
+    exactTermWeights,
+    rareExactTerms,
     directMemoryIds,
-    rankingTerms
+    rankingTerms,
+    rankingTermWeights,
+    rareRankingTerms
   };
 }
 
@@ -1284,14 +1359,26 @@ async function prepareUserPromptShadowPackCore(
     const document = searchIndex.documentsByMemoryId.get(memory.memoryId);
     return {
       memory,
-      coverage: document === undefined ? 0 : lexicalCoverage(candidates.rankingTerms, document)
+      evidence: document === undefined
+        ? EMPTY_TERM_EVIDENCE
+        : weightedTermEvidence(
+            candidates.rankingTerms,
+            candidates.rankingTermWeights,
+            candidates.rareRankingTerms,
+            document.searchableTerms,
+            document.normalizedSearchableText
+          )
     };
   })
-    .filter((item) => item.coverage > 0)
-    .sort((left, right) => right.coverage - left.coverage || left.memory.memoryId.localeCompare(right.memory.memoryId));
+    .filter((item) => item.evidence.weightedCoverage > 0)
+    .sort((left, right) =>
+      right.evidence.weightedCoverage - left.evidence.weightedCoverage ||
+      right.evidence.matchedWeight - left.evidence.matchedWeight ||
+      left.memory.memoryId.localeCompare(right.memory.memoryId)
+    );
   const lexicalRank = new Map(lexical.map((item, index) => [item.memory.memoryId, index + 1]));
-  const lexicalCoverageByMemoryId = new Map(
-    lexical.map((item) => [item.memory.memoryId, item.coverage] as const)
+  const lexicalEvidenceByMemoryId = new Map(
+    lexical.map((item) => [item.memory.memoryId, item.evidence] as const)
   );
   const semanticRanking = [...semantic.scores.entries()]
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
@@ -1311,15 +1398,36 @@ async function prepareUserPromptShadowPackCore(
     const signalMatch = normalizedSignalValues.some((signal) =>
       document.normalizedSearchableText.includes(signal)
     );
-    const exact = candidates.exactMemoryIds.has(memory.memoryId) || signalMatch;
-    const applicability = candidates.rankingTerms.some((term) => termMatches(
-      term,
+    const exactEvidence = weightedTermEvidence(
+      candidates.exactTerms,
+      candidates.exactTermWeights,
+      candidates.rareExactTerms,
+      document.searchableTerms,
+      document.normalizedSearchableText
+    );
+    const strongExact = exactEvidence.rareMatch || (
+      exactEvidence.matchedCount >= 2 &&
+      exactEvidence.weightedCoverage >= AUTOMATIC_STRONG_EXACT_COVERAGE
+    );
+    const exact = strongExact || signalMatch;
+    const applicabilityEvidence = weightedTermEvidence(
+      candidates.rankingTerms,
+      candidates.rankingTermWeights,
+      candidates.rareRankingTerms,
       document.applicabilityTerms,
       document.normalizedApplicabilityText
-    ));
+    );
+    const applicability = (
+      applicabilityEvidence.matchedCount >= 2 &&
+      applicabilityEvidence.weightedCoverage >= AUTOMATIC_STRONG_APPLICABILITY_COVERAGE
+    ) || (
+      applicabilityEvidence.rareMatch &&
+      applicabilityEvidence.weightedCoverage >= AUTOMATIC_RARE_APPLICABILITY_COVERAGE
+    );
     const similarity = semantic.scores.get(memory.memoryId) ?? 0;
     const rank = lexicalRank.get(memory.memoryId);
-    const coverage = lexicalCoverageByMemoryId.get(memory.memoryId) ?? 0;
+    const lexicalEvidence = lexicalEvidenceByMemoryId.get(memory.memoryId) ?? EMPTY_TERM_EVIDENCE;
+    const coverage = lexicalEvidence.weightedCoverage;
     const corroborated = exact || applicability || coverage >= 0.3;
     const standaloneSemantic = semanticRank.get(memory.memoryId) === 1 &&
       similarity >= approvedShadowEmbeddingProfile.semanticOnlyMinimumScore &&
@@ -1343,7 +1451,9 @@ async function prepareUserPromptShadowPackCore(
       ...(standaloneSemantic ? ["semantic_top1_margin"]
         : similarity >= 0.82 && corroborated ? ["semantic_very_strong_corroborated"]
           : similarity >= 0.58 && corroborated ? ["semantic_corroborated"] : []),
-      ...(rank === undefined ? [] : [coverage >= 0.6 ? "lexical_strong" : "lexical_moderate"]),
+      ...(rank === undefined || coverage < 0.3
+        ? []
+        : [coverage >= 0.6 ? "lexical_strong" : "lexical_moderate"]),
       ...(signalMatch ? ["session_signal"] : []),
       ...(applicability ? ["applicability"] : [])
     ];
@@ -1360,7 +1470,6 @@ async function prepareUserPromptShadowPackCore(
     return {
       ...item,
       score,
-      band: (score >= 4 ? "high" : score >= 2 ? "probable" : "weak") as RelevanceBand,
       reasons: [...item.reasons, "one_hop_relationship"]
     };
   });

@@ -22,6 +22,7 @@ export function makeCanonicalMemory(request: {
   readonly identityLabel?: string;
   readonly validatedIdentity?: boolean;
   readonly validity?: CanonicalMemory["validity"];
+  readonly applicability?: CanonicalMemory["applicability"];
 }): CanonicalMemory {
   const scope = request.scope ?? { kind: "project", projectId: defaultProjectId };
   const authority = request.authority ?? "human_authored";
@@ -47,7 +48,7 @@ export function makeCanonicalMemory(request: {
     ])],
     importanceTags: [...(request.importanceTags ?? ["constraint"])],
     startup: request.startup ?? "auto",
-    applicability: { summary: "Current test project", conditions: [] },
+    applicability: request.applicability ?? { summary: "Current test project", conditions: [] },
     validity: request.validity ?? { state: "valid" },
     createdAt: "2026-08-07T00:00:00.000Z",
     revisedAt: "2026-08-07T00:00:00.000Z",

@@ -243,6 +243,179 @@ test("UserPromptSubmit uses relevance bands, upgrades exact high matches, and su
   expect(repeated.emptyReason).toBe("already_present");
 });
 
+test("UserPromptSubmit does not promote an entire project cluster from one shared exact term", async () => {
+  const roots = await createRoot();
+  const relevant = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174601",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174611",
+    scope: { kind: "project", projectId },
+    body: "When creating an MR for the acme repository without an explicit platform, use review.example.com.",
+    compact: "acme 仓库创建 MR 且未指定平台时，默认使用 review.example.com。",
+    startup: "never",
+    applicability: {
+      summary: "适用于 acme 仓库的 MR 创建请求。",
+      conditions: ["用户要求为 acme 仓库创建 MR 且未显式指定平台时。"]
+    }
+  });
+  const noise = [
+    {
+      suffix: "602",
+      body: "ACME workspace skill files require YAML frontmatter and catalog registration.",
+      applicability: "适用于 ACME workspace 技能新增与目录维护。"
+    },
+    {
+      suffix: "603",
+      body: "ACME tool schemas must remain self-contained and must not reference workspace paths.",
+      applicability: "适用于 ACME Ask AI workspace 工具定义。"
+    },
+    {
+      suffix: "604",
+      body: "Before building acme, inspect Git submodule state and local changes.",
+      applicability: "适用于包含 Git 子模块的 acme 构建。"
+    },
+    {
+      suffix: "605",
+      body: "ACME formal evaluation runs from a fixed local Lark JSON snapshot.",
+      applicability: "适用于 acme Ask AI self-optimization 评估。"
+    },
+    {
+      suffix: "606",
+      body: "Summarize ACME Use and Preview CLI progress in Chinese and English.",
+      applicability: "适用于总结 ACME KR 进展。"
+    }
+  ].map((item) => makeCanonicalMemory({
+    memoryId: `msmem_123e4567-e89b-42d3-a456-426614174${item.suffix}`,
+    revisionId: `msrev_123e4567-e89b-42d3-a456-426614174${String(Number(item.suffix) + 10)}`,
+    scope: { kind: "project", projectId },
+    body: item.body,
+    compact: item.body,
+    startup: "never",
+    applicability: { summary: item.applicability, conditions: [] }
+  }));
+  const clusteredAdapter: EmbeddingAdapter = {
+    identity: adapter.identity,
+    embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  await writeAll(roots, [relevant, ...noise]);
+  await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "project-cluster-pack",
+    requestedAt: "2026-08-07T12:02:10.000Z"
+  });
+
+  const pack = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "project-cluster-pack",
+    prompt: "如果我让你给 acme 仓库创建一个 MR，但没有指定平台，你默认应该把 MR 创建到哪里？",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter: clusteredAdapter,
+    requestedAt: "2026-08-07T12:02:11.000Z"
+  });
+
+  expect(pack.items.map((item) => item.memoryId)).toEqual([relevant.memoryId]);
+});
+
+test("UserPromptSubmit does not use one rare two-character acronym as an exact anchor", async () => {
+  const roots = await createRoot();
+  const relevant = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174641",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174651",
+    scope: { kind: "project", projectId },
+    body: "The default acme platform is review.example.com when no platform is specified.",
+    compact: "acme 未指定平台时默认使用 review.example.com。",
+    startup: "never",
+    applicability: { summary: "适用于 acme 默认平台选择。", conditions: [] }
+  });
+  const acronymOnly = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174642",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174652",
+    scope: { kind: "project", projectId },
+    body: "After a Git conflict, do not create an MR until the conflict is resolved and verified.",
+    compact: "Git 冲突解决并验证前不要创建 MR。",
+    startup: "never",
+    applicability: { summary: "适用于 Git 冲突处理。", conditions: [] }
+  });
+  const clusteredAdapter: EmbeddingAdapter = {
+    identity: adapter.identity,
+    embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  const fillers = Array.from({ length: 98 }, (_, index) => makeCanonicalMemory({
+    memoryId: `msmem_20000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    revisionId: `msrev_20000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    scope: { kind: "project", projectId },
+    body: `Unrelated durable formatter preference ${String(index)}.`,
+    compact: `Unrelated formatter preference ${String(index)}.`,
+    startup: "never"
+  }));
+  await writeAll(roots, [relevant, acronymOnly, ...fillers]);
+  await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "short-acronym-pack",
+    requestedAt: "2026-08-07T12:02:30.000Z"
+  });
+
+  const pack = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "short-acronym-pack",
+    prompt: "acme MR review.example.com 默认平台？",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter: clusteredAdapter,
+    requestedAt: "2026-08-07T12:02:31.000Z"
+  });
+
+  expect(pack.items.map((item) => item.memoryId)).toEqual([relevant.memoryId]);
+});
+
+test("UserPromptSubmit preserves Chinese intent across an inserted qualifier", async () => {
+  const roots = await createRoot();
+  const relevant = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174621",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174631",
+    scope: { kind: "project", projectId },
+    body: "默认目标平台由仓库配置决定。",
+    compact: "默认目标平台由仓库配置决定。",
+    startup: "never",
+    applicability: { summary: "适用于询问默认目标平台。", conditions: [] }
+  });
+  const noise = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174622",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174632",
+    scope: { kind: "project", projectId },
+    body: "默认代码格式由 formatter 决定。",
+    compact: "默认代码格式由 formatter 决定。",
+    startup: "never",
+    applicability: { summary: "适用于询问默认代码格式。", conditions: [] }
+  });
+  await writeAll(roots, [relevant, noise]);
+  await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "cjk-qualifier-pack",
+    requestedAt: "2026-08-07T12:02:20.000Z"
+  });
+
+  const pack = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "cjk-qualifier-pack",
+    prompt: "默认平台？",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    requestedAt: "2026-08-07T12:02:21.000Z"
+  });
+
+  expect(pack.items).toEqual([
+    expect.objectContaining({
+      memoryId: relevant.memoryId,
+      relevanceBand: "probable",
+      representationKind: "compact"
+    })
+  ]);
+});
+
 test("UserPromptSubmit can recall a Memory from a bounded structured file signal", async () => {
   const roots = await createRoot();
   const fileRule = makeCanonicalMemory({
