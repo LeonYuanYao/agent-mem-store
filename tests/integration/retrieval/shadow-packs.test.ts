@@ -111,7 +111,9 @@ test("SessionStart prepares a bounded authority-labelled Core Memory Pack withou
     expect.objectContaining({ memoryId: identityFallback.memoryId, memoryRef: 3, representationKind: "identity" })
   ]));
   expect(pack.items.some((item) => item.memoryId === never.memoryId)).toBe(false);
-  expect(pack.text).toContain("historical long-term memory");
+  expect(pack.text.split("\n")[0]).toBe(
+    "<memstore-context>Automatically selected long-term project background for session startup. It is not necessarily relevant to the current task. Use only clearly applicable items and ignore the rest. Current explicit instructions and verified workspace state take precedence.</memstore-context>"
+  );
   expect(pack.text).toContain(
     "M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity)"
   );
@@ -199,6 +201,9 @@ test("UserPromptSubmit uses relevance bands, upgrades exact high matches, and su
     requestedAt: "2026-08-07T12:02:01.000Z"
   });
   expect(first).toMatchObject({ mode: "shadow", injected: false, kind: "user_prompt" });
+  expect(first.text.split("\n")[0]).toBe(
+    "<memstore-context>Automatically retrieved historical long-term memory. Retrieval may include false positives. Use only items clearly applicable to the current request and ignore unrelated items. Current explicit instructions and verified workspace state take precedence.</memstore-context>"
+  );
   expect(first.text).toContain(
     "M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity)"
   );
@@ -438,6 +443,9 @@ test("probable-only automatic recall remains compact and admits at most two item
     requestedAt: "2026-08-07T12:03:01.000Z"
   });
 
+  expect(pack.text.split("\n")[0]).toBe(
+    "<memstore-context>Automatically retrieved, possibly relevant historical long-term memory. Treat these items as candidates: verify applicability, ignore unrelated items, and read by M:<id> when more detail is needed. Current explicit instructions and verified workspace state take precedence.</memstore-context>"
+  );
   expect(pack.items).toHaveLength(2);
   expect(pack.items.every((item) =>
     item.relevanceBand === "probable" && item.representationKind === "compact"

@@ -335,15 +335,19 @@ function renderItem(
 }
 
 const standardHeader =
-  "<memstore-context>historical long-term memory. Apply only when relevant; current explicit instructions and verified workspace state take precedence.</memstore-context>";
+  "<memstore-context>Automatically retrieved historical long-term memory. Retrieval may include false positives. Use only items clearly applicable to the current request and ignore unrelated items. Current explicit instructions and verified workspace state take precedence.</memstore-context>";
 const probableHeader =
-  "<memstore-context>possibly relevant historical long-term memory. Verify applicability and read by identity when more detail is needed.</memstore-context>";
+  "<memstore-context>Automatically retrieved, possibly relevant historical long-term memory. Treat these items as candidates: verify applicability, ignore unrelated items, and read by M:<id> when more detail is needed. Current explicit instructions and verified workspace state take precedence.</memstore-context>";
+const sessionStartHeader =
+  "<memstore-context>Automatically selected long-term project background for session startup. It is not necessarily relevant to the current task. Use only clearly applicable items and ignore the rest. Current explicit instructions and verified workspace state take precedence.</memstore-context>";
 const memoryLegend =
   "Legend: M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity).";
 
+type PackHeaderKind = "session_start" | "relevant" | "probable";
+
 function renderPack(
   items: readonly ShadowPackItem[],
-  probableOnly = false,
+  headerKind: PackHeaderKind,
   includeLegend = false
 ): {
   readonly text: string;
@@ -351,7 +355,9 @@ function renderPack(
 } {
   if (items.length === 0) return { text: "", renderedTokenCount: 0 };
   const text = [
-    probableOnly ? probableHeader : standardHeader,
+    headerKind === "session_start"
+      ? sessionStartHeader
+      : headerKind === "probable" ? probableHeader : standardHeader,
     ...(includeLegend ? [memoryLegend] : []),
     ...items.map((item) => item.text)
   ].join("\n");
@@ -752,7 +758,7 @@ async function prepareSessionStartShadowPackCore(
       reasons: [always ? "startup_always" : "startup_ranked"],
       text,
       renderedTokenCount: itemTokens
-    }], false, true);
+    }], "session_start", true);
     if (trial.renderedTokenCount > SESSION_TOKEN_LIMIT) return false;
     selected.push({
       memoryId: memory.memoryId,
@@ -795,7 +801,7 @@ async function prepareSessionStartShadowPackCore(
         visit: (memory) => trySelect(memory, false),
         ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot })
       });
-  const rendered = renderPack(selected, false, true);
+  const rendered = renderPack(selected, "session_start", true);
   const selectedIds = new Set(selected.map((item) => item.memoryId));
   const omittedItems = examined.filter((memory) => !selectedIds.has(memory.memoryId)).map((memory) => {
     const tier = tierFor(memory, request.projectId);
@@ -1398,7 +1404,7 @@ async function prepareUserPromptShadowPackCore(
       };
       const trial = renderPack(
         [...selected, candidate],
-        selected.length === 0 && item.band === "probable",
+        selected.length === 0 && item.band === "probable" ? "probable" : "relevant",
         includeMemoryLegend
       );
       if (trial.renderedTokenCount > PROMPT_HARD_LIMIT ||
@@ -1427,14 +1433,16 @@ async function prepareUserPromptShadowPackCore(
       };
       const trialItems = selected.map((item, itemIndex) => itemIndex === index ? upgraded : item);
       const limit = rankedItem.directIdentity ? PROMPT_HARD_LIMIT : PROMPT_TARGET_LIMIT;
-      if (renderPack(trialItems, false, includeMemoryLegend).renderedTokenCount <= limit) {
+      if (renderPack(trialItems, "relevant", includeMemoryLegend).renderedTokenCount <= limit) {
         selected[index] = upgraded;
       }
     }
   }
   const rendered = renderPack(
     selected,
-    selected.length > 0 && selected.every((item) => item.relevanceBand === "probable"),
+    selected.length > 0 && selected.every((item) => item.relevanceBand === "probable")
+      ? "probable"
+      : "relevant",
     includeMemoryLegend
   );
   const selectedIds = new Set(selected.map((item) => item.memoryId));
