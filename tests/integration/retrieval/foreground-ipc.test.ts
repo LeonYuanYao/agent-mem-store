@@ -9,7 +9,13 @@ import { buildRetrievalIndex, type EmbeddingAdapter } from "../../../src/retriev
 import {
   startForegroundRetrievalServer
 } from "../../../src/retrieval/foreground-ipc.js";
+import type { ForegroundAttemptRecord } from "../../../src/retrieval/foreground-attempts.js";
 import { requestForegroundRetrieval } from "../../../src/retrieval/foreground-client.js";
+import {
+  loadRetrievalSnapshot,
+  validateRetrievalSnapshot
+} from "../../../src/retrieval/snapshot.js";
+import { inspectRetrievalReceipt } from "../../../src/retrieval/packs.js";
 import {
   inspectShadowEvaluation,
   runNextShadowEvaluation
@@ -76,6 +82,52 @@ async function fixture() {
     builtAt: "2026-08-25T12:00:00.000Z"
   });
   return { runtimeRoot, vaultRoot };
+}
+
+async function saturatedSessionStartSnapshot(runtimeRoot: string) {
+  const base = await loadRetrievalSnapshot({ runtimeRoot });
+  const template = base.documents[0];
+  if (template === undefined) throw new Error("Expected a retrieval document fixture.");
+  const documentCount = 2_000;
+  const ordinals = Array.from({ length: documentCount }, (_, ordinal) => ordinal);
+  const compactText = "constraint ".repeat(96).trim();
+  const documents = ordinals.map((ordinal) => ({
+    ...template,
+    memoryId: `saturated-memory-${String(ordinal).padStart(4, "0")}`,
+    memoryRef: ordinal + 1,
+    revisionId: `saturated-revision-${String(ordinal).padStart(4, "0")}`,
+    scope: { kind: "project" as const, projectId },
+    basePriorityTier: "normal" as const,
+    sessionOrderKey: `saturated-order-${String(ordinal).padStart(4, "0")}`,
+    startup: "auto" as const,
+    compactText,
+    compactValidated: true,
+    compactTokenCount: 96,
+    vectorOrdinal: ordinal
+  }));
+  return validateRetrievalSnapshot({
+    schemaVersion: 1,
+    workingSetGeneration: base.workingSetGeneration,
+    indexRevisionId: base.indexRevisionId,
+    directoryPath: base.directoryPath,
+    adapterVersion: base.adapterVersion,
+    modelIdentity: base.modelIdentity,
+    artifactSha256: base.artifactSha256,
+    dimensions: base.dimensions,
+    documents,
+    vectors: new Float32Array(documentCount * base.dimensions),
+    automaticEligibleOrdinals: ordinals,
+    globalOrdinals: [],
+    projectOrdinals: [{ projectId, ordinals }],
+    sessionBuckets: [{
+      projectId,
+      startup: "auto",
+      tier: "strong",
+      category: template.category,
+      ordinals
+    }],
+    relationships: []
+  });
 }
 
 async function conversationalHistoryFixture() {
@@ -553,6 +605,42 @@ test("the default foreground deadline accepts a valid response within one second
     }));
   }
 });
+
+test("a token-saturated SessionStart snapshot stops optional scanning before the foreground deadline", async () => {
+  const roots = await fixture();
+  const snapshot = await saturatedSessionStartSnapshot(roots.runtimeRoot);
+  const attempts: ForegroundAttemptRecord[] = [];
+  const server = await startForegroundRetrievalServer({
+    ...roots,
+    adapter,
+    snapshot,
+    onAttempt: (attempt) => { attempts.push(attempt); }
+  });
+  const started = performance.now();
+  try {
+    const response = await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId: "token-saturated-snapshot-session",
+      requestedAt: "2026-08-26T01:01:00.000Z"
+    });
+    expect(response.state).toBe("completed");
+    if (response.state !== "completed") throw new Error("Expected a completed SessionStart.");
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(attempts.at(-1)).toMatchObject({
+      outcome: "completed",
+      postDeadlineWorkMs: 0
+    });
+    expect(attempts.at(-1)?.computeMs).toBeLessThan(300);
+    await expect(inspectRetrievalReceipt(roots.runtimeRoot, response.receiptId)).resolves.toMatchObject({
+      rowsExamined: 2_000,
+      terminalStopReason: "candidates_exhausted"
+    });
+  } finally {
+    await server.close();
+  }
+}, 15_000);
 
 test("the foreground server never returns a different Project's memory", async () => {
   const roots = await fixture();

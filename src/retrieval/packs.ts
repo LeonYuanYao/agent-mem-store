@@ -30,6 +30,7 @@ const PROMPT_HARD_LIMIT = 1024;
 const PROMPT_ITEM_LIMIT = 6;
 const PROBABLE_ITEM_LIMIT = 2;
 const SESSION_BUCKET_PAGE_SIZE = 16;
+const SESSION_SNAPSHOT_CHECKPOINT_INTERVAL = 16;
 const RECEIPT_OMISSION_DETAIL_LIMIT = 128;
 const AUTOMATIC_SEMANTIC_DEADLINE_MS = 300;
 const AUTOMATIC_QUERY_TERM_LIMIT = 64;
@@ -173,6 +174,7 @@ async function visitPagedSessionCandidates(request: {
   readonly startup: "always" | "auto";
   readonly visit: (memory: IndexedMemory) => boolean;
   readonly snapshot?: RetrievalSnapshot;
+  readonly foregroundControl?: ForegroundExecutionControl;
 }): Promise<SessionPageStats> {
   if (request.snapshot !== undefined) {
     const orderedBuckets = request.snapshot.sessionBuckets
@@ -199,6 +201,16 @@ async function visitPagedSessionCandidates(request: {
       const tierBuckets = orderedBuckets.filter((bucket) => bucket.tier === tier);
       while (tierBuckets.some((bucket) => bucket.cursor < bucket.candidates.length)) {
         for (const bucket of tierBuckets) {
+          if (rowsExamined % SESSION_SNAPSHOT_CHECKPOINT_INTERVAL === 0) {
+            if (performance.now() >= request.deadlineAt) {
+              return {
+                rowsExamined,
+                bucketPageCount: 0,
+                terminalStopReason: "deadline_optional_work_stopped"
+              };
+            }
+            await request.foregroundControl?.checkpoint("session_start_candidate_scan");
+          }
           const memory = bucket.candidates[bucket.cursor];
           if (memory === undefined) continue;
           bucket.cursor += 1;
@@ -777,10 +789,20 @@ async function prepareSessionStartShadowPackCore(
     const representation = representationFor(memory, tier, always || tier !== "normal");
     if (representation === undefined) return false;
     if (representation.kind === "identity" && identityCount >= SESSION_IDENTITY_LIMIT) return false;
+    const remainingTokens = SESSION_TOKEN_LIMIT - selectedRenderedTokenCount;
+    if (
+      selected.length > 0 &&
+      representation.kind === "compact" &&
+      memory.compactTokenCount >= remainingTokens
+    ) return false;
     const text = renderItem(memory, representation.kind, representation.text);
     const itemTokens = tokenizer.encode(text).length;
     if (always && alwaysTokens + itemTokens > ALWAYS_TOKEN_LIMIT) return false;
-    const trial = renderPack([...selected, {
+    if (
+      selected.length > 0 &&
+      selectedRenderedTokenCount + tokenizer.encode(`\n${text}`).length > SESSION_TOKEN_LIMIT
+    ) return false;
+    const candidate: ShadowPackItem = {
       memoryId: memory.memoryId,
       memoryRef: memory.memoryRef,
       revisionId: memory.revisionId,
@@ -792,21 +814,10 @@ async function prepareSessionStartShadowPackCore(
       reasons: [always ? "startup_always" : "startup_ranked"],
       text,
       renderedTokenCount: itemTokens
-    }], "session_start", true);
+    };
+    const trial = renderPack([...selected, candidate], "session_start", true);
     if (trial.renderedTokenCount > SESSION_TOKEN_LIMIT) return false;
-    selected.push({
-      memoryId: memory.memoryId,
-      memoryRef: memory.memoryRef,
-      revisionId: memory.revisionId,
-      scope: memory.scope,
-      authority: memory.authority,
-      representationKind: representation.kind,
-      priorityTier: tier,
-      score: 0,
-      reasons: [always ? "startup_always" : "startup_ranked"],
-      text,
-      renderedTokenCount: itemTokens
-    });
+    selected.push(candidate);
     selectedRenderedTokenCount = trial.renderedTokenCount;
     if (always) alwaysTokens += itemTokens;
     if (representation.kind === "identity") identityCount += 1;
@@ -821,7 +832,10 @@ async function prepareSessionStartShadowPackCore(
     deadlineAt: started + 450,
     startup: "always",
     visit: (memory) => trySelect(memory, true),
-    ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot })
+    ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot }),
+    ...(request.foregroundControl === undefined
+      ? {}
+      : { foregroundControl: request.foregroundControl })
   });
   const dynamicStats = selected.length >= SESSION_ITEM_LIMIT
     ? { rowsExamined: 0, bucketPageCount: 0, terminalStopReason: "pack_limit_reached" }
@@ -833,7 +847,10 @@ async function prepareSessionStartShadowPackCore(
         deadlineAt: started + 450,
         startup: "auto",
         visit: (memory) => trySelect(memory, false),
-        ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot })
+        ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot }),
+        ...(request.foregroundControl === undefined
+          ? {}
+          : { foregroundControl: request.foregroundControl })
       });
   const rendered = renderPack(selected, "session_start", true);
   const selectedIds = new Set(selected.map((item) => item.memoryId));
