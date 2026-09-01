@@ -42,6 +42,10 @@ const AUTOMATIC_SINGLE_RARE_TERM_MINIMUM_LENGTH = 3;
 const AUTOMATIC_STRONG_EXACT_COVERAGE = 0.5;
 const AUTOMATIC_STRONG_APPLICABILITY_COVERAGE = 0.25;
 const AUTOMATIC_RARE_APPLICABILITY_COVERAGE = 0.15;
+const RECENT_PROMPT_HISTORY_LIMIT = 3;
+const RECENT_PROMPT_HISTORY_TOKEN_BUDGET = 256;
+const RECENT_PROMPT_RECENCY_WEIGHTS = [4, 2, 1] as const;
+const CONTEXT_DEPENDENT_PROMPT_MAX_CHARACTERS = 160;
 const MEMORY_LEGEND_VERSION = 1;
 const MINIMUM_SESSION_ITEM_INCREMENT = tokenizer.encode(
   "\n[M:1 S:G A:H R:C] x"
@@ -60,6 +64,7 @@ interface ScoredMemory {
   readonly directIdentity: boolean;
   readonly reasons: readonly string[];
   readonly similarity: number;
+  readonly rankingSimilarity: number;
 }
 
 interface TermEvidence {
@@ -1119,6 +1124,7 @@ async function semanticScores(request: {
   readonly active: Record<string, unknown>;
   readonly memories: readonly IndexedMemory[];
   readonly query: string;
+  readonly rankingQuery?: string;
   readonly adapter?: EmbeddingAdapter;
   readonly deadlineAt: number;
   readonly snapshot?: RetrievalSnapshot;
@@ -1126,6 +1132,7 @@ async function semanticScores(request: {
 }): Promise<{
   readonly stage: "complete" | "lexical_only";
   readonly scores: ReadonlyMap<string, number>;
+  readonly rankingScores: ReadonlyMap<string, number>;
   readonly embeddingMs: number;
   readonly vectorScanMs: number;
 }> {
@@ -1135,15 +1142,33 @@ async function semanticScores(request: {
     request.adapter.identity.modelIdentity !== request.active.model_identity ||
     request.adapter.identity.artifactSha256 !== request.active.artifact_sha256 ||
     request.adapter.identity.dimensions !== request.active.dimensions
-  ) return { stage: "lexical_only", scores: new Map(), embeddingMs: 0, vectorScanMs: 0 };
+  ) return {
+    stage: "lexical_only",
+    scores: new Map(),
+    rankingScores: new Map(),
+    embeddingMs: 0,
+    vectorScanMs: 0
+  };
   const remaining = request.deadlineAt - performance.now();
   if (remaining <= 0) {
-    return { stage: "lexical_only", scores: new Map(), embeddingMs: 0, vectorScanMs: 0 };
+    return {
+      stage: "lexical_only",
+      scores: new Map(),
+      rankingScores: new Map(),
+      embeddingMs: 0,
+      vectorScanMs: 0
+    };
   }
   const embeddingStarted = performance.now();
+  const embeddingQueries = [
+    request.query,
+    ...(request.rankingQuery === undefined || request.rankingQuery === request.query
+      ? []
+      : [request.rankingQuery])
+  ];
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const embedded = await Promise.race([
-    (request.adapter.embedQuery ?? request.adapter.embed)([request.query]),
+    (request.adapter.embedQuery ?? request.adapter.embed)(embeddingQueries),
     new Promise<undefined>((resolve) => {
       timeout = setTimeout(() => {
         resolve(undefined);
@@ -1153,13 +1178,29 @@ async function semanticScores(request: {
   if (timeout !== undefined) clearTimeout(timeout);
   const embeddingMs = Math.max(0, performance.now() - embeddingStarted);
   if (embedded === undefined) {
-    return { stage: "lexical_only", scores: new Map(), embeddingMs, vectorScanMs: 0 };
+    return {
+      stage: "lexical_only",
+      scores: new Map(),
+      rankingScores: new Map(),
+      embeddingMs,
+      vectorScanMs: 0
+    };
   }
   const queryEmbedding = embedded[0];
   const normalized = queryEmbedding === undefined ? undefined : normalizeVector(queryEmbedding);
   if (normalized === undefined) {
-    return { stage: "lexical_only", scores: new Map(), embeddingMs, vectorScanMs: 0 };
+    return {
+      stage: "lexical_only",
+      scores: new Map(),
+      rankingScores: new Map(),
+      embeddingMs,
+      vectorScanMs: 0
+    };
   }
+  const rankingEmbedding = embedded[1];
+  const normalizedRanking = rankingEmbedding === undefined
+    ? normalized
+    : normalizeVector(rankingEmbedding) ?? normalized;
   const vectorScanStarted = performance.now();
   let resolvedValues: Float32Array;
   if (request.snapshot !== undefined) resolvedValues = request.snapshot.vectors;
@@ -1169,6 +1210,7 @@ async function semanticScores(request: {
   }
   const dimensions = z.number().int().positive().parse(request.active.dimensions);
   const scores = new Map<string, number>();
+  const rankingScores = new Map<string, number>();
   for (const [index, memory] of request.memories.entries()) {
     if (index > 0 && index % 128 === 0) {
       await request.foregroundControl?.checkpoint("prompt_vector_scan");
@@ -1179,18 +1221,67 @@ async function semanticScores(request: {
       memory.vectorOrdinal * dimensions,
       dimensions
     ));
+    rankingScores.set(memory.memoryId, dotVector(
+      normalizedRanking,
+      resolvedValues,
+      memory.vectorOrdinal * dimensions,
+      dimensions
+    ));
   }
   return {
     stage: "complete",
     embeddingMs,
     vectorScanMs: Math.max(0, performance.now() - vectorScanStarted),
-    scores
+    scores,
+    rankingScores
   };
 }
 
 function isContinuationOnly(prompt: string): boolean {
   const normalized = prompt.trim().toLocaleLowerCase("en-US");
   return normalized.length <= 12 && /^(ok|okay|yes|sure|continue|好的?|可以|同意|继续|行了?|没问题)[。.!！]?$/u.test(normalized);
+}
+
+function isContextDependentPrompt(prompt: string): boolean {
+  const normalized = prompt.trim().toLocaleLowerCase("en-US");
+  if (Array.from(normalized).length > CONTEXT_DEPENDENT_PROMPT_MAX_CHARACTERS) return false;
+  return /(?:这(?:个|些|项|条|种|套|次|里|样)|那(?:个|些|项|条|种|套|次|里|样|么)|它们?|当前|现在|刚才|上述|前面|上面|继续|还是)/u.test(
+    normalized
+  ) || /\b(?:this|that|these|those|it|current|now|earlier|previous|above|continue)\b/u.test(
+    normalized
+  );
+}
+
+function truncateHistoryPrompt(prompt: string, tokenLimit: number): string {
+  const tokens = tokenizer.encode(prompt);
+  if (tokens.length <= tokenLimit) return prompt;
+  const ellipsis = tokenizer.encode(" … ");
+  const contentLimit = Math.max(0, tokenLimit - ellipsis.length);
+  const headCount = Math.ceil(contentLimit / 2);
+  const tailCount = Math.floor(contentLimit / 2);
+  return tokenizer.decode([
+    ...tokens.slice(0, headCount),
+    ...ellipsis,
+    ...(tailCount === 0 ? [] : tokens.slice(-tailCount))
+  ]);
+}
+
+function boundedRecentPrompts(prompts: readonly string[]): readonly string[] {
+  const recent = prompts
+    .map((prompt) => prompt.trim().replace(/\s+/gu, " "))
+    .filter((prompt) => prompt.length > 0 && !isContinuationOnly(prompt))
+    .slice(0, RECENT_PROMPT_HISTORY_LIMIT);
+  const weights = RECENT_PROMPT_RECENCY_WEIGHTS.slice(0, recent.length);
+  const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+  let allocated = 0;
+  return recent.map((prompt, index) => {
+    const weight = weights[index] ?? 0;
+    const tokenLimit = index === recent.length - 1
+      ? RECENT_PROMPT_HISTORY_TOKEN_BUDGET - allocated
+      : Math.floor(RECENT_PROMPT_HISTORY_TOKEN_BUDGET * weight / totalWeight);
+    allocated += tokenLimit;
+    return truncateHistoryPrompt(prompt, tokenLimit);
+  });
 }
 
 async function relationshipBoosts(
@@ -1236,6 +1327,7 @@ export interface UserPromptShadowPackRequest {
   readonly projectId: string;
   readonly sessionId: string;
   readonly prompt: string;
+  readonly recentPrompts?: readonly string[];
   readonly signals: {
     readonly files: readonly string[];
     readonly symbols: readonly string[];
@@ -1319,17 +1411,26 @@ async function prepareUserPromptShadowPackCore(
   const postSoft = epoch.tokenTotal >= softTarget;
   const query = [normalizedPrompt, ...request.signals.files, ...request.signals.symbols,
     ...request.signals.errors, ...request.signals.commands].join("\n");
+  const recentPromptContext = boundedRecentPrompts(request.recentPrompts ?? []);
+  const contextualHistoryAvailable = recentPromptContext.length > 0 &&
+    isContextDependentPrompt(normalizedPrompt);
+  const semanticQuery = [
+    normalizedPrompt,
+    ...(contextualHistoryAvailable ? recentPromptContext : [])
+  ].join("\n");
   const semantic = isContinuationOnly(normalizedPrompt)
     ? {
         stage: "lexical_only" as const,
         scores: new Map<string, number>(),
+        rankingScores: new Map<string, number>(),
         embeddingMs: 0,
         vectorScanMs: 0
       }
     : await semanticScores({
         active,
         memories,
-        query,
+        query: semanticQuery,
+        ...(contextualHistoryAvailable ? { rankingQuery: normalizedPrompt } : {}),
         deadlineAt: started + AUTOMATIC_SEMANTIC_DEADLINE_MS,
         ...(request.foregroundControl === undefined
           ? {}
@@ -1425,10 +1526,14 @@ async function prepareUserPromptShadowPackCore(
       applicabilityEvidence.weightedCoverage >= AUTOMATIC_RARE_APPLICABILITY_COVERAGE
     );
     const similarity = semantic.scores.get(memory.memoryId) ?? 0;
+    const rankingSimilarity = semantic.rankingScores.get(memory.memoryId) ?? similarity;
     const rank = lexicalRank.get(memory.memoryId);
     const lexicalEvidence = lexicalEvidenceByMemoryId.get(memory.memoryId) ?? EMPTY_TERM_EVIDENCE;
     const coverage = lexicalEvidence.weightedCoverage;
-    const corroborated = exact || applicability || coverage >= 0.3;
+    const contextualSemanticCorroboration = contextualHistoryAvailable &&
+      lexicalEvidence.matchedCount >= 2 && similarity >= 0.82;
+    const corroborated = exact || applicability || coverage >= 0.3 ||
+      contextualSemanticCorroboration;
     const standaloneSemantic = semanticRank.get(memory.memoryId) === 1 &&
       similarity >= approvedShadowEmbeddingProfile.semanticOnlyMinimumScore &&
       similarity - secondSemanticScore >=
@@ -1451,13 +1556,24 @@ async function prepareUserPromptShadowPackCore(
       ...(standaloneSemantic ? ["semantic_top1_margin"]
         : similarity >= 0.82 && corroborated ? ["semantic_very_strong_corroborated"]
           : similarity >= 0.58 && corroborated ? ["semantic_corroborated"] : []),
+      ...(contextualSemanticCorroboration ? ["recent_prompt_context"] : []),
       ...(rank === undefined || coverage < 0.3
         ? []
         : [coverage >= 0.6 ? "lexical_strong" : "lexical_moderate"]),
       ...(signalMatch ? ["session_signal"] : []),
       ...(applicability ? ["applicability"] : [])
     ];
-    baseScored.push({ memory, score, band, primaryAnchor, exact, directIdentity, reasons, similarity });
+    baseScored.push({
+      memory,
+      score,
+      band,
+      primaryAnchor,
+      exact,
+      directIdentity,
+      reasons,
+      similarity,
+      rankingSimilarity
+    });
   }
   const boostedMemoryIds = await relationshipBoosts(
     request.runtimeRoot,
@@ -1482,7 +1598,7 @@ async function prepareUserPromptShadowPackCore(
     .sort((left, right) =>
       (left.band === right.band ? 0 : left.band === "high" ? -1 : 1) ||
       right.score - left.score ||
-      right.similarity - left.similarity ||
+      right.rankingSimilarity - left.rankingSimilarity ||
       (left.memory.scope.kind === right.memory.scope.kind ? 0 : left.memory.scope.kind === "project" ? -1 : 1) ||
       left.memory.memoryId.localeCompare(right.memory.memoryId)
     );

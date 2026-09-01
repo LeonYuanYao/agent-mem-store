@@ -27,6 +27,24 @@ import {
 import { loadRetrievalSnapshot, type RetrievalSnapshot } from "./snapshot.js";
 import { validateRetrievalSnapshot } from "./snapshot.js";
 
+const maximumRecentPromptSessions = 128;
+const maximumStoredPromptCharacters = 16 * 1024;
+
+function isMeaningfulHistoryPrompt(prompt: string): boolean {
+  const normalized = prompt.trim().toLocaleLowerCase("en-US");
+  if (normalized.length === 0) return false;
+  return !(normalized.length <= 12 &&
+    /^(ok|okay|yes|sure|continue|好的?|可以|同意|继续|行了?|没问题)[。.!！]?$/u.test(normalized));
+}
+
+function boundStoredPrompt(prompt: string): string {
+  if (prompt.length <= maximumStoredPromptCharacters) return prompt;
+  const retainedCharacters = maximumStoredPromptCharacters - 3;
+  const headCharacters = Math.ceil(retainedCharacters / 2);
+  const tailCharacters = Math.floor(retainedCharacters / 2);
+  return `${prompt.slice(0, headCharacters)}...${prompt.slice(-tailCharacters)}`;
+}
+
 function writeResponse(socket: Socket, response: ForegroundWireResponse): void {
   if (!socket.destroyed) socket.end(`${JSON.stringify(response)}\n`);
 }
@@ -37,6 +55,7 @@ async function prepareResponse(request: ForegroundRequest, options: {
   readonly adapter: EmbeddingAdapter;
   readonly snapshot: RetrievalSnapshot;
   readonly control: ForegroundExecutionControl;
+  readonly recentPrompts: readonly string[];
   readonly onReceiptCommitted: (receiptCommitMs: number) => void;
 }): Promise<ForegroundWireResponse> {
   await options.control.checkpoint("before_reservation");
@@ -74,6 +93,7 @@ async function prepareResponse(request: ForegroundRequest, options: {
           projectId: request.projectId,
           sessionId: request.sessionId,
           prompt: request.prompt,
+          recentPrompts: options.recentPrompts,
           signals: request.signals,
           adapter: options.adapter,
           requestedAt: request.requestedAt,
@@ -245,11 +265,34 @@ export async function startForegroundRetrievalServer(request: {
   }
   const requestSnapshotIds = new Map<string, string>();
   const requestReceiptCommitMs = new Map<string, number>();
+  const recentPromptsBySession = new Map<string, readonly string[]>();
   const lane = createForegroundRetrievalLane<ForegroundRequest, ForegroundWireResponse>({
     execute: (foregroundRequest, control) => {
       const snapshot = activeSnapshot;
       if (snapshot !== undefined) {
         requestSnapshotIds.set(foregroundRequest.requestId, snapshot.indexRevisionId);
+      }
+      const historyKey = `${foregroundRequest.projectId}\0${foregroundRequest.sessionId}`;
+      let recentPrompts: readonly string[] = [];
+      if (foregroundRequest.event === "SessionStart") {
+        recentPromptsBySession.delete(historyKey);
+      } else {
+        recentPrompts = recentPromptsBySession.get(historyKey) ?? [];
+        const normalizedPrompt = foregroundRequest.prompt.trim().replace(/\s+/gu, " ");
+        if (isMeaningfulHistoryPrompt(normalizedPrompt)) {
+          recentPromptsBySession.delete(historyKey);
+          recentPromptsBySession.set(
+            historyKey,
+            [
+              boundStoredPrompt(normalizedPrompt),
+              ...recentPrompts.filter((prompt) => prompt !== normalizedPrompt)
+            ].slice(0, 3)
+          );
+          if (recentPromptsBySession.size > maximumRecentPromptSessions) {
+            const oldestHistoryKey = recentPromptsBySession.keys().next().value;
+            if (oldestHistoryKey !== undefined) recentPromptsBySession.delete(oldestHistoryKey);
+          }
+        }
       }
       return snapshot === undefined
       ? Promise.resolve({
@@ -262,6 +305,7 @@ export async function startForegroundRetrievalServer(request: {
           ...request,
           snapshot,
           control,
+          recentPrompts,
           onReceiptCommitted: (receiptCommitMs) => {
             requestReceiptCommitMs.set(foregroundRequest.requestId, receiptCommitMs);
           }

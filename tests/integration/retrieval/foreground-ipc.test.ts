@@ -78,6 +78,129 @@ async function fixture() {
   return { runtimeRoot, vaultRoot };
 }
 
+async function conversationalHistoryFixture() {
+  const root = await mkdtemp("/tmp/memstore-foreground-history-");
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174831",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174841",
+      scope: { kind: "project", projectId },
+      body: "Automatic Top-N recall keeps only independently relevant memories.",
+      compact: "Automatic Top-N recall keeps only independently relevant memories.",
+      startup: "never"
+    })
+  });
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174832",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174842",
+      scope: { kind: "project", projectId },
+      body: "Deployment rollback uses the verified release checklist.",
+      compact: "Deployment rollback uses the verified release checklist.",
+      startup: "never"
+    })
+  });
+  const historyAdapter: EmbeddingAdapter = {
+    identity: {
+      adapterVersion: "history-fixture-v1",
+      modelIdentity: "history-fixture-embedding",
+      artifactSha256: "d".repeat(64),
+      dimensions: 2,
+      normalization: "l2"
+    },
+    embed: (texts) => Promise.resolve(texts.map((text) =>
+      /top-n/iu.test(text) ? [1, 0] : [0, 1]
+    )),
+    embedDocuments: (texts) => Promise.resolve(texts.map((text) =>
+      /top-n/iu.test(text) ? [1, 0] : [0, 1]
+    )),
+    embedQuery: (texts) => Promise.resolve(texts.map((text) =>
+      (/memstore/iu.test(text) && /too strict/iu.test(text)) ||
+        (/history-anchor/iu.test(text) && /recall-now/iu.test(text)) ||
+        (/history-budget-anchor/iu.test(text) && /recall-budget/iu.test(text)) ||
+        (/evicted-history-anchor/iu.test(text) && /recall-limit/iu.test(text))
+        ? [1, 0]
+        : [0, 1]
+    ))
+  };
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: historyAdapter,
+    builtAt: "2026-08-25T12:00:00.000Z"
+  });
+  return { runtimeRoot, vaultRoot, adapter: historyAdapter };
+}
+
+async function corroboratedHistoryFixture() {
+  const root = await mkdtemp("/tmp/memstore-foreground-corroborated-history-");
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174851",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174861",
+      scope: { kind: "project", projectId },
+      body: "检索系统的 Top-N 表示最多返回 N 条；每条记忆必须独立通过准入门槛，弱相关条目不得为填满名额而注入。",
+      compact: "检索系统的 Top-N 表示最多返回 N 条；每条记忆必须独立通过准入门槛，弱相关条目不得为填满名额而注入。",
+      startup: "never"
+    })
+  });
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "human",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174852",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174862",
+      scope: { kind: "project", projectId },
+      body: "MemStore 健康诊断中的相关记忆统计只用于性能观测。",
+      compact: "MemStore 健康诊断中的相关记忆统计只用于性能观测。",
+      startup: "never"
+    })
+  });
+  const contextualAdapter: EmbeddingAdapter = {
+    identity: {
+      adapterVersion: "corroborated-history-fixture-v1",
+      modelIdentity: "corroborated-history-fixture-embedding",
+      artifactSha256: "e".repeat(64),
+      dimensions: 2,
+      normalization: "l2"
+    },
+    embed: (texts) => Promise.resolve(texts.map((text) =>
+      /top-n/iu.test(text) ? [1, 0] : [0.999, 0.045]
+    )),
+    embedDocuments: (texts) => Promise.resolve(texts.map((text) =>
+      /top-n/iu.test(text) ? [1, 0] : [0.999, 0.045]
+    )),
+    embedQuery: (texts) => Promise.resolve(texts.map((text) =>
+      /history-topic/iu.test(text) && /门禁/u.test(text)
+        ? [0.999, 0.045]
+        : /门禁/u.test(text) ? [1, 0] : [0, 1]
+    ))
+  };
+  await buildRetrievalIndex({
+    runtimeRoot,
+    vaultRoot,
+    adapter: contextualAdapter,
+    builtAt: "2026-08-25T12:00:00.000Z"
+  });
+  return { runtimeRoot, vaultRoot, adapter: contextualAdapter };
+}
+
 test("the foreground server returns bounded SessionStart and UserPrompt packs over a private socket", async () => {
   const roots = await fixture();
   const server = await startForegroundRetrievalServer({ ...roots, adapter });
@@ -107,6 +230,266 @@ test("the foreground server returns bounded SessionStart and UserPrompt packs ov
     await server.close();
   }
   await expect(stat(server.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("a foreground session uses recent user prompts to resolve a contextual follow-up", async () => {
+  const roots = await conversationalHistoryFixture();
+  const server = await startForegroundRetrievalServer(roots);
+  try {
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId: "history-session",
+      requestedAt: "2026-08-25T12:01:00.000Z"
+    });
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "history-session",
+      prompt: "Check MemStore health.",
+      requestedAt: "2026-08-25T12:02:00.000Z"
+    });
+    const contextual = await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "history-session",
+      prompt: "Is it too strict now?",
+      requestedAt: "2026-08-25T12:03:00.000Z"
+    });
+    expect(contextual.state).toBe("completed");
+    expect(contextual.state === "completed" ? contextual.text : "").toContain(
+      "Automatic Top-N recall"
+    );
+    expect(contextual.state === "completed" ? contextual.text : "").not.toContain(
+      "Check MemStore health"
+    );
+
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId: "isolated-history-session",
+      requestedAt: "2026-08-25T12:04:00.000Z"
+    });
+    const isolated = await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "isolated-history-session",
+      prompt: "Is it too strict now?",
+      requestedAt: "2026-08-25T12:05:00.000Z"
+    });
+    expect(isolated.state === "completed" ? isolated.text : "").not.toContain(
+      "Automatic Top-N recall"
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("context-dependent prompts admit strong history semantics only with current lexical corroboration", async () => {
+  const roots = await corroboratedHistoryFixture();
+  const server = await startForegroundRetrievalServer(roots);
+  try {
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId: "corroborated-history-session",
+      requestedAt: "2026-08-25T12:06:00.000Z"
+    });
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "corroborated-history-session",
+      prompt: "history-topic",
+      requestedAt: "2026-08-25T12:07:00.000Z"
+    });
+    const contextual = await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "corroborated-history-session",
+      prompt: "这个门禁现在会不会太严格，导致相关记忆太少？",
+      requestedAt: "2026-08-25T12:08:00.000Z"
+    });
+    const contextualText = contextual.state === "completed" ? contextual.text : "";
+    expect(contextualText).toContain("检索系统的 Top-N");
+    expect(contextualText).toContain("健康诊断中的相关记忆统计");
+    expect(contextualText.indexOf("检索系统的 Top-N")).toBeLessThan(
+      contextualText.indexOf("健康诊断中的相关记忆统计")
+    );
+
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId: "uncorroborated-history-session",
+      requestedAt: "2026-08-25T12:09:00.000Z"
+    });
+    const isolated = await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "uncorroborated-history-session",
+      prompt: "这个门禁现在会不会太严格，导致相关记忆太少？",
+      requestedAt: "2026-08-25T12:10:00.000Z"
+    });
+    expect(isolated.state === "completed" ? isolated.text : "").not.toContain(
+      "检索系统的 Top-N"
+    );
+
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId: "non-contextual-history-session",
+      requestedAt: "2026-08-25T12:11:00.000Z"
+    });
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "non-contextual-history-session",
+      prompt: "history-topic",
+      requestedAt: "2026-08-25T12:12:00.000Z"
+    });
+    const nonContextual = await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId: "non-contextual-history-session",
+      prompt: "解释严格检索门禁导致相关记忆太少的原因。",
+      requestedAt: "2026-08-25T12:13:00.000Z"
+    });
+    expect(nonContextual.state === "completed" ? nonContextual.text : "").not.toContain(
+      "检索系统的 Top-N"
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("short confirmations do not evict meaningful foreground history", async () => {
+  const roots = await conversationalHistoryFixture();
+  const server = await startForegroundRetrievalServer(roots);
+  try {
+    const sessionId = "confirmation-history-session";
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId,
+      requestedAt: "2026-08-25T12:10:00.000Z"
+    });
+    const prompts = ["history-anchor", "OK", "继续", "同意", "可以"];
+    for (const [index, prompt] of prompts.entries()) {
+      await requestForegroundRetrieval({
+        runtimeRoot: roots.runtimeRoot,
+        event: "UserPromptSubmit",
+        projectId,
+        sessionId,
+        prompt,
+        requestedAt: `2026-08-25T12:${String(11 + index).padStart(2, "0")}:00.000Z`
+      });
+    }
+    const contextual = await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId,
+      prompt: "recall-now",
+      requestedAt: "2026-08-25T12:20:00.000Z"
+    });
+    expect(contextual.state === "completed" ? contextual.text : "").toContain(
+      "Automatic Top-N recall"
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("foreground history is bounded before it influences semantic recall", async () => {
+  const roots = await conversationalHistoryFixture();
+  const server = await startForegroundRetrievalServer(roots);
+  try {
+    const sessionId = "bounded-history-session";
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId,
+      requestedAt: "2026-08-25T12:30:00.000Z"
+    });
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId,
+      prompt: `${"prefix ".repeat(300)}history-budget-anchor ${"suffix ".repeat(300)}`,
+      requestedAt: "2026-08-25T12:31:00.000Z"
+    });
+    const result = await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId,
+      prompt: "recall-budget",
+      requestedAt: "2026-08-25T12:32:00.000Z"
+    });
+    expect(result.state === "completed" ? result.text : "").not.toContain(
+      "Automatic Top-N recall"
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("foreground history retains at most three meaningful user prompts", async () => {
+  const roots = await conversationalHistoryFixture();
+  const server = await startForegroundRetrievalServer(roots);
+  try {
+    const sessionId = "history-count-session";
+    await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "SessionStart",
+      projectId,
+      sessionId,
+      requestedAt: "2026-08-25T12:40:00.000Z"
+    });
+    for (const [index, prompt] of [
+      "evicted-history-anchor",
+      "meaningful-one",
+      "meaningful-two",
+      "meaningful-three"
+    ].entries()) {
+      await requestForegroundRetrieval({
+        runtimeRoot: roots.runtimeRoot,
+        event: "UserPromptSubmit",
+        projectId,
+        sessionId,
+        prompt,
+        requestedAt: `2026-08-25T12:${String(41 + index).padStart(2, "0")}:00.000Z`
+      });
+    }
+    const result = await requestForegroundRetrieval({
+      runtimeRoot: roots.runtimeRoot,
+      event: "UserPromptSubmit",
+      projectId,
+      sessionId,
+      prompt: "recall-limit",
+      requestedAt: "2026-08-25T12:50:00.000Z"
+    });
+    expect(result.state === "completed" ? result.text : "").not.toContain(
+      "Automatic Top-N recall"
+    );
+  } finally {
+    await server.close();
+  }
 });
 
 test("the foreground client fails open when the Worker socket is unavailable", async () => {
