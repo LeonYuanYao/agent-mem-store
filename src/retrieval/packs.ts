@@ -46,7 +46,7 @@ const RECENT_PROMPT_HISTORY_LIMIT = 3;
 const RECENT_PROMPT_HISTORY_TOKEN_BUDGET = 256;
 const RECENT_PROMPT_RECENCY_WEIGHTS = [4, 2, 1] as const;
 const CONTEXT_DEPENDENT_PROMPT_MAX_CHARACTERS = 160;
-const MEMORY_LEGEND_VERSION = 1;
+const MEMORY_LEGEND_VERSION = 2;
 const MINIMUM_SESSION_ITEM_INCREMENT = tokenizer.encode(
   "\n[M:1 S:G A:H R:C] x"
 ).length;
@@ -367,7 +367,9 @@ const probableHeader =
 const sessionStartHeader =
   "<memstore-context>Automatically selected long-term project background for session startup. It is not necessarily relevant to the current task. Use only clearly applicable items and ignore the rest. Current explicit instructions and verified workspace state take precedence.</memstore-context>";
 const memoryLegend =
-  "Legend: M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity).";
+  "Legend: M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity). Later <memstore-candidates> blocks follow the same policy; read M:<id> for more detail.";
+const compactContextOpeningTag = "<memstore-candidates>";
+const compactContextClosingTag = "</memstore-candidates>";
 
 type PackHeaderKind = "session_start" | "relevant" | "probable";
 
@@ -380,13 +382,19 @@ function renderPack(
   readonly renderedTokenCount: number;
 } {
   if (items.length === 0) return { text: "", renderedTokenCount: 0 };
-  const text = [
-    headerKind === "session_start"
-      ? sessionStartHeader
-      : headerKind === "probable" ? probableHeader : standardHeader,
-    ...(includeLegend ? [memoryLegend] : []),
-    ...items.map((item) => item.text)
-  ].join("\n");
+  const text = includeLegend
+    ? [
+        headerKind === "session_start"
+          ? sessionStartHeader
+          : headerKind === "probable" ? probableHeader : standardHeader,
+        memoryLegend,
+        ...items.map((item) => item.text)
+      ].join("\n")
+    : [
+        compactContextOpeningTag,
+        ...items.map((item) => item.text),
+        compactContextClosingTag
+      ].join("\n");
   return { text, renderedTokenCount: tokenizer.encode(text).length };
 }
 

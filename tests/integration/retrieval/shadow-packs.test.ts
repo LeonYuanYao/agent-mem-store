@@ -452,7 +452,7 @@ test("UserPromptSubmit can recall a Memory from a bounded structured file signal
   expect(prompt.items[0]?.reasons).toContain("session_signal");
 });
 
-test("automatic packs explain compact fields only once per Context Epoch", async () => {
+test("automatic packs explain policy and compact fields only once per Context Epoch", async () => {
   const roots = await createRoot();
   const startup = makeCanonicalMemory({
     memoryId: "msmem_123e4567-e89b-42d3-a456-426614174417",
@@ -495,9 +495,25 @@ test("automatic packs explain compact fields only once per Context Epoch", async
   });
 
   expect(firstEpoch.text).toContain("M=memory ref");
+  expect(firstEpoch.text).toContain(
+    "Automatically selected long-term project background for session startup"
+  );
+  expect(firstEpoch.text).toContain(
+    "Later <memstore-candidates> blocks follow the same policy"
+  );
   expect(prompt.items).toHaveLength(1);
   expect(prompt.text).not.toContain("M=memory ref");
+  expect(prompt.text).not.toContain("Automatically retrieved historical long-term memory");
+  expect(prompt.text).not.toContain("blocks follow the same policy");
+  expect(prompt.text.split("\n")[0]).toBe("<memstore-candidates>");
+  expect(prompt.text.split("\n").at(-1)).toBe("</memstore-candidates>");
   expect(secondEpoch.text).toContain("M=memory ref");
+  expect(secondEpoch.text).toContain(
+    "Automatically selected long-term project background for session startup"
+  );
+  expect(secondEpoch.text).toContain(
+    "Later <memstore-candidates> blocks follow the same policy"
+  );
 });
 
 test("an active Context Epoch created before the legend upgrade receives the legend once", async () => {
