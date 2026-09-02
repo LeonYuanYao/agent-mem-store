@@ -15,6 +15,7 @@ import {
   unlink
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
 
@@ -157,6 +158,21 @@ export interface ManagedIntegrationUpgradePreview {
   readonly installationId: string;
   readonly requestIdentity: string;
   readonly targets: readonly PlannedTarget[];
+  readonly observedDivergedTargetLabels: readonly string[];
+  readonly explicitNoEffects: readonly string[];
+}
+
+export interface ManagedActiveAdoptionPreview {
+  readonly schemaVersion: 1;
+  readonly state: "active_adoption_preview";
+  readonly dryRun: true;
+  readonly installationId: string;
+  readonly requestIdentity: string;
+  readonly approvalDigest: string;
+  readonly adoptionId: string;
+  readonly adoptedAt: string;
+  readonly configPath: string;
+  readonly hooksPath: string;
   readonly observedDivergedTargetLabels: readonly string[];
   readonly explicitNoEffects: readonly string[];
 }
@@ -319,6 +335,24 @@ function appendMemStoreMcp(source: string, request: ManagedRequest): string {
   return `${source.trimEnd()}\n\n${block}`;
 }
 
+function removeMemStoreMcp(source: string): string {
+  const lines = source.split("\n");
+  const retained: string[] = [];
+  let dropping = false;
+  let found = false;
+  for (const line of lines) {
+    const section = /^\s*\[([^\]]+)\]\s*$/u.exec(line)?.[1];
+    if (section !== undefined) {
+      dropping = section === "mcp_servers.memstore" ||
+        section.startsWith("mcp_servers.memstore.");
+      if (dropping) found = true;
+    }
+    if (!dropping) retained.push(line);
+  }
+  if (!found) throw new Error("Codex config has no managed MemStore MCP section to adopt.");
+  return `${retained.join("\n").trimEnd()}\n`;
+}
+
 function managedHookGroup(request: ManagedRequest, event: Candidate["hookEvents"][number]) {
   const command = [
     "MEMSTORE_INJECTION_MODE=shadow",
@@ -377,6 +411,53 @@ function refreshManagedHooks(source: string, request: ManagedRequest, candidate:
   }
   document.hooks = hooks;
   return `${JSON.stringify(document, null, 2)}\n`;
+}
+
+function activeManagedHookGroup(request: ManagedRequest, event: Candidate["hookEvents"][number]) {
+  const group = managedHookGroup(request, event);
+  const handler = { ...group.hooks[0] };
+  const command = z.string().parse(handler.command);
+  const marker = `memstore:gate5-shadow-v1:${event}:shadow`;
+  handler.command = command
+    .replace("MEMSTORE_INJECTION_MODE=shadow", "MEMSTORE_INJECTION_MODE=active")
+    .replace(marker, `memstore:gate5-shadow-v1:${event}:active`);
+  if (event === "SessionStart" || event === "UserPromptSubmit") handler.timeout = 2;
+  return { ...group, hooks: [handler] };
+}
+
+function adoptedHookSources(
+  source: string,
+  request: ManagedRequest,
+  candidate: Candidate
+): { readonly shadow: string; readonly withoutMemStore: string } {
+  const document = z.record(z.string(), z.unknown()).parse(JSON.parse(source));
+  const hooks = z.record(z.string(), z.unknown()).parse(document.hooks);
+  const withoutDocument = structuredClone(document);
+  const withoutHooks = z.record(z.string(), z.unknown()).parse(withoutDocument.hooks);
+  for (const event of candidate.hookEvents) {
+    const routes = z.array(z.unknown()).default([]).parse(hooks[event]);
+    const marker = `memstore:gate5-shadow-v1:${event}:`;
+    const indexes = routes.flatMap((route, index) =>
+      JSON.stringify(route).includes(marker) ? [index] : []
+    );
+    if (indexes.length !== 1) {
+      throw new Error(`Owned Active ${event} Hook recipe is missing or ambiguous.`);
+    }
+    const index = z.number().int().nonnegative().parse(indexes[0]);
+    if (JSON.stringify(routes[index]) !== JSON.stringify(activeManagedHookGroup(request, event))) {
+      throw new Error(`Owned Active ${event} Hook recipe does not match the current MemStore contract.`);
+    }
+    const nextRoutes = [...routes];
+    nextRoutes[index] = managedHookGroup(request, event);
+    hooks[event] = nextRoutes;
+    withoutHooks[event] = routes.filter((_route, routeIndex) => routeIndex !== index);
+  }
+  document.hooks = hooks;
+  withoutDocument.hooks = withoutHooks;
+  return {
+    shadow: `${JSON.stringify(document, null, 2)}\n`,
+    withoutMemStore: `${JSON.stringify(withoutDocument, null, 2)}\n`
+  };
 }
 
 function xmlEscape(value: string): string {
@@ -484,19 +565,22 @@ export async function previewManagedIntegration(request: ManagedRequest): Promis
   const configPath = join(resolve(request.homeRoot), ".codex", "config.toml");
   const hooksPath = join(resolve(request.homeRoot), ".codex", "hooks.json");
   const notifierSourceRoot = resolve(request.notifierSource);
+  const hooksAliasIdentity = await identity(hooksPath);
+  const hooksTargetPath = hooksAliasIdentity.state === "symlink"
+    ? await realpath(hooksPath)
+    : hooksPath;
+  const hooksTargetIdentity = await identity(hooksTargetPath);
   const [configSource, hooksSource, notifier, notifierPlist, notifierCodeResources] = await Promise.all([
     readFile(configPath, "utf8"),
-    readFile(hooksPath, "utf8"),
+    hooksTargetIdentity.state === "absent"
+      ? Promise.resolve(`${JSON.stringify({ hooks: {} }, null, 2)}\n`)
+      : readFile(hooksTargetPath, "utf8"),
     readFile(join(notifierSourceRoot, "Contents", "MacOS", "memstore-notifier")),
     readFile(join(notifierSourceRoot, "Contents", "Info.plist")),
     readFile(join(notifierSourceRoot, "Contents", "_CodeSignature", "CodeResources"))
   ]);
   const expectedConfig = appendMemStoreMcp(configSource, request);
   const expectedHooks = appendManagedHooks(hooksSource, request, candidate);
-  const hooksAliasIdentity = await identity(hooksPath);
-  const hooksTargetPath = hooksAliasIdentity.state === "symlink"
-    ? await realpath(hooksPath)
-    : hooksPath;
   const notifierBundlePath = join(resolve(request.runtimeRoot), "bin", "MemStore Notifier.app");
   const notifierContentsPath = join(notifierBundlePath, "Contents");
   const notifierMacOsPath = join(notifierContentsPath, "MacOS");
@@ -528,7 +612,7 @@ export async function previewManagedIntegration(request: ManagedRequest): Promis
       label: "codex_hooks",
       path: hooksTargetPath,
       kind: "structured_file",
-      before: { state: "file", sha256: sha256(hooksSource) },
+      before: hooksTargetIdentity,
       expectedPost: { state: "file", sha256: sha256(expectedHooks) },
       expectedSource: expectedHooks
     },
@@ -668,16 +752,24 @@ async function divergedTargetLabels(targets: readonly PlannedTarget[]): Promise<
   return labels;
 }
 
-async function writeManifest(runtimeRoot: string, manifest: OwnershipManifest): Promise<void> {
+async function writeManifest(
+  runtimeRoot: string,
+  manifest: OwnershipManifest,
+  expectedCurrentSha256?: string
+): Promise<void> {
   const path = join(resolve(runtimeRoot), "install", "ownership-manifest.json");
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const source = `${JSON.stringify(manifest, null, 2)}\n`;
   const current = await identity(path);
+  if (expectedCurrentSha256 !== undefined &&
+      (current.state !== "file" || current.sha256 !== expectedCurrentSha256)) {
+    throw new Error("Managed ownership manifest changed after preview.");
+  }
   await writeFileAtomically(
     path,
     source,
     0o600,
-    current.state === "file" ? current.sha256 : undefined
+    expectedCurrentSha256 ?? (current.state === "file" ? current.sha256 : undefined)
   );
 }
 
@@ -828,6 +920,211 @@ export async function repairManagedIntegration(
   return {
     state: repairable.length === 0 && !recipeUpdated ? "healthy" : "repaired",
     installationId: manifest.installationId
+  };
+}
+
+interface ActiveAdoptionPlan {
+  readonly preview: ManagedActiveAdoptionPreview;
+  readonly ownershipManifestSha256: string;
+  readonly nextOwnershipManifest: OwnershipManifest;
+  readonly configBeforeSource: string;
+  readonly hooksBeforeSource: string;
+  readonly cutoverConfigSource: string;
+  readonly cutoverHooksSource: string;
+  readonly cutoverManifest: CutoverManifest;
+}
+
+async function activeAdoptionPlan(request: ManagedRequest): Promise<ActiveAdoptionPlan> {
+  const manifestPath = join(resolve(request.runtimeRoot), "install", "ownership-manifest.json");
+  const manifestSource = await readFile(manifestPath, "utf8");
+  const manifest = z.custom<OwnershipManifest>((value) => typeof value === "object" && value !== null)
+    .parse(JSON.parse(manifestSource));
+  if (manifest.state !== "installed") throw new Error("Managed integration is not installed.");
+  if (manifest.requestIdentity !== requestIdentity(request)) {
+    throw new Error("Managed integration request diverged from its ownership manifest.");
+  }
+  const observedDivergedTargetLabels = await divergedTargetLabels(manifest.targets);
+  const allowedLabels = new Set(["codex_config", "codex_hooks_link", "codex_hooks"]);
+  const unexpected = observedDivergedTargetLabels.filter((label) => !allowedLabels.has(label));
+  if (unexpected.length > 0) {
+    throw new Error(`Unrelated managed targets diverged (${unexpected.join(", ")}); refusing Active adoption.`);
+  }
+  if (observedDivergedTargetLabels.length === 0) {
+    throw new Error("Managed integration has no legacy Active drift to adopt.");
+  }
+
+  const { candidate } = await loadCandidate();
+  const configPath = join(resolve(request.homeRoot), ".codex", "config.toml");
+  const hooksEntryPath = join(resolve(request.homeRoot), ".codex", "hooks.json");
+  const hooksEntryIdentity = await identity(hooksEntryPath);
+  if (hooksEntryIdentity.state !== "file" && hooksEntryIdentity.state !== "symlink") {
+    throw new Error("Codex Hooks must be a regular file or symlink for Active adoption.");
+  }
+  const hooksPath = hooksEntryIdentity.state === "symlink"
+    ? await realpath(hooksEntryPath)
+    : hooksEntryPath;
+  const [configSource, hooksSource] = await Promise.all([
+    readFile(configPath, "utf8"),
+    readFile(hooksPath, "utf8")
+  ]);
+  if (memorySetting(configSource, "generate_memories") ||
+      memorySetting(configSource, "use_memories")) {
+    throw new Error("Codex native memory is not fully disabled; refusing Active adoption.");
+  }
+  const configBeforeSource = removeMemStoreMcp(configSource);
+  const restoredConfig = appendMemStoreMcp(configBeforeSource, request);
+  if (!isDeepStrictEqual(parseToml(restoredConfig), parseToml(configSource))) {
+    throw new Error("The existing MemStore MCP configuration does not match this setup request.");
+  }
+  const adoptedHooks = adoptedHookSources(hooksSource, request, candidate);
+  const adoptedAt = request.installedAt;
+  const adoptionId = `active-adoption-${adoptedAt.replaceAll(":", "-")}-${sha256(manifestSource).slice(0, 12)}`;
+  const ownershipBackupRoot = join(
+    resolve(request.runtimeRoot),
+    "install",
+    "backups",
+    adoptionId
+  );
+  const configBackupPath = join(ownershipBackupRoot, "codex_config.backup");
+  const hooksBackupPath = join(ownershipBackupRoot, "codex_hooks.backup");
+  const configTarget: PlannedTarget & { readonly backupPath: string } = {
+    label: "codex_config",
+    path: configPath,
+    kind: "structured_file",
+    before: { state: "file", sha256: sha256(configBeforeSource) },
+    expectedPost: { state: "file", sha256: sha256(configSource) },
+    expectedSource: configSource,
+    backupPath: configBackupPath
+  };
+  const hooksTarget: PlannedTarget & { readonly backupPath: string } = {
+    label: "codex_hooks",
+    path: hooksPath,
+    kind: "structured_file",
+    before: { state: "file", sha256: sha256(adoptedHooks.withoutMemStore) },
+    expectedPost: { state: "file", sha256: sha256(adoptedHooks.shadow) },
+    expectedSource: adoptedHooks.shadow,
+    backupPath: hooksBackupPath
+  };
+  const hooksGuard: PlannedTarget[] = hooksEntryIdentity.state === "symlink"
+    ? [{
+        label: "codex_hooks_link",
+        path: hooksEntryPath,
+        kind: "guard",
+        before: hooksEntryIdentity,
+        expectedPost: hooksEntryIdentity
+      }]
+    : [];
+  const nextOwnershipManifest: OwnershipManifest = {
+    ...manifest,
+    targets: [
+      ...manifest.targets.filter((target) => !allowedLabels.has(target.label)),
+      configTarget,
+      ...hooksGuard,
+      hooksTarget
+    ]
+  };
+  const cutoverRoot = join(resolve(request.runtimeRoot), "cutover", adoptionId);
+  const cutoverConfigBackupPath = join(cutoverRoot, "config.toml.before");
+  const cutoverHooksBackupPath = join(cutoverRoot, "hooks.json.before");
+  const cutoverManifest: CutoverManifest = {
+    schemaVersion: 1,
+    backupId: adoptionId,
+    state: "active",
+    appliedAt: adoptedAt,
+    configPath,
+    hooksPath,
+    configBackupPath: cutoverConfigBackupPath,
+    hooksBackupPath: cutoverHooksBackupPath,
+    sourceConfigSha256: sha256(configSource),
+    sourceHooksSha256: sha256(adoptedHooks.shadow),
+    targetConfigSha256: sha256(configSource),
+    targetHooksSha256: sha256(hooksSource),
+    approvalDigest: "0".repeat(64)
+  };
+  const approvalDigest = sha256(JSON.stringify({
+    ownershipManifestSha256: sha256(manifestSource),
+    nextOwnershipManifest,
+    cutoverManifest: { ...cutoverManifest, approvalDigest: undefined }
+  }));
+  const finalCutoverManifest: CutoverManifest = { ...cutoverManifest, approvalDigest };
+  return {
+    preview: {
+      schemaVersion: 1,
+      state: "active_adoption_preview",
+      dryRun: true,
+      installationId: manifest.installationId,
+      requestIdentity: manifest.requestIdentity,
+      approvalDigest,
+      adoptionId,
+      adoptedAt,
+      configPath,
+      hooksPath,
+      observedDivergedTargetLabels,
+      explicitNoEffects: [
+        "No Codex config or Hook content change",
+        "No native-memory data read, import, move, or deletion",
+        "No Canonical Memory or Runtime database change",
+        "No unrelated managed target adoption"
+      ]
+    },
+    ownershipManifestSha256: sha256(manifestSource),
+    nextOwnershipManifest,
+    configBeforeSource,
+    hooksBeforeSource: adoptedHooks.withoutMemStore,
+    cutoverConfigSource: configSource,
+    cutoverHooksSource: adoptedHooks.shadow,
+    cutoverManifest: finalCutoverManifest
+  };
+}
+
+export async function previewManagedActiveAdoption(
+  request: ManagedRequest
+): Promise<ManagedActiveAdoptionPreview> {
+  return (await activeAdoptionPlan(request)).preview;
+}
+
+export async function applyManagedActiveAdoption(
+  request: ManagedRequest,
+  preview: ManagedActiveAdoptionPreview
+): Promise<{
+  readonly state: "adopted";
+  readonly installationId: string;
+  readonly manifestPath: string;
+  readonly rollbackManifestPath: string;
+}> {
+  const plan = await activeAdoptionPlan(request);
+  if (JSON.stringify(plan.preview) !== JSON.stringify(preview)) {
+    throw new Error("Managed Active adoption inputs diverged after preview; generate a fresh preview.");
+  }
+  const ownershipBackupRoot = join(
+    resolve(request.runtimeRoot),
+    "install",
+    "backups",
+    preview.adoptionId
+  );
+  const cutoverRoot = join(resolve(request.runtimeRoot), "cutover", preview.adoptionId);
+  await Promise.all([
+    mkdir(ownershipBackupRoot, { recursive: true, mode: 0o700 }),
+    mkdir(cutoverRoot, { recursive: true, mode: 0o700 })
+  ]);
+  await Promise.all([
+    writeFileAtomically(join(ownershipBackupRoot, "codex_config.backup"), plan.configBeforeSource, 0o600),
+    writeFileAtomically(join(ownershipBackupRoot, "codex_hooks.backup"), plan.hooksBeforeSource, 0o600),
+    writeFileAtomically(join(cutoverRoot, "config.toml.before"), plan.cutoverConfigSource, 0o600),
+    writeFileAtomically(join(cutoverRoot, "hooks.json.before"), plan.cutoverHooksSource, 0o600)
+  ]);
+  const rollbackManifestPath = join(cutoverRoot, "manifest.json");
+  await writeManifest(
+    request.runtimeRoot,
+    plan.nextOwnershipManifest,
+    plan.ownershipManifestSha256
+  );
+  await writeCutoverManifest(rollbackManifestPath, plan.cutoverManifest);
+  return {
+    state: "adopted",
+    installationId: preview.installationId,
+    manifestPath: join(resolve(request.runtimeRoot), "install", "ownership-manifest.json"),
+    rollbackManifestPath
   };
 }
 

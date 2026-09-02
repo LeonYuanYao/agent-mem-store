@@ -4,25 +4,90 @@ MemStore is a program/data-separated long-term memory system for coding agents.
 The program lives in this repository; Canonical Memory lives in a user-selected
 Obsidian Vault; machine execution state lives under an explicit runtime root.
 
-Current milestone: Gate 6 readiness review after the approved Engineering MVP,
-managed installation, and seven-day Shadow observation. Repository code supports an installed Shadow,
-but this document does not assert the state of any particular machine; use
-`memstore status`, `memstore doctor --deep`, and `memstore shadow status` for
-live read-only inspection.
-Its synthetic Shadow loop covers capture, Luna boundaries, Candidate lifecycle,
-Canonical data, retrieval, explicit CLI/MCP surfaces, complete Weekly/Monthly
-governance, Review UX, failure recovery, and Vault-only portability. Gate 4
-evidence includes latency and embedding benchmarks plus an exact machine-effect
-preview. The managed integration can register the CLI, stdio MCP server, Skills,
-Hooks, notifier, and Worker while keeping E5-base q8 in non-injecting Shadow.
-The purge executor now provides verified-backup gating, zero-write preview,
-calendar-month retention, authority and pin protection, bounded checkpointed
-deletion, foreground-pressure yielding, crash recovery, six-month body-free
-Tombstones, and Vault/SQLite/index agreement. Outcome 13 adds the reviewed
-`$memstore-repair` loop, owned reversible Hook/MCP/Skill/Notifier/LaunchAgent
-merges, exact cutover/rollback rehearsal, and the frozen `gate5-shadow-v1`
-candidate. Automatic injection and native-memory replacement remain separately
-reviewed operations; source changes do not authorize a live upgrade or restart.
+The repository includes a preview-first macOS installer for Codex. It builds the
+program and notifier, discovers an Obsidian Vault, prepares the local E5 model,
+managed-merges Hooks/MCP/Skills, starts the Worker, and verifies foreground
+retrieval. Canonical Memory, machine Runtime data, and the program checkout stay
+separate. Use `memstore status` and `memstore doctor --deep` for live inspection.
+
+## Install on macOS
+
+### Prerequisites
+
+- macOS 13 or newer.
+- Node.js `>=22.17.0 <23` and pnpm `>=10.25.0 <11`.
+- Xcode Command Line Tools with Swift 6 and `codesign`.
+- Codex CLI installed, authenticated, and entitled to the configured Luna and
+  Terra models.
+- Obsidian with the intended Vault opened at least once.
+- `~/.codex/config.toml` created by Codex. Active setup also requires explicit
+  boolean `generate_memories` and `use_memories` values in its `[memories]`
+  section so rollback can restore the exact previous state.
+
+Clone MemStore into a path that will remain stable, then ask it for a preview:
+
+```sh
+git clone https://github.com/LeonYuanYao/AMemStore.git ~/Applications/MemStore
+cd ~/Applications/MemStore
+./install.sh
+```
+
+The default command builds repository-local artifacts and prints a zero-write
+preview of all user configuration, Vault, and Runtime effects. It automatically
+selects the single open Obsidian Vault, or the only registered Vault. If several
+Vaults are equally eligible, pass the intended one explicitly:
+
+```sh
+./install.sh --vault /path/to/Obsidian/Vault
+```
+
+After reviewing the preview, apply it:
+
+```sh
+./install.sh --apply
+```
+
+The first apply downloads and verifies approximately 295 MB for E5-base q8.
+Active mode is the default: it creates a reversible cutover backup, disables
+Codex native memory flags, and activates MemStore injection without reading,
+moving, importing, or deleting native memory data. To observe capture and
+retrieval without injection or native-memory replacement, choose Shadow:
+
+```sh
+./install.sh --mode shadow --apply
+```
+
+Setup requests macOS notification permission after the Worker is ready. Denying
+it does not disable capture, governance, retrieval, or the Obsidian Review Inbox;
+the final result reports the notification state explicitly.
+
+Verify the installation from any directory:
+
+```sh
+~/.local/bin/memstore doctor --deep
+~/.local/bin/memstore status
+```
+
+`setup` waits up to 30 seconds for the foreground Worker socket. If setup reports
+that files were installed but the Worker is unavailable, run the deep doctor and
+retry the same setup command after correcting the reported prerequisite. The
+partial installation stays in Shadow and leaves Codex native memory unchanged;
+the retry resumes it. Re-running setup after a successful Active installation is
+also safe: it verifies and preserves the recorded cutover instead of applying a
+second one. A legacy MemStore installation whose current Active MCP and Hook
+contracts are still exact is offered as `adopt_legacy_active_installation`:
+apply records a fresh ownership and rollback baseline without rewriting current
+Codex configuration, Hook content, or knowledge data. Any unknown managed Hook
+change or unrelated target drift is rejected. Do not move or delete the Git
+checkout after installation: the managed CLI, Hooks, MCP server, Skills, and
+LaunchAgent intentionally reference this reviewed program location.
+
+For automation, add `--json`. Build progress goes to stderr and stdout contains
+only the final JSON envelope:
+
+```sh
+./install.sh --vault /path/to/vault --apply --json
+```
 
 ## Development
 
@@ -37,6 +102,10 @@ pnpm evidence:gate4
 pnpm evidence:purge
 pnpm evidence:gate5
 ```
+
+The default test suite is self-contained in a clean clone. Historical Gate and
+purge evidence contracts are separate because their JSON artifacts intentionally
+remain machine-local; after generating those artifacts, run `pnpm test:evidence`.
 
 Preview isolated initialization without writing anything:
 

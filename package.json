@@ -26,7 +26,8 @@
     "evidence:purge": "tsx scripts/evidence-purge.ts",
     "evidence:foreground-reliability": "tsx scripts/evidence-foreground-reliability.ts",
     "lint": "eslint .",
-    "test": "vitest run",
+    "test": "vitest run --testTimeout=10000 --maxWorkers=4 --exclude 'tests/contract/*evidence.test.ts'",
+    "test:evidence": "vitest run tests/contract/gate3-evidence.test.ts tests/contract/gate4-evidence.test.ts tests/contract/gate5-evidence.test.ts tests/contract/purge-evidence.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

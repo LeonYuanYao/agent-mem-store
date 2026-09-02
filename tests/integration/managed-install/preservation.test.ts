@@ -278,6 +278,44 @@ test("preview is mutation-free and install, repair, and uninstall preserve unrel
   await expect(lstat(data.runtimeRoot)).resolves.toBeDefined();
 });
 
+test("a first installation creates a missing Codex Hooks document and uninstall removes it", async () => {
+  const data = await fixture();
+  await unlink(data.hooksPath);
+  const request = {
+    ...data,
+    lunaCodexHome: join(data.homeRoot, ".codex"),
+    codexExecutable: "/opt/homebrew/bin/codex",
+    embeddingModelDirectory: join(data.runtimeRoot, "models", "e5-base-q8"),
+    installedAt: "2026-09-02T05:00:00.000Z"
+  };
+
+  const preview = await previewManagedIntegration(request);
+
+  await expect(lstat(data.hooksPath)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(preview.targets.find((target) => target.label === "codex_hooks")).toMatchObject({
+    before: { state: "absent" }
+  });
+
+  await applyManagedIntegration(request, preview);
+  const installedHooks = JSON.parse(await readFile(data.hooksPath, "utf8")) as {
+    hooks: Record<string, unknown[]>;
+  };
+  expect(Object.keys(installedHooks.hooks).sort()).toEqual([
+    "PostToolUse",
+    "SessionEnd",
+    "SessionStart",
+    "Stop",
+    "UserPromptSubmit"
+  ]);
+
+  await uninstallManagedIntegration({
+    homeRoot: data.homeRoot,
+    runtimeRoot: data.runtimeRoot,
+    uninstalledAt: "2026-09-02T05:05:00.000Z"
+  });
+  await expect(lstat(data.hooksPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 test("upgrade safely adds the CLI to a legacy managed installation", async () => {
   const data = await fixture();
   const request = {

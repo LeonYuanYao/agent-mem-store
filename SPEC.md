@@ -470,6 +470,31 @@ See [ADR-0038](./docs/adr/0038-use-progressive-explicit-recall-with-warnings.md)
 
 ## Installation and operational CLI
 
+- A first macOS installation uses `./install.sh` or `memstore setup`. Setup is
+  preview-first and requires `--apply` before it changes Codex configuration,
+  Canonical Memory, Runtime data, managed links, or LaunchAgent state.
+- Setup discovers the single unambiguous Obsidian Vault, defaults machine Runtime
+  data to `~/Library/Application Support/MemStore`, supports a missing Codex
+  `hooks.json`, resolves absolute Node and Codex executables, verifies repository
+  and notifier artifacts, and reports actionable prerequisite failures before
+  managed writes.
+- Active injection is the friendly default and Shadow is explicit through
+  `--mode shadow`. Active preview requires explicit Codex native-memory boolean
+  baselines; apply uses the existing reversible cutover and performs no native
+  memory data read, import, move, or deletion.
+- Apply verifies or downloads the approved E5 artifact, applies the exact managed
+  integration preview, preserves a Hook symlink by changing its real target,
+  bootstraps or restarts the owned LaunchAgent, waits for the foreground socket,
+  and then requests notification authorization. Notification denial is visible
+  but non-fatal; missing Worker readiness is a setup failure.
+- `doctor --deep` reports a warning when an installed ownership manifest exists
+  but the foreground Worker socket is unavailable.
+- A legacy owned Active installation may refresh its ownership and rollback
+  baseline without changing current Codex config or Hook bytes only when its MCP
+  binding, managed Active Hook recipes, disabled native-memory flags, and every
+  unrelated owned target still match the current contract. Unknown drift blocks
+  adoption.
+
 - The first-version user-facing command families are intentionally small:
 
   ```text
@@ -513,7 +538,7 @@ See [ADR-0038](./docs/adr/0038-use-progressive-explicit-recall-with-warnings.md)
 - Portability status reports whether the long-term-knowledge-only migration contract is currently satisfied. Prepare drains and pauses source ownership only on real execution; adopt validates Canonical Data, creates destination Runtime state, rebuilds local indexes, and keeps capture disabled until verification succeeds. Neither command merges Runtime databases.
 - All mutating commands support strict preview where a meaningful plan exists and the stable `--json` envelope. Timestamps use RFC 3339 with an explicit offset; durations use ISO 8601; IDs are opaque; cursors are opaque and query-bound. Invalid input is rejected before durable operation acceptance.
 
-See [ADR-0086](./docs/adr/0086-install-and-operate-memstore-through-owned-idempotent-surfaces.md) for the canonical operational command families and managed Codex integration boundary.
+See [ADR-0086](./docs/adr/0086-install-and-operate-memstore-through-owned-idempotent-surfaces.md) for the canonical operational command families and managed Codex integration boundary, and [ADR-0127](./docs/adr/0127-install-through-a-preview-first-friendly-setup.md) for the first-install orchestration.
 
 ## Distillation model
 

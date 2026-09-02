@@ -101,6 +101,10 @@ import {
   rollbackNativeMemoryCutover,
   uninstallManagedIntegration
 } from "../integration/managed.js";
+import {
+  applyFriendlySetup,
+  previewFriendlySetup
+} from "../integration/setup.js";
 import { applyReviewAction, type ReviewAction } from "../review/actions.js";
 import { generateReviewInbox } from "../review/inbox.js";
 import {
@@ -176,6 +180,7 @@ function parseCommon(arguments_: readonly string[]) {
       conditions: { type: "string" },
       interval: { type: "string" },
       model: { type: "string" },
+      mode: { type: "string" },
       "program-version": { type: "string" },
       "code-revision": { type: "string" },
       gate: { type: "string" },
@@ -196,6 +201,36 @@ function parseCommon(arguments_: readonly string[]) {
       json: { type: "boolean", default: false }
     }
   });
+}
+
+async function runFriendlySetup(arguments_: readonly string[]): Promise<unknown> {
+  const parsed = parseCommon(arguments_);
+  if (parsed.values.preview && parsed.values.apply) {
+    throw new MemStoreCommandError(
+      "setup_mode_conflict",
+      "Use either --preview or --apply, not both. Setup previews by default."
+    );
+  }
+  const mode = z.enum(["active", "shadow"]).parse(parsed.values.mode ?? "active");
+  const preview = await previewFriendlySetup({
+    ...(parsed.values.home === undefined ? {} : { homeRoot: parsed.values.home }),
+    ...(parsed.values.repo === undefined ? {} : { repositoryRoot: parsed.values.repo }),
+    ...(parsed.values.vault === undefined ? {} : { vaultRoot: parsed.values.vault }),
+    ...(parsed.values.runtime === undefined ? {} : { runtimeRoot: parsed.values.runtime }),
+    ...(parsed.values.notifier === undefined ? {} : { notifierSource: parsed.values.notifier }),
+    ...(parsed.values.node === undefined ? {} : { nodeExecutable: parsed.values.node }),
+    ...(parsed.values["luna-codex-home"] === undefined
+      ? {}
+      : { lunaCodexHome: parsed.values["luna-codex-home"] }),
+    ...(parsed.values["codex-executable"] === undefined
+      ? {}
+      : { codexExecutable: parsed.values["codex-executable"] }),
+    ...(parsed.values["embedding-model-dir"] === undefined
+      ? {}
+      : { embeddingModelDirectory: parsed.values["embedding-model-dir"] }),
+    mode
+  });
+  return parsed.values.apply ? applyFriendlySetup(preview) : preview;
 }
 
 async function runIntegration(arguments_: readonly string[]): Promise<unknown> {
@@ -1241,8 +1276,30 @@ async function runRemember(arguments_: readonly string[]): Promise<unknown> {
   throw new MemStoreCommandError("unknown_command", "Unknown remember command.");
 }
 
+const helpText = `MemStore - long-term memory for coding agents
+
+Setup:
+  memstore setup [--apply] [--mode active|shadow] [--vault PATH] [--runtime PATH]
+      Preview a friendly installation by default; --apply installs and starts it.
+
+Everyday use:
+  memstore status
+  memstore doctor --deep
+  memstore remember assert --scope project|global --text TEXT
+  memstore recall search QUERY
+  memstore review generate --preview
+
+All operational commands accept --json. Installed commands already know their
+Vault and Runtime roots; repository-local commands require --vault and --runtime.
+Run ./install.sh --help from a checkout for prerequisites and examples.
+`;
+
 async function run(arguments_: readonly string[]): Promise<void> {
   const command = arguments_[0];
+  if (command === undefined || command === "help" || command === "--help" || command === "-h") {
+    process.stdout.write(helpText);
+    return;
+  }
   if (command === "hook" && arguments_[1] === "codex") {
     await runCodexHook(arguments_[2]);
     return;
@@ -1297,6 +1354,16 @@ async function run(arguments_: readonly string[]): Promise<void> {
     const parsed = parseCommon(arguments_);
     if (parsed.values.json) process.stdout.write(`${JSON.stringify(successEnvelope(commandIdentity(arguments_), result))}\n`);
     else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (command === "setup") {
+    const result = await runFriendlySetup(arguments_);
+    const parsed = parseCommon(arguments_);
+    if (parsed.values.json) {
+      process.stdout.write(`${JSON.stringify(successEnvelope("setup", result))}\n`);
+    } else {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    }
     return;
   }
   if (command === "operation" && arguments_[1] === "status") {
@@ -1407,7 +1474,7 @@ async function run(arguments_: readonly string[]): Promise<void> {
     }
     return;
   }
-  if (["doctor", "vault", "worker", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command ?? "") ||
+  if (["doctor", "vault", "worker", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
       (command === "operation" && arguments_[1] === "retry")) {
     const output = await runOperations(arguments_);
     writeResult(output.command, output.result, output.json);

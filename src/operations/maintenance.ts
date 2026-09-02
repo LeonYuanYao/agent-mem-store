@@ -1,5 +1,6 @@
 import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { parse } from "yaml";
 import { z } from "zod";
@@ -8,6 +9,7 @@ import { loadConfiguration } from "../configuration/index.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { inspectCaptureInbox } from "../capture/inbox.js";
 import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
+import { foregroundRetrievalSocketPath } from "../retrieval/foreground-protocol.js";
 import { inspectRetrievalCatalogGeneration } from "../retrieval/index-coordinator.js";
 import { inspectBackgroundRecovery } from "../worker/recovery-policy.js";
 
@@ -21,6 +23,48 @@ function doctorState(checks: readonly DoctorCheck[]): "healthy" | "degraded" | "
   if (checks.some((check) => check.state === "error")) return "error";
   if (checks.some((check) => check.state === "warning")) return "degraded";
   return "healthy";
+}
+
+async function foregroundEndpointAcceptsConnections(runtimeRoot: string): Promise<boolean> {
+  return new Promise<boolean>((resolveProbe) => {
+    const socket = createConnection(foregroundRetrievalSocketPath(runtimeRoot));
+    let complete = false;
+    const finish = (available: boolean): void => {
+      if (complete) return;
+      complete = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolveProbe(available);
+    };
+    const timer = setTimeout(() => { finish(false); }, 50);
+    socket.once("connect", () => { finish(true); });
+    socket.once("error", () => { finish(false); });
+  });
+}
+
+async function inspectManagedWorker(runtimeRoot: string): Promise<DoctorCheck | null> {
+  const manifestPath = join(runtimeRoot, "install", "ownership-manifest.json");
+  let source: string;
+  try {
+    source = await readFile(manifestPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const manifest = z.object({ state: z.string() }).parse(JSON.parse(source));
+  if (manifest.state !== "installed") return null;
+  const available = await foregroundEndpointAcceptsConnections(runtimeRoot);
+  return available
+    ? {
+        name: "managed_worker",
+        state: "ok",
+        detail: "Managed installation exists and the foreground Worker socket is available."
+      }
+    : {
+        name: "managed_worker",
+        state: "warning",
+        detail: "Managed installation exists, but the foreground Worker socket is unavailable."
+      };
 }
 
 async function inspectCatalogFiles(database: DatabaseSync, vaultRoot: string): Promise<DoctorCheck> {
@@ -85,6 +129,19 @@ export async function inspectDoctor(request: {
       state: "error",
       detail: error instanceof Error ? error.message : "Configuration inspection failed."
     });
+  }
+
+  if (request.deep) {
+    try {
+      const managedWorker = await inspectManagedWorker(runtimeRoot);
+      if (managedWorker !== null) checks.push(managedWorker);
+    } catch (error) {
+      checks.push({
+        name: "managed_worker",
+        state: "error",
+        detail: error instanceof Error ? error.message : "Managed Worker inspection failed."
+      });
+    }
   }
 
   try {
