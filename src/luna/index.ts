@@ -1635,6 +1635,8 @@ export class CodexLunaAdapter {
           disabledSkillConfiguration,
           "-c",
           'service_tier="default"',
+          "-c",
+          'model_reasoning_effort="medium"',
           "--model",
           "gpt-5.6-luna",
           "--ephemeral",

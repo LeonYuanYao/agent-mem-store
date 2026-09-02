@@ -501,8 +501,14 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
   );
   expect(request.arguments).toEqual(expect.arrayContaining([
     "-c",
-    'service_tier="default"'
+    'service_tier="default"',
+    'model_reasoning_effort="medium"'
   ]));
+  const reasoningConfigIndex = request.arguments.indexOf(
+    'model_reasoning_effort="medium"'
+  );
+  expect(reasoningConfigIndex).toBeGreaterThan(0);
+  expect(request.arguments[reasoningConfigIndex - 1]).toBe("-c");
   expect(request.arguments).not.toContain('service_tier="fast"');
   const configIndex = request.arguments.indexOf("-c");
   expect(configIndex).toBeGreaterThan(-1);
