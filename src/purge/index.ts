@@ -14,6 +14,10 @@ import {
   loadArchiveRetentionMonths
 } from "../lifecycle/archive-retention.js";
 import {
+  formatMemoryReference,
+  resolveMemoryReference
+} from "../memories/reference.js";
+import {
   inspectStandaloneCanonicalFile,
   purgeArchivedCanonicalBody,
   readCanonicalMemory,
@@ -160,6 +164,7 @@ async function verifyBackup(request: {
   readonly canonicalPath: string;
   readonly expectedContentIdentity: string;
   readonly revisionPaths: readonly string[];
+  readonly allowMissingSources?: boolean;
 }): Promise<{ readonly backupPath: string; readonly backupSha256: string }> {
   const canonicalRelativePath = relative(request.vaultRoot, request.canonicalPath);
   if (canonicalRelativePath.startsWith("..") || canonicalRelativePath.length === 0) {
@@ -180,10 +185,15 @@ async function verifyBackup(request: {
       throw new Error("Purge revision path is outside the Vault root.");
     }
     const backupRevisionPath = resolve(request.backupRoot, revisionRelativePath);
-    if (await sha256File(backupRevisionPath) !== await sha256File(revisionPath)) {
+    const backupRevisionSha256 = await sha256File(backupRevisionPath);
+    const sourceExists = await stat(revisionPath).then(() => true).catch(() => false);
+    if (!sourceExists && request.allowMissingSources !== true) {
+      throw new Error("Purge source revision is missing from the Vault.");
+    }
+    if (sourceExists && backupRevisionSha256 !== await sha256File(revisionPath)) {
       throw new Error("Purge backup revision identity does not match the target.");
     }
-    identities.push(await sha256File(backupRevisionPath));
+    identities.push(backupRevisionSha256);
   }
   return {
     backupPath,
@@ -338,6 +348,192 @@ export function managedArchivePurgeBackupRoot(runtimeRoot: string): string {
     dirname(normalizedRuntimeRoot),
     `${basename(normalizedRuntimeRoot)}-Purge-Staging`
   );
+}
+
+interface PreparedSingleMemoryPurge {
+  readonly memoryId: string;
+  readonly memoryRef: number;
+  readonly reference: string;
+  readonly expectedContentIdentity: string;
+  readonly backupPath: string;
+  readonly backupSha256: string;
+  readonly revisionIds: readonly string[];
+  readonly approvalDigest: string;
+}
+
+function singleMemoryPurgeApprovalDigest(request: {
+  readonly memoryId: string;
+  readonly memoryRef: number;
+  readonly expectedContentIdentity: string;
+  readonly backupPath: string;
+  readonly backupSha256: string;
+  readonly revisionIds: readonly string[];
+}): string {
+  return createHash("sha256").update(JSON.stringify({
+    schemaVersion: 1,
+    operation: "purge-memory",
+    memoryId: request.memoryId,
+    memoryRef: request.memoryRef,
+    expectedContentIdentity: request.expectedContentIdentity,
+    backupPath: resolve(request.backupPath),
+    backupSha256: request.backupSha256,
+    revisionIds: [...request.revisionIds]
+  })).digest("hex");
+}
+
+async function prepareSingleMemoryPurge(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly backupRoot: string;
+  readonly memory: string;
+}): Promise<PreparedSingleMemoryPurge> {
+  const vaultRoot = resolve(request.vaultRoot);
+  const runtimeRoot = resolve(request.runtimeRoot);
+  const backupRoot = resolve(request.backupRoot);
+  validateRoots(vaultRoot, runtimeRoot, backupRoot);
+  const resolvedMemory = await resolveMemoryReference(runtimeRoot, request.memory);
+  const current = await readCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    memoryId: resolvedMemory.memoryId
+  });
+  if (current === undefined) {
+    throw new Error("Purge target is not present in the Canonical Vault.");
+  }
+  if (current.memory.lifecycle === "active") {
+    throw new Error("Single-memory purge requires an archived Memory.");
+  }
+  if (current.memory.lifecycle === "archived") {
+    const retention = resolvePurgeAfter(current.memory, DEFAULT_ARCHIVE_RETENTION_MONTHS);
+    if (retention.state === "protected") {
+      throw new Error(`Single-memory purge is blocked by ${retention.reason}.`);
+    }
+    const openProtection = currentOpenProtectionReason(runtimeRoot, current.memory.memoryId);
+    if (openProtection !== undefined) {
+      throw new Error(`Single-memory purge is blocked by ${openProtection}.`);
+    }
+  }
+
+  const expectedContentIdentity = current.memory.lifecycle === "tombstone"
+    ? z.string().regex(/^[0-9a-f]{64}$/u).parse(
+        current.memory.lifecycleDetails.purgedContentIdentity
+      )
+    : current.contentIdentity;
+  const database = new DatabaseSync(
+    join(runtimeRoot, "state", "memstore.sqlite"),
+    { readOnly: true }
+  );
+  let catalogRevisionIds: readonly string[];
+  try {
+    catalogRevisionIds = database.prepare(
+      `SELECT revision_id FROM memory_revisions
+       WHERE memory_id = ? ORDER BY created_at, revision_id`
+    ).all(current.memory.memoryId).map((row) => z.string().parse(row.revision_id));
+  } finally {
+    database.close();
+  }
+  const revisionIds = current.memory.lifecycle === "tombstone"
+    ? [...(current.memory.lifecycleDetails.purgedRevisionIds ?? [])]
+    : [...catalogRevisionIds];
+  const revisionPaths = revisionIds.map((revisionId) => join(
+    vaultRoot,
+    "_MemStore",
+    "Revisions",
+    current.memory.memoryId,
+    `${revisionId}.md`
+  ));
+  const backup = await verifyBackup({
+    vaultRoot,
+    backupRoot,
+    canonicalPath: current.path,
+    expectedContentIdentity,
+    revisionPaths,
+    allowMissingSources: current.memory.lifecycle === "tombstone"
+  });
+  const prepared = {
+    memoryId: current.memory.memoryId,
+    memoryRef: resolvedMemory.memoryRef,
+    reference: formatMemoryReference(resolvedMemory.memoryRef),
+    expectedContentIdentity,
+    backupPath: backup.backupPath,
+    backupSha256: backup.backupSha256,
+    revisionIds
+  };
+  return {
+    ...prepared,
+    approvalDigest: singleMemoryPurgeApprovalDigest(prepared)
+  };
+}
+
+export async function previewSingleMemoryPurge(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly backupRoot: string;
+  readonly memory: string;
+  readonly purgedAt: string;
+}): Promise<{
+  readonly schemaVersion: 1;
+  readonly dryRun: true;
+  readonly state: "preview";
+  readonly memoryId: string;
+  readonly memoryRef: string;
+  readonly expectedContentIdentity: string;
+  readonly backupPath: string;
+  readonly backupSha256: string;
+  readonly approvalDigest: string;
+}> {
+  z.iso.datetime().parse(request.purgedAt);
+  const prepared = await prepareSingleMemoryPurge(request);
+  return {
+    schemaVersion: 1,
+    dryRun: true,
+    state: "preview",
+    memoryId: prepared.memoryId,
+    memoryRef: prepared.reference,
+    expectedContentIdentity: prepared.expectedContentIdentity,
+    backupPath: prepared.backupPath,
+    backupSha256: prepared.backupSha256,
+    approvalDigest: prepared.approvalDigest
+  };
+}
+
+export async function applySingleMemoryPurge(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly backupRoot: string;
+  readonly memory: string;
+  readonly purgedAt: string;
+  readonly approvalDigest: string;
+}): Promise<{
+  readonly schemaVersion: 1;
+  readonly dryRun: false;
+  readonly state: "purged";
+  readonly memoryId: string;
+  readonly memoryRef: string;
+  readonly tombstoneContentIdentity: string;
+}> {
+  const purgedAt = z.iso.datetime().parse(request.purgedAt);
+  const approvalDigest = z.string().regex(/^[0-9a-f]{64}$/u).parse(request.approvalDigest);
+  const prepared = await prepareSingleMemoryPurge(request);
+  if (approvalDigest !== prepared.approvalDigest) {
+    throw new Error("Single-memory purge approval digest does not match the current target and backup.");
+  }
+  const result = await purgeArchivedCanonicalBody({
+    vaultRoot: request.vaultRoot,
+    runtimeRoot: request.runtimeRoot,
+    memoryId: prepared.memoryId,
+    expectedContentIdentity: prepared.expectedContentIdentity,
+    purgedAt,
+    reason: "explicit_user_purge"
+  });
+  return {
+    schemaVersion: 1,
+    dryRun: false,
+    state: "purged",
+    memoryId: prepared.memoryId,
+    memoryRef: prepared.reference,
+    tombstoneContentIdentity: result.tombstoneContentIdentity
+  };
 }
 
 async function collectPreview(request: ArchivePurgeRequest): Promise<{

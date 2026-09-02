@@ -35,6 +35,10 @@ import {
 } from "../operations/knowledge-verification.js";
 import { inspectDoctor, retryOperation } from "../operations/maintenance.js";
 import {
+  applyMemoryLifecycleChange,
+  previewMemoryLifecycleChange
+} from "../operations/memory-lifecycle.js";
+import {
   archiveOperationalMemories,
   auditMemoryQuality,
   repairExactCompactRepresentations
@@ -57,7 +61,12 @@ import {
   validatePortableVault
 } from "../operations/portability.js";
 import { executeRecall } from "../operations/recall.js";
-import { previewArchivePurge, runArchivePurgeBatch } from "../purge/index.js";
+import {
+  applySingleMemoryPurge,
+  previewArchivePurge,
+  previewSingleMemoryPurge,
+  runArchivePurgeBatch
+} from "../purge/index.js";
 import {
   approveRepairGate1,
   approveRepairGate2,
@@ -567,6 +576,83 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
   const parsed = parseCommon(arguments_);
   const location = roots(parsed.values);
   const now = new Date().toISOString();
+  if (command === "archive" || command === "restore") {
+    if (parsed.values.preview && parsed.values.apply) {
+      throw new MemStoreCommandError(
+        "memory_lifecycle_mode_conflict",
+        "Use either --preview or --apply, not both. Lifecycle changes preview by default."
+      );
+    }
+    const memory = parsed.positionals[1];
+    if (memory === undefined) {
+      throw new MemStoreCommandError(
+        "memory_id_required",
+        `${command} requires a portable M:<number> reference or Canonical Memory identity.`
+      );
+    }
+    const request = {
+      ...location,
+      memory,
+      action: command === "archive" ? "archive" as const : "restore" as const,
+      changedAt: now,
+      ...(parsed.values.reason === undefined ? {} : { reason: parsed.values.reason })
+    };
+    return {
+      command: `memory.${command}`,
+      result: parsed.values.apply
+        ? await applyMemoryLifecycleChange(request)
+        : await previewMemoryLifecycleChange(request),
+      json: parsed.values.json
+    };
+  }
+  if (command === "purge-memory") {
+    if (parsed.values.preview && parsed.values.apply) {
+      throw new MemStoreCommandError(
+        "memory_purge_mode_conflict",
+        "Use either --preview or --apply, not both. purge-memory previews by default."
+      );
+    }
+    const memory = parsed.positionals[1];
+    if (memory === undefined) {
+      throw new MemStoreCommandError(
+        "memory_id_required",
+        "purge-memory requires a portable M:<number> reference or Canonical Memory identity."
+      );
+    }
+    if (parsed.values.backup === undefined) {
+      throw new MemStoreCommandError(
+        "purge_backup_required",
+        "purge-memory requires --backup pointing to a verified Vault backup."
+      );
+    }
+    const request = {
+      ...location,
+      backupRoot: resolve(parsed.values.backup),
+      memory,
+      purgedAt: now
+    };
+    if (!parsed.values.apply) {
+      return {
+        command: "memory.purge",
+        result: await previewSingleMemoryPurge(request),
+        json: parsed.values.json
+      };
+    }
+    if (parsed.values.gate === undefined) {
+      throw new MemStoreCommandError(
+        "purge_approval_required",
+        "Preview purge-memory first, then pass its approvalDigest with --gate and --apply."
+      );
+    }
+    return {
+      command: "memory.purge",
+      result: await applySingleMemoryPurge({
+        ...request,
+        approvalDigest: parsed.values.gate
+      }),
+      json: parsed.values.json
+    };
+  }
   if (command === "shadow") {
     const action = parsed.positionals[1];
     if (action === "status") {
@@ -1287,6 +1373,9 @@ Everyday use:
   memstore doctor --deep
   memstore remember assert --scope project|global --text TEXT
   memstore recall search QUERY
+  memstore archive M:123 [--reason TEXT] [--apply]
+  memstore restore M:123 [--apply]
+  memstore purge-memory M:123 --backup PATH [--gate DIGEST --apply]
   memstore review generate --preview
 
 All operational commands accept --json. Installed commands already know their
@@ -1474,7 +1563,7 @@ async function run(arguments_: readonly string[]): Promise<void> {
     }
     return;
   }
-  if (["doctor", "vault", "worker", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
+  if (["archive", "restore", "purge-memory", "doctor", "vault", "worker", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
       (command === "operation" && arguments_[1] === "retry")) {
     const output = await runOperations(arguments_);
     writeResult(output.command, output.result, output.json);

@@ -2,6 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import { errorEnvelope, successEnvelope } from "../contracts/envelope.js";
+import {
+  applyMemoryLifecycleChange,
+  previewMemoryLifecycleChange,
+  type MemoryLifecycleAction
+} from "../operations/memory-lifecycle.js";
 import { executeRecall, type RecallContext } from "../operations/recall.js";
 import type { EmbeddingAdapter } from "../retrieval/index.js";
 import type { RetrievalJudge } from "../retrieval/judge.js";
@@ -54,6 +59,23 @@ export function createMemStoreMcpServer(
       ? {}
       : { retrievalJudge: options.retrievalJudge })
   });
+  const lifecycle = async (input: {
+    readonly memory_id: string;
+    readonly reason?: string | undefined;
+    readonly apply?: boolean | undefined;
+  }, action: MemoryLifecycleAction) => {
+    const request = {
+      runtimeRoot: options.runtimeRoot,
+      vaultRoot: options.vaultRoot,
+      memory: input.memory_id,
+      action,
+      changedAt: options.now?.() ?? new Date().toISOString(),
+      ...(input.reason === undefined ? {} : { reason: input.reason })
+    };
+    return input.apply === true
+      ? applyMemoryLifecycleChange(request)
+      : previewMemoryLifecycleChange(request);
+  };
 
   server.registerTool("memstore_search", {
     title: "Search MemStore",
@@ -130,6 +152,41 @@ export function createMemStoreMcpServer(
   }, async (input) => runTool(
     "recall.report_irrelevant",
     () => executeRecall("report_irrelevant", input, context())
+  ));
+
+  server.registerTool("memstore_archive", {
+    title: "Archive MemStore memory",
+    description: "On an explicit user request, preview or apply reversible archival of one Memory. Archived content leaves normal recall and is retained for the configured recovery period.",
+    inputSchema: {
+      memory_id: z.string().min(1).describe("Portable M:<number> reference or canonical msmem_ UUID."),
+      reason: z.string().min(1).max(256).optional(),
+      apply: z.boolean().optional().describe("Omit or set false to preview; true applies the archive revision.")
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true
+    }
+  }, async (input) => runTool(
+    "memory.archive",
+    () => lifecycle(input, "archive")
+  ));
+
+  server.registerTool("memstore_restore", {
+    title: "Restore archived MemStore memory",
+    description: "On an explicit user request, preview or apply restoration of one archived Memory before its body is purged.",
+    inputSchema: {
+      memory_id: z.string().min(1).describe("Portable M:<number> reference or canonical msmem_ UUID."),
+      apply: z.boolean().optional().describe("Omit or set false to preview; true applies the restore revision.")
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true
+    }
+  }, async (input) => runTool(
+    "memory.restore",
+    () => lifecycle(input, "restore")
   ));
 
   return server;

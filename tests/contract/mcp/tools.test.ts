@@ -19,7 +19,7 @@ afterEach(async () => {
   ));
 });
 
-test("the stdio server exposes exactly the five accepted progressive-recall tools", async () => {
+test("the stdio server exposes progressive recall plus reversible lifecycle tools", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-mcp-tools-"));
   temporaryDirectories.push(root);
   const workspace = join(root, "workspace");
@@ -42,10 +42,12 @@ test("the stdio server exposes exactly the five accepted progressive-recall tool
   const tools = await client.listTools();
 
   expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
+    "memstore_archive",
     "memstore_get",
     "memstore_provenance",
     "memstore_related",
     "memstore_report_irrelevant",
+    "memstore_restore",
     "memstore_search"
   ]);
   const failed = await client.callTool({
@@ -58,6 +60,66 @@ test("the stdio server exposes exactly the five accepted progressive-recall tool
     schema_version: 1,
     ok: false,
     command: "recall.show"
+  });
+  await client.close();
+  await server.close();
+});
+
+test("MCP archive and restore preview by default and apply through the shared lifecycle core", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-mcp-lifecycle-"));
+  temporaryDirectories.push(root);
+  const workspace = join(root, "workspace");
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await mkdir(workspace, { recursive: true });
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "agent",
+    memory: makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174219",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174220",
+      body: "Archive this obsolete agent-derived note.",
+      authority: "agent_derived"
+    })
+  });
+  const server = createMemStoreMcpServer({
+    runtimeRoot,
+    vaultRoot,
+    path: workspace,
+    callerIdentity: "mcp-lifecycle-test",
+    now: () => "2026-09-02T10:00:00.000Z"
+  });
+  const client = new Client({ name: "lifecycle-client", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+
+  const preview = await client.callTool({
+    name: "memstore_archive",
+    arguments: { memory_id: "M:1", reason: "obsolete" }
+  });
+  expect(preview.structuredContent).toMatchObject({
+    ok: true,
+    command: "memory.archive",
+    result: { dryRun: true, state: "preview", memoryRef: "M:1" }
+  });
+  const archived = await client.callTool({
+    name: "memstore_archive",
+    arguments: { memory_id: "M:1", reason: "obsolete", apply: true }
+  });
+  expect(archived.structuredContent).toMatchObject({
+    ok: true,
+    result: { dryRun: false, state: "archived", memoryRef: "M:1" }
+  });
+  const restored = await client.callTool({
+    name: "memstore_restore",
+    arguments: { memory_id: "M:1", apply: true }
+  });
+  expect(restored.structuredContent).toMatchObject({
+    ok: true,
+    command: "memory.restore",
+    result: { dryRun: false, state: "restored", memoryRef: "M:1" }
   });
   await client.close();
   await server.close();

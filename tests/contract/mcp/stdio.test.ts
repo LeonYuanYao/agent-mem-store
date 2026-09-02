@@ -33,7 +33,7 @@ test("the real stdio transport keeps stdout parseable as MCP protocol", async ()
 
   const tools = await client.listTools();
 
-  expect(tools.tools).toHaveLength(5);
+  expect(tools.tools).toHaveLength(7);
   await client.close();
 });
 
@@ -60,7 +60,7 @@ test("the MCP server remains available when the optional embedding adapter canno
   await client.connect(transport);
   const tools = await client.listTools();
 
-  expect(tools.tools).toHaveLength(5);
+  expect(tools.tools).toHaveLength(7);
   expect(stderr).toContain("embedding_unavailable");
   await client.close();
 });

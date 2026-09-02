@@ -187,6 +187,29 @@ pnpm exec tsx src/cli/main.ts purge run --preview \
 copy-paste development example. Outcome 12 evidence executes it only against
 operating-system temporary Vaults.
 
+Single-Memory lifecycle controls also preview by default. Archive is reversible
+during the configured retention period; restore starts a fresh Active cycle:
+
+```sh
+memstore archive M:123 --reason obsolete
+memstore archive M:123 --reason obsolete --apply
+memstore restore M:123 --apply
+```
+
+Permanent single-Memory deletion is CLI-only and accepts Archived Memory only.
+It refuses protected content, requires a verified backup, and binds apply to the
+exact previewed target and backup:
+
+```sh
+memstore purge-memory M:123 --backup /path/to/verified-vault-backup
+memstore purge-memory M:123 --backup /path/to/verified-vault-backup \
+  --gate <approvalDigest-from-preview> --apply
+```
+
+`memstore_archive` and `memstore_restore` provide the same reversible operations
+to MCP clients. Omitting `apply` previews the change. Physical purge is not
+exposed through MCP.
+
 The built binaries are `memstore` and `memstore-mcp`. The MCP server reads
 `MEMSTORE_VAULT_ROOT` and `MEMSTORE_RUNTIME_ROOT`; protocol output is reserved
 for stdout and diagnostics go to stderr.

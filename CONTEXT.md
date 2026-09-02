@@ -244,6 +244,10 @@ _Avoid_: 写死期限、归档即删除、后台静默覆盖人工保护
 正文清除后保留的最小无正文记录，可以包含 identity 或 fingerprint、原因、归档与清除时间以及 successor，用于防止无效知识被盲目重复创建。
 _Avoid_: Archived Memory 正文、第二份知识副本、正常回忆内容
 
+**Explicit Memory Lifecycle Control（显式记忆生命周期控制）**:
+用户按单条 Memory identity 发起的 `archive`、`restore` 或 CLI-only `purge-memory` 操作。三者默认先预览；前两者保留正文并写入可追溯修订，物理清除则必须绑定已验证备份与精确预览摘要，且只接受未受保护的 Archived Memory。
+_Avoid_: Luna 自动治理、无预览批量删除、把 Tombstone 当作可恢复正文、通用 `forget` 别名
+
 **Memory Injection（记忆注入）**:
 把与当前 Session 或用户问题相关的 Durable Memory 作为受限上下文提供给 Coding Agent。它是长期记忆的主要消费方式，不包含未获准参与回忆的候选。
 _Avoid_: 完整 Vault 加载、候选回忆

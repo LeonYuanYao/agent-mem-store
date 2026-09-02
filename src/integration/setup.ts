@@ -197,17 +197,20 @@ async function matchingActiveCutover(request: {
       resolve(manifest.hooksPath) === resolve(request.hooksPath)
     )
     .sort((left, right) => right.manifest.appliedAt.localeCompare(left.manifest.appliedAt));
-  const current = candidates[0];
-  if (current === undefined) return undefined;
+  if (candidates.length === 0) return undefined;
   const [configSource, hooksSource] = await Promise.all([
     readFile(request.configPath, "utf8"),
     readFile(request.hooksPath, "utf8")
   ]);
-  if (sha256(configSource) !== current.manifest.targetConfigSha256 ||
-      sha256(hooksSource) !== current.manifest.targetHooksSha256) {
-    return { state: "diverged" };
-  }
-  return { state: "matching", manifestPath: current.manifestPath };
+  const configSha256 = sha256(configSource);
+  const hooksSha256 = sha256(hooksSource);
+  const matching = candidates.find(({ manifest }) =>
+    configSha256 === manifest.targetConfigSha256 &&
+    hooksSha256 === manifest.targetHooksSha256
+  );
+  return matching === undefined
+    ? { state: "diverged" }
+    : { state: "matching", manifestPath: matching.manifestPath };
 }
 
 async function requirePath(path: string, description: string): Promise<void> {
