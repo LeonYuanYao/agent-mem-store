@@ -90,7 +90,7 @@ test("a Direct Human Assertion preserves the exact body without a Luna rewrite",
   expect(prompt.items).toEqual([
     expect.objectContaining({
       memoryId: result.memoryId,
-      representationKind: "standard",
+      representationKind: "compact",
       relevanceBand: "high"
     })
   ]);

@@ -10,6 +10,7 @@ import {
   prepareUserPromptShadowPack
 } from "../../../src/retrieval/packs.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
+import { inspectStatus } from "../../../src/operations/status.js";
 import { writeCanonicalMemory } from "../../../src/vault/index.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
 
@@ -241,6 +242,170 @@ test("UserPromptSubmit uses relevance bands, upgrades exact high matches, and su
   });
   expect(repeated.items).toEqual([]);
   expect(repeated.emptyReason).toBe("already_present");
+});
+
+test("UserPromptSubmit uses a short validated standard when a high exact Memory has no compact", async () => {
+  const roots = await createRoot();
+  const registry = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174591",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174592",
+    scope: { kind: "project", projectId },
+    body: "Use https://packages.example.com as the npm registry for internal packages.",
+    compact: "Unvalidated compact must not be used.",
+    standard: "Use https://packages.example.com as the npm registry for internal packages.",
+    validatedCompact: false,
+    validatedStandard: true,
+    startup: "never",
+    applicability: {
+      summary: "Applies when configuring the acme npm registry.",
+      conditions: []
+    }
+  });
+  const exactAdapter: EmbeddingAdapter = {
+    identity: adapter.identity,
+    embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  await writeAll(roots, [registry]);
+  await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "short-standard-pack",
+    requestedAt: "2026-08-07T12:02:05.000Z"
+  });
+
+  const pack = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "short-standard-pack",
+    prompt: "How do I configure the acme npm registry?",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter: exactAdapter,
+    requestedAt: "2026-08-07T12:02:06.000Z"
+  });
+
+  expect(pack.items).toEqual([
+    expect.objectContaining({
+      memoryId: registry.memoryId,
+      relevanceBand: "high",
+      representationKind: "standard"
+    })
+  ]);
+});
+
+test("UserPromptSubmit reports a high candidate whose representation is unavailable", async () => {
+  const roots = await createRoot();
+  const unavailable = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174597",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174598",
+    scope: { kind: "project", projectId },
+    body: "The oversized-payload procedure has required detail that cannot be omitted.",
+    compact: "Unvalidated compact must not be used.",
+    standard: `oversized-payload ${"required detail ".repeat(100)}`,
+    validatedCompact: false,
+    validatedStandard: true,
+    startup: "never"
+  });
+  await writeAll(roots, [unavailable]);
+  await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "unavailable-representation-pack",
+    requestedAt: "2026-08-07T12:02:08.500Z"
+  });
+
+  const pack = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "unavailable-representation-pack",
+    prompt: "Show the oversized-payload procedure",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter,
+    requestedAt: "2026-08-07T12:02:09.000Z"
+  });
+  const receipt = await inspectRetrievalReceipt(roots.runtimeRoot, pack.receiptId);
+  const status = await inspectStatus(roots);
+
+  expect(pack.items).toEqual([]);
+  expect(receipt?.omittedItems).toEqual([
+    expect.objectContaining({
+      memoryId: unavailable.memoryId,
+      relevanceBand: "high",
+      omissionReason: "representation_unavailable"
+    })
+  ]);
+  expect(status.pipelines.foreground_retrieval.high_representation_unavailable_count)
+    .toBe(1);
+});
+
+test("UserPromptSubmit does not treat one rare natural-language term as an exact anchor", async () => {
+  const roots = await createRoot();
+  const relevant = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174593",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174594",
+    scope: { kind: "project", projectId },
+    body: "Use https://packages.example.com as the package source for internal npm packages.",
+    compact: "Unvalidated compact must not be used.",
+    standard: "Use https://packages.example.com as the package source for internal npm packages.",
+    validatedCompact: false,
+    validatedStandard: true,
+    startup: "never",
+    applicability: {
+      summary: "Applies when configuring acme for internal npm packages.",
+      conditions: []
+    }
+  });
+  const unrelated = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174595",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174596",
+    scope: { kind: "project", projectId },
+    body: "AudioComponent.playMode is mapped through the component registry 配置。",
+    compact: "AudioComponent.playMode is mapped through the component registry 配置。",
+    startup: "never",
+    applicability: {
+      summary: "Applies to AudioComponent enum serialization.",
+      conditions: []
+    }
+  });
+  const registryAdapter: EmbeddingAdapter = {
+    identity: {
+      ...adapter.identity,
+      adapterVersion: "registry-fixture-v1",
+      modelIdentity: "registry-fixture-embedding",
+      artifactSha256: "e".repeat(64)
+    },
+    embed: (texts) => Promise.resolve(texts.map((text) =>
+      text.includes("AudioComponent") ? [0.84, 0.5425863987] : [1, 0]
+    )),
+    embedDocuments: (texts) => Promise.resolve(texts.map((text) =>
+      text.includes("AudioComponent") ? [0.84, 0.5425863987] : [1, 0]
+    )),
+    embedQuery: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  };
+  await writeCanonicalMemory({ ...roots, actor: "human", memory: relevant });
+  await writeCanonicalMemory({ ...roots, actor: "human", memory: unrelated });
+  await buildRetrievalIndex({
+    ...roots,
+    adapter: registryAdapter,
+    builtAt: "2026-08-07T12:00:01.000Z"
+  });
+  await prepareSessionStartShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "ambiguous-registry-pack",
+    requestedAt: "2026-08-07T12:02:07.000Z"
+  });
+
+  const pack = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "ambiguous-registry-pack",
+    prompt: "给我一个把 acme 设置到本地 npm 的默认 registry 的方式",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    adapter: registryAdapter,
+    requestedAt: "2026-08-07T12:02:08.000Z"
+  });
+
+  expect(pack.items.map((item) => item.memoryId)).toEqual([relevant.memoryId]);
 });
 
 test("UserPromptSubmit does not promote an entire project cluster from one shared exact term", async () => {

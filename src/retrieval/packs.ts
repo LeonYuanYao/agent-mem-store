@@ -1091,16 +1091,25 @@ async function automaticCandidates(request: {
   for (const memoryId of directMemoryIds) {
     if (eligibleIds.has(memoryId)) candidateIds.add(memoryId);
   }
+  const rawExactTerms = request.prompt.match(
+    /[A-Za-z][A-Za-z0-9_.:/-]{3,}|[A-Z]{2,}[0-9-]*/gu
+  ) ?? [];
   const exactTerms = [...new Set(
-    (request.prompt.match(/[A-Za-z][A-Za-z0-9_.:/-]{3,}|[A-Z]{2,}[0-9-]*/gu) ?? [])
-      .map((term) => term.normalize("NFKC").toLocaleLowerCase("en-US"))
+    rawExactTerms.map((term) => term.normalize("NFKC").toLocaleLowerCase("en-US"))
   )].filter((term) => documentFrequency(term) > 0);
+  const structuredExactTerms = new Set(rawExactTerms.flatMap((term) => {
+    const uppercaseCount = term.match(/[A-Z]/gu)?.length ?? 0;
+    return /[0-9_.:/-]/u.test(term) || uppercaseCount >= 2
+      ? [term.normalize("NFKC").toLocaleLowerCase("en-US")]
+      : [];
+  }));
   const exactTermWeights = new Map(
     exactTerms.map((term) => [term, termWeight(term)] as const)
   );
   const rareExactTerms = new Set(
     exactTerms.filter((term) =>
       Array.from(term).length >= AUTOMATIC_SINGLE_RARE_TERM_MINIMUM_LENGTH &&
+      structuredExactTerms.has(term) &&
       documentFrequency(term) <= rareTermMaximumDocumentFrequency
     )
   );
@@ -1629,14 +1638,26 @@ async function prepareUserPromptShadowPackCore(
     );
   const relevantBeforeRepeat = scored.some((item) => item.band !== "weak");
   const selected: ShadowPackItem[] = [];
+  const promptOmissionReasons = new Map<string, string>();
   let probableCount = 0;
   if (!isContinuationOnly(normalizedPrompt)) {
     for (const item of ranked) {
       if (selected.length >= (postSoft ? 2 : PROMPT_ITEM_LIMIT)) break;
-      if (item.band === "probable" && probableCount >= PROBABLE_ITEM_LIMIT) continue;
+      if (item.band === "probable" && probableCount >= PROBABLE_ITEM_LIMIT) {
+        promptOmissionReasons.set(item.memory.memoryId, "item_limit");
+        continue;
+      }
       const tier = tierFor(item.memory, request.projectId);
-      const representation = representationFor(item.memory, tier, item.band === "high");
-      if (representation === undefined || (item.band === "probable" && representation.kind !== "compact")) continue;
+      const representation = representationFor(item.memory, tier, item.band === "high") ??
+        (!postSoft && item.band === "high" && item.memory.standardValidated &&
+        item.memory.standardTokenCount <= 96
+          ? { kind: "standard" as const, text: item.memory.standardText }
+          : undefined);
+      if (representation === undefined ||
+        (item.band === "probable" && representation.kind !== "compact")) {
+        promptOmissionReasons.set(item.memory.memoryId, "representation_unavailable");
+        continue;
+      }
       const text = renderItem(item.memory, representation.kind, representation.text);
       const candidate: ShadowPackItem = {
         memoryId: item.memory.memoryId,
@@ -1658,7 +1679,10 @@ async function prepareUserPromptShadowPackCore(
         includeMemoryLegend
       );
       if (trial.renderedTokenCount > PROMPT_HARD_LIMIT ||
-        epoch.tokenTotal + trial.renderedTokenCount > hardLimit) continue;
+        epoch.tokenTotal + trial.renderedTokenCount > hardLimit) {
+        promptOmissionReasons.set(item.memory.memoryId, "budget_not_fit");
+        continue;
+      }
       selected.push(candidate);
       if (item.band === "probable") probableCount += 1;
     }
@@ -1709,7 +1733,7 @@ async function prepareUserPromptShadowPackCore(
         : postSoft && !(item.score >= 5 && item.primaryAnchor &&
           (item.memory.authority === "human_authored" || tierFor(item.memory, request.projectId) !== "normal"))
           ? "post_soft_ineligible"
-          : "budget_or_item_limit"
+          : promptOmissionReasons.get(item.memory.memoryId) ?? "item_limit"
   }));
   const emptyReason = selected.length > 0
     ? undefined
@@ -1831,6 +1855,13 @@ export async function inspectRetrievalReceipt(
   readonly timings?: RetrievalStageTimings;
   readonly selectedMemoryIds: readonly string[];
   readonly omittedMemoryIds: readonly string[];
+  readonly omittedItems: readonly {
+    readonly memoryId: string;
+    readonly relevanceBand: "high" | "probable" | "weak" | "startup";
+    readonly score: number;
+    readonly reasons: readonly string[];
+    readonly omissionReason: string;
+  }[];
 } | undefined> {
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
@@ -1843,7 +1874,8 @@ export async function inspectRetrievalReceipt(
     ).get(receiptId);
     if (receipt === undefined) return undefined;
     const items = database.prepare(
-      `SELECT memory_id, outcome FROM retrieval_receipt_items
+      `SELECT memory_id, relevance_band, score, reasons_json, outcome, omission_reason
+       FROM retrieval_receipt_items
        WHERE receipt_id = ? ORDER BY rank_ordinal, memory_id`
     ).all(receiptId);
     return {
@@ -1873,6 +1905,18 @@ export async function inspectRetrievalReceipt(
       ),
       omittedMemoryIds: items.flatMap((item) =>
         item.outcome === "omitted" ? [z.string().parse(item.memory_id)] : []
+      ),
+      omittedItems: items.flatMap((item) =>
+        item.outcome === "omitted"
+          ? [{
+              memoryId: z.string().parse(item.memory_id),
+              relevanceBand: z.enum(["high", "probable", "weak", "startup"])
+                .parse(item.relevance_band),
+              score: z.number().int().nonnegative().parse(item.score),
+              reasons: z.array(z.string()).parse(JSON.parse(z.string().parse(item.reasons_json))),
+              omissionReason: z.string().parse(item.omission_reason)
+            }]
+          : []
       )
     };
   } finally {

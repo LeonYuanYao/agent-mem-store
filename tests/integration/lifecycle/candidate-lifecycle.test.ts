@@ -28,6 +28,10 @@ import {
   enqueueCandidateAssessment,
   runNextCandidateAssessment
 } from "../../../src/worker/governance.js";
+import {
+  inspectMemoryQualityPipeline,
+  scheduleCompactQuality
+} from "../../../src/quality/pipeline.js";
 
 const roots: string[] = [];
 
@@ -219,6 +223,52 @@ test("a Candidate stays outside recall until the deterministic Promotion Gate co
   await expect(listRecallEligibleMemoryIds(roots.runtimeRoot)).resolves.toEqual([
     evaluated.memoryId
   ]);
+});
+
+test("promotion immediately queues an unvalidated compact when quality processing is enabled", async () => {
+  const roots = await createRoot();
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  const evaluatedAt = "2026-08-07T08:01:02.000Z";
+  await scheduleCompactQuality({
+    runtimeRoot: roots.runtimeRoot,
+    requestedAt: "2026-08-07T08:01:00.000Z",
+    preview: false
+  });
+  const evidence = await captureUserEvidence({
+    runtimeRoot: roots.runtimeRoot,
+    evidenceId: "evidence-immediate-compact-quality",
+    projectId,
+    occurredAt: "2026-08-07T08:01:00.000Z",
+    prompt: "Use the internal registry only; do not generalize this to public packages."
+  });
+  const created = requireCandidate(await createAgentCandidate({
+    ...roots,
+    scope: { kind: "project", projectId },
+    candidate: {
+      ...candidate,
+      statement: "Use the internal package registry for this package.",
+      applicabilitySummary: "Installing this internal package",
+      conditions: ["The package is internal."],
+      exclusions: ["Do not generalize this to public packages."],
+      preservedNegations: ["Public packages are not covered."]
+    },
+    evidence: [evidence],
+    sourceSessionId: "session-immediate-compact-quality",
+    createdAt: "2026-08-07T08:01:01.000Z"
+  }));
+
+  const evaluated = await evaluateCandidate({
+    ...roots,
+    candidateId: created.candidateId,
+    evaluatedAt
+  });
+
+  expect(evaluated).toMatchObject({ state: "promoted" });
+  await expect(inspectMemoryQualityPipeline({ runtimeRoot: roots.runtimeRoot }))
+    .resolves.toMatchObject({
+      totalCount: 1,
+      pendingGenerationCount: 1
+    });
 });
 
 test("a newly distilled session-only Candidate stays waiting before canonical promotion", async () => {

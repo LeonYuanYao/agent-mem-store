@@ -17,6 +17,7 @@ import {
   selectPrimaryCategory,
   type MemoryCategory
 } from "../memories/categories.js";
+import { enqueueCompactQualityRecord } from "../quality/enqueue.js";
 
 const uuidV4Suffix =
   "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
@@ -1042,6 +1043,11 @@ export async function writeCanonicalMemory(
           throw new Error("Canonical catalog revision precondition failed.");
         }
         replaceCatalogRelationships(database, request.memory);
+        enqueueCompactQualityRecord(database, {
+          memory: request.memory,
+          sourceContentIdentity: revisedIdentity,
+          requestedAt: request.memory.revisedAt
+        });
         database.exec("COMMIT");
       } catch (error) {
         database.exec("ROLLBACK");
@@ -1160,6 +1166,11 @@ export async function writeCanonicalMemory(
           request.memory.revisedAt
         );
       replaceCatalogRelationships(database, request.memory);
+      enqueueCompactQualityRecord(database, {
+        memory: request.memory,
+        sourceContentIdentity: identity,
+        requestedAt: request.memory.revisedAt
+      });
       database.exec("COMMIT");
     } catch (error) {
       database.exec("ROLLBACK");

@@ -112,6 +112,58 @@ test("compact backfill publishes only after a separate fidelity assessment", asy
   });
 });
 
+test("an Agent revision immediately queues its unvalidated compact when quality is enabled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-quality-revision-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const memoryId = "msmem_123e4567-e89b-42d3-a456-426614174082";
+  const initialRevisionId = "msrev_123e4567-e89b-42d3-a456-426614174082";
+  const initial = makeCanonicalMemory({
+    memoryId,
+    revisionId: initialRevisionId,
+    authority: "agent_derived",
+    body: "Use the internal package source for this package."
+  });
+  const created = await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "agent",
+    memory: initial
+  });
+  await scheduleCompactQuality({
+    runtimeRoot,
+    requestedAt: "2026-08-18T23:00:00.000Z",
+    preview: false
+  });
+  const revisionId = "msrev_123e4567-e89b-42d3-a456-426614174092";
+  const revised = makeCanonicalMemory({
+    memoryId,
+    revisionId,
+    authority: "agent_derived",
+    body: "Use the internal package source only for this package.",
+    validatedCompact: false
+  });
+
+  await writeCanonicalMemory({
+    runtimeRoot,
+    vaultRoot,
+    actor: "agent",
+    expectedContentIdentity: created.contentIdentity,
+    memory: {
+      ...revised,
+      predecessorRevisionId: initialRevisionId,
+      createdAt: initial.createdAt,
+      revisedAt: "2026-08-18T23:00:01.000Z"
+    }
+  });
+
+  await expect(inspectMemoryQualityPipeline({ runtimeRoot })).resolves.toMatchObject({
+    totalCount: 1,
+    pendingGenerationCount: 1
+  });
+});
+
 test("semantic anchor paraphrases reach independent compact fidelity validation", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-quality-semantic-anchor-"));
   roots.push(root);

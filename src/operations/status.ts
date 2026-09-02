@@ -123,6 +123,17 @@ export async function inspectStatus(request: {
        FROM active_retrieval_index a JOIN retrieval_index_revisions r
          ON r.index_revision_id = a.index_revision_id WHERE a.singleton = 1`
     ).get();
+    const highRepresentationUnavailable = database.prepare(
+      `SELECT COUNT(*) AS count
+       FROM retrieval_receipt_items AS item
+       JOIN retrieval_receipts AS receipt ON receipt.receipt_id = item.receipt_id
+       JOIN active_retrieval_index AS active
+         ON active.singleton = 1 AND active.index_revision_id = receipt.index_revision_id
+       WHERE receipt.caller_kind = 'user_prompt'
+         AND item.outcome = 'omitted'
+         AND item.relevance_band = 'high'
+         AND item.omission_reason = 'representation_unavailable'`
+    ).get();
     const worker = database.prepare(
       "SELECT capture_paused, worker_paused, reason, updated_at FROM worker_control WHERE singleton = 1"
     ).get();
@@ -329,6 +340,9 @@ export async function inspectStatus(request: {
           cancellation_count: foregroundAttempts.cancellationCount,
           post_deadline_count: foregroundAttempts.postDeadlineCount,
           maximum_post_deadline_work_ms: foregroundAttempts.maximumPostDeadlineWorkMs,
+          high_representation_unavailable_count: z.number().int().nonnegative().parse(
+            highRepresentationUnavailable?.count
+          ),
           active_snapshot_id: activeIndex?.index_revision_id ?? null
         },
         retrieval_index: {
