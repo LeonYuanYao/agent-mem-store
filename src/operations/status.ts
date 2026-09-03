@@ -16,6 +16,7 @@ import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
 import { inspectRetrievalCatalogGeneration } from "../retrieval/index-coordinator.js";
 import { foregroundRetrievalSocketPath } from "../retrieval/foreground-protocol.js";
 import { loadArchiveRetentionMonths } from "../lifecycle/archive-retention.js";
+import { loadSensitivityMetadataDays } from "../sensitivity/retention.js";
 import { inspectBackgroundRecovery } from "../worker/recovery-policy.js";
 
 async function databasePath(runtimeRoot: string): Promise<string> {
@@ -100,6 +101,7 @@ export async function inspectStatus(request: {
 }) {
   const memoryCapacityPolicy = await loadMemoryCapacityPolicy(request);
   const archiveRetentionMonths = await loadArchiveRetentionMonths(request);
+  const sensitivityMetadataDays = await loadSensitivityMetadataDays(request);
   const hookSqliteBusy = await inspectHookSqliteBusyDiagnostics(request.runtimeRoot);
   const captureInbox = await inspectCaptureInbox(request.runtimeRoot);
   const [foregroundAttempts, catalogGeneration, foregroundSocketAvailable, backgroundRecovery] = await Promise.all([
@@ -192,6 +194,13 @@ export async function inspectStatus(request: {
       `SELECT next_check_at, last_checked_at, last_completed_at, last_error_code,
               consecutive_failure_count, backfill_completed_at
        FROM archive_retention_maintenance WHERE singleton = 1`
+    ).get();
+    const sensitivityRetention = database.prepare(
+      `SELECT next_check_at, last_checked_at, last_completed_at, last_error_code,
+              consecutive_failure_count, last_deleted_finding_count,
+              last_deleted_observation_count, total_deleted_finding_count,
+              total_deleted_observation_count
+       FROM sensitivity_retention_maintenance WHERE singleton = 1`
     ).get();
     const archiveCounts = database.prepare(
       `SELECT
@@ -293,6 +302,28 @@ export async function inspectStatus(request: {
           removed_bytes: purgeRun.removed_bytes,
           last_error_code: purgeRun.last_error_code
         }
+      },
+      sensitivity_retention: sensitivityRetention === undefined ? null : {
+        metadata_retention_days: sensitivityMetadataDays,
+        next_check_at: sensitivityRetention.next_check_at,
+        last_checked_at: sensitivityRetention.last_checked_at,
+        last_completed_at: sensitivityRetention.last_completed_at,
+        last_error_code: sensitivityRetention.last_error_code,
+        consecutive_failure_count: z.number().int().nonnegative().parse(
+          sensitivityRetention.consecutive_failure_count
+        ),
+        last_deleted_finding_count: z.number().int().nonnegative().parse(
+          sensitivityRetention.last_deleted_finding_count
+        ),
+        last_deleted_observation_count: z.number().int().nonnegative().parse(
+          sensitivityRetention.last_deleted_observation_count
+        ),
+        total_deleted_finding_count: z.number().int().nonnegative().parse(
+          sensitivityRetention.total_deleted_finding_count
+        ),
+        total_deleted_observation_count: z.number().int().nonnegative().parse(
+          sensitivityRetention.total_deleted_observation_count
+        )
       },
       memory_capacity: {
         ...memoryCapacity,

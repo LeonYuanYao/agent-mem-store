@@ -107,7 +107,11 @@ export async function initializeMemStore(
   const timezone = DEFAULT_GOVERNANCE_TIME_ZONE;
   const policy = stringify({
     schema_version: 1,
-    retention: { archive_months: 3, candidate_tombstone_days: 180 },
+    retention: {
+      archive_months: 3,
+      candidate_tombstone_days: 180,
+      sensitivity_metadata_days: 15
+    },
     lifecycle: {},
     promotion: {},
     capacity: {

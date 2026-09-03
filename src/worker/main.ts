@@ -61,6 +61,7 @@ import {
 } from "./session-catchup.js";
 import { runNextCandidateMaintenance } from "./candidate-maintenance.js";
 import { runScheduledArchiveRetention } from "../purge/index.js";
+import { runScheduledSensitivityRetention } from "../sensitivity/retention.js";
 import {
   advanceCompactQualityDiscovery,
   runNextMemoryQualityStep,
@@ -334,6 +335,25 @@ export async function runWorkerOnce(request: {
     if (archiveRetention.purgedMemoryIds.length > 0) {
       activities.push(`archive-purge:purged:${String(archiveRetention.purgedMemoryIds.length)}`);
     }
+  }
+  const sensitivityRetention = await runScheduledSensitivityRetention({
+    runtimeRoot: request.runtimeRoot,
+    vaultRoot: request.vaultRoot,
+    now
+  });
+  if (sensitivityRetention.state === "failed") {
+    activities.push(`sensitivity-retention:failed:${sensitivityRetention.errorCode}`);
+    shouldRefreshReview = true;
+  } else if (
+    sensitivityRetention.state === "completed" &&
+    (sensitivityRetention.deletedFindingCount > 0 ||
+      sensitivityRetention.deletedObservationCount > 0)
+  ) {
+    activities.push(
+      `sensitivity-retention:pruned:${String(sensitivityRetention.deletedFindingCount)}/` +
+      String(sensitivityRetention.deletedObservationCount)
+    );
+    shouldRefreshReview = true;
   }
   if (request.adapters?.embedding !== undefined) {
     const foregroundPressure = request.adapters.foregroundPressure?.() === true;

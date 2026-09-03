@@ -112,6 +112,10 @@ _Avoid_: Governance Queue、正常索引、模型分类输入
 按风险类别和 body-free 来源种类汇总精确 Sensitivity Finding 的人工复核视图。它保留总量、发生次数、时间范围和少量近期 Finding identity，但不是独立 Finding、误报裁决或安全规则豁免。
 _Avoid_: 每条审计记录都是人工待办、Suspect 正文摘要、批量误报批准
 
+**Sensitivity Metadata Retention（敏感元数据保留）**:
+普通 `blocked_secret` 与 `quarantined` 的无正文 Finding 和 observation 从 `last_seen_at` 起默认保留 15 天；新 occurrence 会刷新期限。Worker 每六小时以有界本地 Batch 清理，关机或离线后自动补跑，积压时每 30 秒继续；不调用模型、不保留 Tombstone，也不改变显式误报豁免的独立生命周期。
+_Avoid_: Secret 正文保留、Luna 清理裁决、永久审计日志、错过定时即丢弃清理义务
+
 **False-positive Secret Override（Secret 误报豁免）**:
 用户显式确认某次 Secret 检测是误报的窄范围授权。它绑定非可逆内容 fingerprint、检测规则 identity/version 和当前内容 revision；正文或规则发生相关变化后必须重新检测。它不能全局关闭检测，也不能授权保存真实凭据。
 _Avoid_: Secret allowlist、强制存储凭据、明文豁免记录

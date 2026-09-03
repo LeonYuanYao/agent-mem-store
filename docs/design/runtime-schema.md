@@ -16,6 +16,7 @@ Gate 3 table families are:
 - Project Registry, Git evidence, and collisions;
 - Capture Events, segments, attempts, leases, and health incidents;
 - body-free sensitivity findings and observations;
+- bounded sensitivity-retention scheduling and aggregate deletion counters;
 - Canonical catalog, immutable revisions, relationships, and Vault conflicts.
 
 Outcome 6 adds Luna operations and model-health incidents, distillation Batches,
@@ -49,6 +50,11 @@ ledger of consistent Runtime backups. Review Inbox Markdown is a rebuildable,
 body-free Vault view; reminder and Worker records remain machine execution
 state. Runtime backups are recovery artifacts only and are never accepted as a
 portable knowledge import.
+
+Sensitivity observation and Finding metadata is not permanent audit history.
+Migration 0059 adds a singleton maintenance cursor and retention indexes so the
+Worker can prune the configured 15-day body-free window in bounded batches,
+catch up after downtime, and expose failures without adding model work.
 
 Capture payload segments are at most 64 KiB. Retained sanitized payload is at
 most 1 MiB per Turn. Oversized data is stored as a valid explicit truncation

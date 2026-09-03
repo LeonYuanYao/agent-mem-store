@@ -316,6 +316,14 @@ const migrations: readonly Migration[] = [
       "../../migrations/0058-automatic-archive-retention.sql",
       import.meta.url
     )
+  },
+  {
+    version: 59,
+    name: "sensitivity_retention",
+    path: new URL(
+      "../../migrations/0059-sensitivity-retention.sql",
+      import.meta.url
+    )
   }
 ];
 

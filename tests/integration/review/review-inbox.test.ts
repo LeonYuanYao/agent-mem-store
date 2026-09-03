@@ -152,3 +152,51 @@ test("Review Inbox aggregates large body-free Sensitivity Quarantine ledgers", a
   expect(source).not.toContain("msfinding_aggregate_00");
   expect(source.length).toBeLessThan(5_000);
 });
+
+test("Review Inbox reports sensitivity retention only after repeated failures", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-review-sensitivity-retention-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare(
+      `UPDATE sensitivity_retention_maintenance
+       SET last_error_code = 'SqliteError', consecutive_failure_count = 2,
+           last_checked_at = '2026-08-08T02:00:00.000Z',
+           next_check_at = '2026-08-08T02:20:00.000Z'
+       WHERE singleton = 1`
+    ).run();
+  } finally {
+    database.close();
+  }
+
+  const transient = await generateReviewInbox({
+    runtimeRoot,
+    vaultRoot,
+    generatedAt: "2026-08-08T02:00:30.000Z"
+  });
+  expect(transient.counts.sensitivityRetentionFailures).toBe(0);
+  expect(await readFile(transient.path, "utf8"))
+    .not.toContain("Sensitivity retention maintenance failed");
+
+  const persistentDatabase = await openRuntimeDatabase(runtimeRoot);
+  try {
+    persistentDatabase.prepare(
+      `UPDATE sensitivity_retention_maintenance
+       SET consecutive_failure_count = 3 WHERE singleton = 1`
+    ).run();
+  } finally {
+    persistentDatabase.close();
+  }
+  const generated = await generateReviewInbox({
+    runtimeRoot,
+    vaultRoot,
+    generatedAt: "2026-08-08T02:01:00.000Z"
+  });
+  const source = await readFile(generated.path, "utf8");
+
+  expect(generated.counts.sensitivityRetentionFailures).toBe(1);
+  expect(source).toContain("Sensitivity retention maintenance failed");
+  expect(source).toContain("Consecutive failures: 3");
+});
