@@ -110,7 +110,8 @@ export async function initializeMemStore(
     retention: {
       archive_months: 3,
       candidate_tombstone_days: 180,
-      sensitivity_metadata_days: 15
+      sensitivity_metadata_days: 15,
+      injection_receipt_days: 30
     },
     lifecycle: {},
     promotion: {},

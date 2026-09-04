@@ -324,6 +324,14 @@ const migrations: readonly Migration[] = [
       "../../migrations/0059-sensitivity-retention.sql",
       import.meta.url
     )
+  },
+  {
+    version: 60,
+    name: "injection_receipt_retention",
+    path: new URL(
+      "../../migrations/0060-injection-receipt-retention.sql",
+      import.meta.url
+    )
   }
 ];
 

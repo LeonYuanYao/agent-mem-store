@@ -63,7 +63,8 @@ const policySchema = z.object({
   retention: z.object({
     archive_months: z.number().int().positive(),
     candidate_tombstone_days: z.number().int().positive().default(180),
-    sensitivity_metadata_days: z.number().int().positive().default(15)
+    sensitivity_metadata_days: z.number().int().positive().default(15),
+    injection_receipt_days: z.number().int().min(1).max(3650).default(30)
   }),
   lifecycle: extensibleSectionSchema,
   promotion: extensibleSectionSchema,
@@ -115,6 +116,7 @@ export interface LoadedConfiguration {
     readonly archiveRetentionMonths: number;
     readonly candidateTombstoneDays: number;
     readonly sensitivityMetadataDays: number;
+    readonly injectionReceiptDays: number;
     readonly governanceTimezone: string;
     readonly weeklyGovernance: "MONDAY 19:00";
     readonly monthlyGovernance: "FIRST_MONDAY 19:00";
@@ -357,6 +359,7 @@ export async function loadConfiguration(
       archiveRetentionMonths: policy.retention.archive_months,
       candidateTombstoneDays: policy.retention.candidate_tombstone_days,
       sensitivityMetadataDays: policy.retention.sensitivity_metadata_days,
+      injectionReceiptDays: policy.retention.injection_receipt_days,
       governanceTimezone: policy.governance.timezone,
       weeklyGovernance: policy.governance.weekly,
       monthlyGovernance: policy.governance.monthly,

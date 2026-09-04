@@ -100,6 +100,8 @@ test("initialization creates separate portable and machine configuration", async
     policy: {
       archiveRetentionMonths: 3,
       candidateTombstoneDays: 180,
+      sensitivityMetadataDays: 15,
+      injectionReceiptDays: 30,
       governanceTimezone: "Asia/Shanghai",
       weeklyGovernance: "MONDAY 19:00",
       monthlyGovernance: "FIRST_MONDAY 19:00",
@@ -117,6 +119,7 @@ test("initialization creates separate portable and machine configuration", async
   expect((await stat(join(runtimeRoot, "state", "memstore.sqlite"))).isFile()).toBe(
     true
   );
+  expect(policySource).toContain("injection_receipt_days = 30");
   const database = new DatabaseSync(join(runtimeRoot, "state", "memstore.sqlite"), {
     readOnly: true
   });

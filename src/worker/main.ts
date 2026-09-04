@@ -62,6 +62,7 @@ import {
 import { runNextCandidateMaintenance } from "./candidate-maintenance.js";
 import { runScheduledArchiveRetention } from "../purge/index.js";
 import { runScheduledSensitivityRetention } from "../sensitivity/retention.js";
+import { runScheduledInjectionReceiptRetention } from "../retrieval/receipt-retention.js";
 import {
   advanceCompactQualityDiscovery,
   runNextMemoryQualityStep,
@@ -354,6 +355,25 @@ export async function runWorkerOnce(request: {
       String(sensitivityRetention.deletedObservationCount)
     );
     shouldRefreshReview = true;
+  }
+  if (request.adapters?.foregroundPressure?.() !== true) {
+    const receiptRetention = await runScheduledInjectionReceiptRetention({
+      runtimeRoot: request.runtimeRoot,
+      vaultRoot: request.vaultRoot,
+      now
+    });
+    if (receiptRetention.state === "failed") {
+      activities.push(`receipt-retention:failed:${receiptRetention.errorCode}`);
+      shouldRefreshReview = true;
+    } else if (
+      receiptRetention.state === "completed" &&
+      receiptRetention.deletedReceiptCount > 0
+    ) {
+      activities.push(
+        `receipt-retention:pruned:${String(receiptRetention.deletedReceiptCount)}/` +
+        String(receiptRetention.deletedItemCount)
+      );
+    }
   }
   if (request.adapters?.embedding !== undefined) {
     const foregroundPressure = request.adapters.foregroundPressure?.() === true;

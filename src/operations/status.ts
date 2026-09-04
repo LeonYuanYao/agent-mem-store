@@ -17,6 +17,7 @@ import { inspectRetrievalCatalogGeneration } from "../retrieval/index-coordinato
 import { foregroundRetrievalSocketPath } from "../retrieval/foreground-protocol.js";
 import { loadArchiveRetentionMonths } from "../lifecycle/archive-retention.js";
 import { loadSensitivityMetadataDays } from "../sensitivity/retention.js";
+import { loadInjectionReceiptRetentionDays } from "../retrieval/receipt-retention.js";
 import { inspectBackgroundRecovery } from "../worker/recovery-policy.js";
 
 async function databasePath(runtimeRoot: string): Promise<string> {
@@ -102,6 +103,7 @@ export async function inspectStatus(request: {
   const memoryCapacityPolicy = await loadMemoryCapacityPolicy(request);
   const archiveRetentionMonths = await loadArchiveRetentionMonths(request);
   const sensitivityMetadataDays = await loadSensitivityMetadataDays(request);
+  const injectionReceiptDays = await loadInjectionReceiptRetentionDays(request);
   const hookSqliteBusy = await inspectHookSqliteBusyDiagnostics(request.runtimeRoot);
   const captureInbox = await inspectCaptureInbox(request.runtimeRoot);
   const [foregroundAttempts, catalogGeneration, foregroundSocketAvailable, backgroundRecovery] = await Promise.all([
@@ -202,6 +204,34 @@ export async function inspectStatus(request: {
               total_deleted_observation_count
        FROM sensitivity_retention_maintenance WHERE singleton = 1`
     ).get();
+    const injectionReceiptRetention = database.prepare(
+      `SELECT next_check_at, last_checked_at, last_completed_at, last_error_code,
+              consecutive_failure_count, last_deleted_receipt_count,
+              last_deleted_item_count, last_protected_receipt_count,
+              total_deleted_receipt_count, total_deleted_item_count
+       FROM injection_receipt_retention_maintenance WHERE singleton = 1`
+    ).get();
+    const receiptRetentionCutoff = new Date(
+      Date.now() - injectionReceiptDays * 24 * 60 * 60 * 1_000
+    ).toISOString();
+    const injectionReceiptCounts = database.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM retrieval_receipts) AS receipt_count,
+         (SELECT COUNT(*) FROM retrieval_receipt_items) AS item_count,
+         (SELECT COUNT(*) FROM retrieval_receipt_daily_summaries) AS daily_summary_count,
+         (SELECT COUNT(*) FROM retrieval_receipts AS receipt
+          WHERE receipt.created_at <= ?
+            AND NOT EXISTS (
+              SELECT 1 FROM irrelevant_observations AS observation
+              WHERE observation.receipt_id = receipt.receipt_id
+            )) AS expired_eligible_count,
+         (SELECT COUNT(*) FROM retrieval_receipts AS receipt
+          WHERE receipt.created_at <= ?
+            AND EXISTS (
+              SELECT 1 FROM irrelevant_observations AS observation
+              WHERE observation.receipt_id = receipt.receipt_id
+            )) AS expired_protected_count`
+    ).get(receiptRetentionCutoff, receiptRetentionCutoff);
     const archiveCounts = database.prepare(
       `SELECT
          SUM(CASE WHEN lifecycle = 'archived' THEN 1 ELSE 0 END) AS archived_count,
@@ -323,6 +353,46 @@ export async function inspectStatus(request: {
         ),
         total_deleted_observation_count: z.number().int().nonnegative().parse(
           sensitivityRetention.total_deleted_observation_count
+        )
+      },
+      injection_receipt_retention: injectionReceiptRetention === undefined ? null : {
+        retention_days: injectionReceiptDays,
+        receipt_count: z.number().int().nonnegative().parse(
+          injectionReceiptCounts?.receipt_count ?? 0
+        ),
+        item_count: z.number().int().nonnegative().parse(
+          injectionReceiptCounts?.item_count ?? 0
+        ),
+        expired_eligible_count: z.number().int().nonnegative().parse(
+          injectionReceiptCounts?.expired_eligible_count ?? 0
+        ),
+        expired_protected_count: z.number().int().nonnegative().parse(
+          injectionReceiptCounts?.expired_protected_count ?? 0
+        ),
+        daily_summary_count: z.number().int().nonnegative().parse(
+          injectionReceiptCounts?.daily_summary_count ?? 0
+        ),
+        next_check_at: injectionReceiptRetention.next_check_at,
+        last_checked_at: injectionReceiptRetention.last_checked_at,
+        last_completed_at: injectionReceiptRetention.last_completed_at,
+        last_error_code: injectionReceiptRetention.last_error_code,
+        consecutive_failure_count: z.number().int().nonnegative().parse(
+          injectionReceiptRetention.consecutive_failure_count
+        ),
+        last_deleted_receipt_count: z.number().int().nonnegative().parse(
+          injectionReceiptRetention.last_deleted_receipt_count
+        ),
+        last_deleted_item_count: z.number().int().nonnegative().parse(
+          injectionReceiptRetention.last_deleted_item_count
+        ),
+        last_protected_receipt_count: z.number().int().nonnegative().parse(
+          injectionReceiptRetention.last_protected_receipt_count
+        ),
+        total_deleted_receipt_count: z.number().int().nonnegative().parse(
+          injectionReceiptRetention.total_deleted_receipt_count
+        ),
+        total_deleted_item_count: z.number().int().nonnegative().parse(
+          injectionReceiptRetention.total_deleted_item_count
         )
       },
       memory_capacity: {

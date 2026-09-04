@@ -17,6 +17,7 @@ Gate 3 table families are:
 - Capture Events, segments, attempts, leases, and health incidents;
 - body-free sensitivity findings and observations;
 - bounded sensitivity-retention scheduling and aggregate deletion counters;
+- bounded Injection Receipt retention, daily summaries, and aggregate deletion counters;
 - Canonical catalog, immutable revisions, relationships, and Vault conflicts.
 
 Outcome 6 adds Luna operations and model-health incidents, distillation Batches,
@@ -55,6 +56,13 @@ Sensitivity observation and Finding metadata is not permanent audit history.
 Migration 0059 adds a singleton maintenance cursor and retention indexes so the
 Worker can prune the configured 15-day body-free window in bounded batches,
 catch up after downtime, and expose failures without adding model work.
+
+Detailed Injection Receipts are also bounded operational history. Migration
+0060 adds a maintenance cursor and body-free daily summaries. The Worker keeps
+the configurable 30-day detail window, protects Receipts referenced by explicit
+irrelevant observations, deletes at most 1,000 Receipts per transaction, and
+catches up after downtime. SQLite reuses the freed pages; full physical
+compaction remains an explicit quiesced maintenance operation.
 
 Capture payload segments are at most 64 KiB. Retained sanitized payload is at
 most 1 MiB per Turn. Oversized data is stored as a valid explicit truncation
