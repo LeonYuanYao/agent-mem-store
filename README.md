@@ -144,6 +144,25 @@ pnpm exec tsx src/cli/main.ts recall search "package manager" \
   --json
 ```
 
+### Understand health status
+
+`doctor --deep --json` checks current health; `status --json` includes the same
+foreground/index health assessments alongside historical counts.
+
+- `healthy`: current checks pass, including any required recovery evidence.
+- `observing`: recovery still needs confirmation, or the index is within a bounded
+  synchronization/retry period. This is neither a confirmed outage nor proof that
+  all recovery work is finished.
+- `degraded`: at least one current warning remains; inspect its recovery condition.
+- `error`: an integrity or inspection error needs attention.
+
+Foreground recovery requires ten minutes without a new failure and five completed
+logical requests after the last failure. Merely waiting, receiving empty results,
+or cancelling requests cannot prove recovery. Sparse usage may therefore leave an
+`awaiting_verification` detail until enough actual requests complete. There is no
+LLM probe and no need to reset historical counters. Index warnings automatically
+clear when the outstanding generation is published; expected waiting is bounded.
+
 ### Move one session to another project
 
 A session route applies only to the exact Codex thread ID. Future Hook capture,

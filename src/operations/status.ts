@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
+import { inspectForegroundHealth } from "../health/foreground.js";
+import { inspectIndexHealth } from "../health/index.js";
 
 import {
   inspectMemoryWorkingSetGeneration,
@@ -106,6 +108,10 @@ export async function inspectStatus(request: {
   const injectionReceiptDays = await loadInjectionReceiptRetentionDays(request);
   const hookSqliteBusy = await inspectHookSqliteBusyDiagnostics(request.runtimeRoot);
   const captureInbox = await inspectCaptureInbox(request.runtimeRoot);
+  const healthNow = new Date().toISOString();
+  const [foregroundHealth, indexHealth] = await Promise.all([
+    inspectForegroundHealth(request.runtimeRoot, healthNow), inspectIndexHealth(request.runtimeRoot, healthNow)
+  ]);
   const [foregroundAttempts, catalogGeneration, foregroundSocketAvailable, backgroundRecovery] = await Promise.all([
     inspectForegroundAttempts(request.runtimeRoot),
     inspectRetrievalCatalogGeneration(request.runtimeRoot),
@@ -434,6 +440,7 @@ export async function inspectStatus(request: {
           }
         },
         foreground_retrieval: {
+          health: foregroundHealth,
           socket_state: foregroundSocketAvailable ? "available" : "unavailable",
           attempt_count: foregroundAttempts.totalCount,
           outcomes: foregroundAttempts.outcomes,
@@ -447,6 +454,7 @@ export async function inspectStatus(request: {
           active_snapshot_id: activeIndex?.index_revision_id ?? null
         },
         retrieval_index: {
+          health: indexHealth,
           dirty_generation: catalogGeneration.dirtyGeneration,
           published_generation: catalogGeneration.publishedGeneration,
           building_generation: catalogGeneration.buildingGeneration,

@@ -16,6 +16,33 @@ import { recordForegroundAttempt } from "../../../src/retrieval/foreground-attem
 
 const roots: string[] = [];
 
+test.each(["deadline_exceeded", "failed", "unavailable"] as const)("foreground health detects %s and recovers from subsequent real successes", async (outcome) => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-health-transition-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime"), vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  for (let i = 0; i < 3; i++) {
+    const at = `2026-09-08T00:00:0${String(i)}.000Z`;
+    await recordForegroundAttempt({ runtimeRoot, attempt: {
+      requestId: `bad-${String(i)}`, eventKind: "UserPromptSubmit", outcome,
+      admissionDelayMs: 0, computeMs: 1_100, receiptCommitMs: 0,
+      observedClientElapsedMs: 1_100, postDeadlineWorkMs: 0, createdAt: at, completedAt: at
+    } });
+  }
+  const inspect = (now: string) => inspectDoctor({ runtimeRoot, vaultRoot, deep: false, now });
+  expect((await inspect("2026-09-08T00:01:00.000Z")).checks.find(c => c.name === "foreground_retrieval")?.state).toBe("warning");
+  expect((await inspect("2026-09-08T07:00:00.000Z")).state).toBe("observing");
+  for (let i = 0; i < 5; i++) {
+    const at = `2026-09-08T00:05:0${String(i)}.000Z`;
+    await recordForegroundAttempt({ runtimeRoot, attempt: {
+      requestId: `good-${String(i)}`, eventKind: "UserPromptSubmit", outcome: "completed",
+      admissionDelayMs: 0, computeMs: 50, receiptCommitMs: 0,
+      observedClientElapsedMs: 50, postDeadlineWorkMs: 0, createdAt: at, completedAt: at
+    } });
+  }
+  expect((await inspect("2026-09-08T00:11:00.000Z")).state).toBe("healthy");
+});
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -164,11 +191,13 @@ test("doctor treats an overdue normal index deadline as expected while recovery 
     deep: false,
     now: "2026-08-20T00:10:00.000Z"
   });
-  expect(result.state).toBe("healthy");
+  expect(result.state).toBe("observing");
   expect(result.checks.find((check) => check.name === "retrieval_catalog_generation"))
-    .toMatchObject({ state: "ok" });
+    .toMatchObject({ state: "info" });
   expect(result.checks.find((check) => check.name === "retrieval_catalog_generation")?.detail)
     .toContain("recovery coalescing");
+  const stalled = await inspectDoctor({ runtimeRoot, vaultRoot, deep: false, now: "2026-08-20T00:32:00.000Z" });
+  expect(stalled.checks.find(check => check.name === "retrieval_catalog_generation")?.state).toBe("warning");
 });
 
 test("doctor reports a pending Runtime migration without applying it", async () => {

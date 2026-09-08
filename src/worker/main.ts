@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { inspectIndexWait } from "../retrieval/index-wait.js";
 import { Temporal } from "@js-temporal/polyfill";
 
 import {
@@ -116,40 +117,7 @@ function reviewDigestKey(now: string, timeZone: string): string {
 }
 
 async function retrievalIndexBuildIsCoolingDown(runtimeRoot: string, now: string): Promise<boolean> {
-  const database = await openRuntimeDatabase(runtimeRoot);
-  try {
-    const activity = database.prepare(
-      `SELECT state, started_at, completed_at
-       FROM retrieval_index_build_activity
-       WHERE singleton = 1`
-    ).get();
-    if (activity === undefined) return false;
-    if (activity.state === "building") {
-      const startedAt = Date.parse(z.string().parse(activity.started_at));
-      return startedAt + 5 * 60 * 1_000 > Date.parse(now);
-    }
-    if (activity.completed_at === null) return false;
-    const completedAt = Date.parse(z.string().parse(activity.completed_at));
-    const withinCooldown = completedAt + 5 * 60 * 1_000 > Date.parse(now);
-    if (activity.state === "failed") return withinCooldown;
-    if (activity.state !== "complete" || !withinCooldown) return false;
-    const backlog = database.prepare(
-      `SELECT
-         EXISTS(
-           SELECT 1 FROM luna_operations
-           WHERE state IN ('pending', 'processing', 'retrying', 'blocked')
-         ) OR EXISTS(
-           SELECT 1 FROM memory_candidates
-           WHERE state = 'waiting' AND successful_evaluation_at IS NULL
-         ) OR EXISTS(
-           SELECT 1 FROM capture_events
-           WHERE state IN ('pending', 'processing', 'retrying')
-         ) AS present`
-    ).get();
-    return backlog?.present === 1;
-  } finally {
-    database.close();
-  }
+  return (await inspectIndexWait(runtimeRoot, now)).waiting;
 }
 
 export async function runWorkerOnce(request: {

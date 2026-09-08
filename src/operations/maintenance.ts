@@ -9,19 +9,32 @@ import { loadConfiguration } from "../configuration/index.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { inspectCaptureInbox } from "../capture/inbox.js";
 import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
+import { inspectForegroundHealth } from "../health/foreground.js";
 import { foregroundRetrievalSocketPath } from "../retrieval/foreground-protocol.js";
-import { inspectRetrievalCatalogGeneration } from "../retrieval/index-coordinator.js";
-import { inspectBackgroundRecovery } from "../worker/recovery-policy.js";
+import { inspectIndexHealth } from "../health/index.js";
 
 export interface DoctorCheck {
   readonly name: string;
-  readonly state: "ok" | "warning" | "error";
+  readonly state: "ok" | "info" | "warning" | "error";
   readonly detail: string;
+  readonly recoveryCondition?: string;
+  readonly nextEvaluationAt?: string | null;
 }
 
-function doctorState(checks: readonly DoctorCheck[]): "healthy" | "degraded" | "error" {
+const recoveryConditions: Readonly<Record<string, string>> = {
+  configuration: "A supported, path-bound read/write configuration loads without last-known-good fallback.",
+  managed_worker: "The managed foreground Worker endpoint accepts local connections again.",
+  capture_inbox: "The inbox is within capacity, has no quarantined files, and no pending capture older than 15 minutes.",
+  sqlite_integrity: "The runtime database opens and SQLite integrity_check returns ok.",
+  candidate_pipeline: "No unevaluated waiting Candidate is older than 15 minutes; already evaluated waiting Candidates do not block health.",
+  luna_operations: "Actionable blocked operations complete, retry successfully, or receive an explicit resolution; connectivity pauses remain separately visible.",
+  vault_catalog: "Every current catalog entry resolves to a valid Canonical Memory with the expected identity and revision."
+};
+
+function doctorState(checks: readonly DoctorCheck[]): "healthy" | "observing" | "degraded" | "error" {
   if (checks.some((check) => check.state === "error")) return "error";
   if (checks.some((check) => check.state === "warning")) return "degraded";
+  if (checks.some((check) => check.state === "info")) return "observing";
   return "healthy";
 }
 
@@ -102,7 +115,7 @@ export async function inspectDoctor(request: {
   readonly deep: boolean;
   readonly now?: string;
 }): Promise<{
-  readonly state: "healthy" | "degraded" | "error";
+  readonly state: "healthy" | "observing" | "degraded" | "error";
   readonly repaired: false;
   readonly checks: readonly DoctorCheck[];
 }> {
@@ -146,19 +159,13 @@ export async function inspectDoctor(request: {
 
   try {
     const attempts = await inspectForegroundAttempts(runtimeRoot);
-    const recent = await inspectForegroundAttempts(runtimeRoot, {
-      since: new Date(Date.parse(now) - 6 * 60 * 60 * 1_000).toISOString()
-    });
-    const recentDeadlineRate = recent.totalCount === 0
-      ? 0
-      : recent.deadlineCount / recent.totalCount;
-    const warning = recent.deadlineCount >= 3 ||
-      recent.postDeadlineCount >= 3 ||
-      (recent.totalCount >= 20 && recentDeadlineRate >= 0.02);
+    const health = await inspectForegroundHealth(runtimeRoot, now);
     checks.push({
       name: "foreground_retrieval",
-      state: warning ? "warning" : "ok",
-      detail: `${String(recent.totalCount)} recent six-hour attempts; ${String(recent.deadlineCount)} recent deadlines; ${String(recent.postDeadlineCount)} with recent post-deadline work; ${String(attempts.deadlineCount)} lifetime deadlines across ${String(attempts.totalCount)} retained attempts.`
+      state: health.severity,
+      recoveryCondition: health.recoveryCondition,
+      nextEvaluationAt: health.quietUntil !== null && health.quietUntil > now ? health.quietUntil : null,
+      detail: `${health.state}; ${String(health.recentFailureCount)} failures in 15 minutes; ${String(health.successSinceFailure)} completed requests since last failure (${health.lastFailureAt ?? "none"}). ${health.recoveryCondition} ${String(attempts.deadlineCount)} lifetime deadlines across ${String(attempts.totalCount)} retained attempts.`
     });
   } catch (error) {
     checks.push({
@@ -169,15 +176,14 @@ export async function inspectDoctor(request: {
   }
 
   try {
-    const generation = await inspectRetrievalCatalogGeneration(runtimeRoot);
-    const recovery = await inspectBackgroundRecovery(runtimeRoot);
-    const forceOverdue = generation.forceDueAt !== null &&
-      Date.parse(generation.forceDueAt) <= Date.parse(now) &&
-      generation.dirtyGeneration > generation.publishedGeneration;
+    const health = await inspectIndexHealth(runtimeRoot, now);
+    const generation = health.generation;
     checks.push({
       name: "retrieval_catalog_generation",
-      state: forceOverdue && !recovery.active ? "warning" : "ok",
-      detail: `Retrieval catalog generation ${String(generation.publishedGeneration)}/${String(generation.dirtyGeneration)} published; building: ${generation.buildingGeneration === null ? "none" : String(generation.buildingGeneration)}${recovery.active ? "; recovery coalescing active" : ""}.`
+      state: health.severity,
+      recoveryCondition: health.recoveryCondition,
+      nextEvaluationAt: health.expectedAt,
+      detail: `${health.state}: Retrieval catalog generation ${String(generation.publishedGeneration)}/${String(generation.dirtyGeneration)} published; expected by ${health.expectedAt ?? "not scheduled"}. ${health.recoveryCondition}`
     });
   } catch (error) {
     checks.push({
@@ -190,7 +196,7 @@ export async function inspectDoctor(request: {
   try {
     const inbox = await inspectCaptureInbox(runtimeRoot);
     const stale = inbox.oldestPendingAt !== null &&
-      Date.now() - Date.parse(inbox.oldestPendingAt) >= 15 * 60 * 1_000;
+      Date.parse(now) - Date.parse(inbox.oldestPendingAt) >= 15 * 60 * 1_000;
     const warning = inbox.quarantineCount > 0 || stale ||
       inbox.capacityState !== "available";
     checks.push({
@@ -248,7 +254,7 @@ export async function inspectDoctor(request: {
       ? candidates.oldest_unevaluated_at
       : null;
     const stale = oldestUnevaluatedAt !== null &&
-      Date.now() - Date.parse(oldestUnevaluatedAt) >= 15 * 60 * 1_000;
+      Date.parse(now) - Date.parse(oldestUnevaluatedAt) >= 15 * 60 * 1_000;
     checks.push({
       name: "candidate_pipeline",
       state: stale ? "warning" : "ok",
@@ -289,7 +295,11 @@ export async function inspectDoctor(request: {
   } finally {
     database?.close();
   }
-  return { state: doctorState(checks), repaired: false, checks };
+  return { state: doctorState(checks), repaired: false, checks: checks.map(check => {
+    const condition = recoveryConditions[check.name];
+    return check.state !== "ok" && check.recoveryCondition === undefined && condition !== undefined
+      ? { ...check, recoveryCondition: condition } : check;
+  }) };
 }
 
 export async function retryOperation(request: {
