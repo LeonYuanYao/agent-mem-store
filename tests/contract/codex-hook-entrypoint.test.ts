@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,11 +8,21 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "vitest";
 
 import { foregroundRetrievalSocketPath } from "../../src/retrieval/foreground-client.js";
+import { adapterDisplaySchema, renderHookDisplay } from "../../src/configuration/hook-display.js";
 
 const temporaryDirectories: string[] = [];
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
 const hookEntrypoint = fileURLToPath(new URL("../../src/cli/hook.ts", import.meta.url));
 const legacyEntrypoint = fileURLToPath(new URL("../../src/cli/main.ts", import.meta.url));
+
+test("display preserves ordering, stays silent without memories, and validates modes", () => {
+  const body = "<memstore-candidates>\n[M:92 S:P] first\n[M:3 S:G] second\n</memstore-candidates>";
+  expect(renderHookDisplay("summary", "UserPromptSubmit", body, 42))
+    .toBe("MemStore (UserPromptSubmit): 2 memories · 42 tokens · M:92, M:3");
+  expect(renderHookDisplay("full", "UserPromptSubmit", "", 0)).toBeUndefined();
+  expect(renderHookDisplay("full", "UserPromptSubmit", "<memstore-context>legend only</memstore-context>", 10)).toBeUndefined();
+  expect(adapterDisplaySchema.safeParse({ hook_display: "invalid" }).success).toBe(false);
+});
 
 afterEach(async () => {
   await Promise.all(
@@ -51,12 +61,17 @@ async function runHook(request: {
 }
 
 for (const event of ["SessionStart", "UserPromptSubmit"] as const) {
-  test(`active ${event} returns the official event-specific additionalContext payload`, async () => {
+ for (const mode of ["off", "summary", "full", "default", "invalid"] as const) {
+  test(`active ${event} preserves injection with ${mode} display`, async () => {
     const root = await mkdtemp("/tmp/memstore-active-hook-");
     temporaryDirectories.push(root);
     const runtimeRoot = join(root, "runtime");
     const socketPath = foregroundRetrievalSocketPath(runtimeRoot);
     await mkdir(join(runtimeRoot, "state"), { recursive: true });
+    if (mode !== "default") {
+      await writeFile(join(runtimeRoot, "config.toml"), `schema_version = 1\n[adapters]\nhook_display = "${mode}"\n`);
+    }
+    const memoryText = "<memstore-candidates>\n[M:123 S:P A:A R:C] verified foreground memory\n</memstore-candidates>";
     const server = createServer((socket) => {
       let source = "";
       socket.setEncoding("utf8");
@@ -69,7 +84,7 @@ for (const event of ["SessionStart", "UserPromptSubmit"] as const) {
           requestId: request.requestId,
           state: "completed",
           event,
-          text: "<memstore-context>verified foreground memory</memstore-context>",
+          text: memoryText,
           receiptId: "msreceipt_contract",
           renderedTokenCount: 8
         })}\n`);
@@ -91,9 +106,12 @@ for (const event of ["SessionStart", "UserPromptSubmit"] as const) {
       expect(result.status, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({
         continue: true,
+        ...(mode === "off" ? {} : {
+          systemMessage: `MemStore (${event}): 1 memories · 8 tokens · M:123${mode === "full" ? `\n${memoryText}` : ""}`
+        }),
         hookSpecificOutput: {
           hookEventName: event,
-          additionalContext: "<memstore-context>verified foreground memory</memstore-context>"
+          additionalContext: memoryText
         }
       });
     } finally {
@@ -103,6 +121,7 @@ for (const event of ["SessionStart", "UserPromptSubmit"] as const) {
       }));
     }
   });
+ }
 }
 
 test("active injection fails open when the persistent Worker socket is unavailable", async () => {

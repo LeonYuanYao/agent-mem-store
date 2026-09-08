@@ -91,6 +91,20 @@ only the final JSON envelope:
 
 ## Development
 
+### Hook visibility
+
+Set `hook_display` in the `[adapters]` section of the machine-local
+`<runtime>/config.toml` to `"off"`, `"summary"` (default), or `"full"`.
+`summary` shows the event, Memory count, ordered references, and injected token
+count. `full` adds the exact model-facing injection text, not the full Vault notes.
+`off` hides successful injection notices but preserves capture failure warnings.
+Empty retrievals stay silent. Both SessionStart and UserPromptSubmit use the same
+setting, which is read on each successful retrieval without a Worker restart.
+This changes only `systemMessage` presentation; retrieval, model context, and
+token budgets are unchanged. Missing or unreadable display configuration falls
+back to summary so presentation cannot block memory delivery; normal configuration
+validation rejects invalid values. This preference stays outside the portable Vault.
+
 ```sh
 pnpm install --frozen-lockfile
 pnpm lint

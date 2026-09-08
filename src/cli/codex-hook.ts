@@ -5,6 +5,7 @@ import { z } from "zod";
 import { handleCodexHook } from "../adapters/codex/hook.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { requestForegroundRetrieval } from "../retrieval/foreground-client.js";
+import { readHookDisplay, renderHookDisplay } from "../configuration/hook-display.js";
 
 const codexHookEventSchema = z.enum([
   "SessionStart",
@@ -56,8 +57,13 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
       requestedAt: new Date().toISOString()
     });
     if (foreground.state === "completed") {
+      const systemMessage = renderHookDisplay(
+        await readHookDisplay(resolve(runtimeRoot)), event, foreground.text,
+        foreground.renderedTokenCount
+      );
       output = {
         continue: true,
+        ...(systemMessage === undefined ? {} : { systemMessage }),
         hookSpecificOutput: {
           hookEventName: event,
           additionalContext: foreground.text

@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { writeFileAtomically } from "../contracts/atomic-file.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
+import { adapterDisplaySchema } from "./hook-display.js";
 
 const extensibleSectionSchema = z.record(z.string(), z.unknown()).default({});
 const policyOwnedKeys = [
@@ -88,7 +89,7 @@ const machineSchema = z.object({
   }),
   projects: extensibleSectionSchema,
   git_cache: extensibleSectionSchema,
-  adapters: extensibleSectionSchema,
+  adapters: adapterDisplaySchema,
   embedding: extensibleSectionSchema,
   luna: extensibleSectionSchema,
   notifier: extensibleSectionSchema,
