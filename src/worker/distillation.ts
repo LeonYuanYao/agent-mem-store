@@ -21,6 +21,7 @@ import {
   failLunaOperationLocally
 } from "../luna/operations.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
+import { readSessionProjectRoute } from "../projects/session-route.js";
 import { mapCapturedEventToLunaEvidence } from "./evidence.js";
 
 export interface LunaWorkerAdapter {
@@ -623,6 +624,8 @@ async function loadBatchEvidence(
     if (batch === undefined) throw new Error("Distillation batch does not exist.");
     sessionId = z.string().parse(batch.session_id);
     projectId = typeof batch.project_id === "string" ? batch.project_id : null;
+    const route = await readSessionProjectRoute(runtimeRoot, sessionId);
+    if (route !== undefined) projectId = route.projectId;
     scope = batch.requested_scope_kind === "global"
       ? { kind: "global" }
       : projectId === null
@@ -668,7 +671,10 @@ async function ingestDistilledCandidates(request: {
   readonly evidence: readonly LunaEvidence[];
   readonly createdAt: string;
 }): Promise<void> {
-  const scope = request.scope ?? (
+  const route = await readSessionProjectRoute(request.runtimeRoot, request.sessionId);
+  const scope = request.scope?.kind !== "global" && route !== undefined
+    ? { kind: "project" as const, projectId: route.projectId }
+    : request.scope ?? (
     request.projectId === null ? undefined : { kind: "project" as const, projectId: request.projectId }
   );
   if (scope === undefined) return;

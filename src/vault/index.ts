@@ -434,7 +434,7 @@ function canonicalRevisionPath(
   );
 }
 
-async function ensurePortableProjectCatalog(
+export async function ensurePortableProjectCatalog(
   vaultRoot: string,
   runtimeRoot: string,
   selectedProjectId: string
@@ -1853,6 +1853,41 @@ export async function inspectStandaloneCanonicalFile(
     path: resolvedPath,
     contentIdentity: identity
   };
+}
+
+/** Scope-only relocation preserves authorship, content and representation semantics. */
+export function renderCanonicalProjectMigration(request: {
+  readonly source: string;
+  readonly projectId: string;
+  readonly migratedAt: string;
+}) {
+  projectIdSchema.parse(request.projectId);
+  z.iso.datetime().parse(request.migratedAt);
+  const previous = parseCanonical(request.source);
+  if (previous.scope.kind !== "project" || previous.lifecycle === "tombstone") {
+    throw new Error("Only project knowledge can be relocated.");
+  }
+  const revisionId = `msrev_${randomUUID()}`;
+  const memory: CanonicalMemory = {
+    ...previous,
+    scope: { kind: "project", projectId: request.projectId },
+    revisionId,
+    predecessorRevisionId: previous.revisionId,
+    revisedAt: request.migratedAt,
+    representations: {
+      ...(previous.representations.identity === undefined ? {} : { identity: {
+        ...previous.representations.identity, sourceRevisionId: revisionId
+      } }),
+      compact: {
+        ...previous.representations.compact, sourceRevisionId: revisionId
+      },
+      standard: {
+        ...previous.representations.standard, sourceRevisionId: revisionId
+      }
+    }
+  };
+  const source = render(memory, request.source);
+  return { source, memory, contentIdentity: contentIdentity(source) };
 }
 
 export function renderCanonicalCategoryMigration(request: {

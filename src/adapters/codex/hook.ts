@@ -205,6 +205,7 @@ export async function handleCodexHook(
       payload: hookPayload(input)
     };
     const inspectedProject = await inspectProject({
+      sessionId: input.session_id,
       path: input.cwd,
       runtimeRoot: request.runtimeRoot,
       busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds
@@ -212,6 +213,7 @@ export async function handleCodexHook(
     const project = inspectedProject?.status === "resolved"
       ? inspectedProject
       : await resolveProject({
+          sessionId: input.session_id,
           path: input.cwd,
           runtimeRoot: request.runtimeRoot,
           busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds

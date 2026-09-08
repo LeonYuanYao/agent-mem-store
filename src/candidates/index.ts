@@ -19,6 +19,7 @@ import {
 } from "../memories/categories.js";
 import { assessExactCompact } from "../memories/representations.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
+import { readSessionProjectRoute } from "../projects/session-route.js";
 import {
   readCanonicalMemory,
   writeCanonicalMemory,
@@ -139,9 +140,9 @@ const stableExplicitUserTags = new Set<ImportanceTag>([
   "exception"
 ]);
 
-function candidateFingerprint(
+export function candidateFingerprint(
   scope: { readonly kind: "project"; readonly projectId: string } | { readonly kind: "global" },
-  candidate: CandidateContent
+  candidate: Pick<CandidateContent, "statement" | "applicabilitySummary" | "conditions" | "exclusions" | "preservedNegations" | "sensitivity">
 ): string {
   return createHash("sha256")
     .update(JSON.stringify({
@@ -245,6 +246,19 @@ function readGitHead(repositoryRoot: string): Promise<string> {
       }
     );
   });
+}
+
+async function evidenceMatchesScope(runtimeRoot: string, evidence: CandidateEvidence,
+  scope: { readonly kind: "global" } | { readonly kind: "project"; readonly projectId: string }): Promise<boolean> {
+  if (scope.kind === "global" || evidence.projectId === scope.projectId) return true;
+  const database = await openRuntimeDatabase(runtimeRoot);
+  let sessionId: unknown;
+  try {
+    sessionId = database.prepare("SELECT session_id FROM capture_events WHERE event_id = ?").get(evidence.evidenceId)?.session_id;
+  } finally { database.close(); }
+  if (typeof sessionId !== "string") return false;
+  const route = await readSessionProjectRoute(runtimeRoot, sessionId);
+  return route?.projectId === scope.projectId;
 }
 
 async function isEligibleEvidence(request: {
@@ -517,6 +531,7 @@ export async function createAgentCandidate(request: {
   const eligibleEvidence = (
     await Promise.all(request.evidence.map(async (evidence) => ({
       evidence,
+      inScope: await evidenceMatchesScope(request.runtimeRoot, evidence, request.scope),
       eligible:
         await isEligibleEvidence({
           evidence,
@@ -529,8 +544,7 @@ export async function createAgentCandidate(request: {
         })
     })))
   ).filter((item) =>
-    item.eligible &&
-    (request.scope.kind === "global" || item.evidence.projectId === request.scope.projectId)
+    item.eligible && item.inScope
   ).map((item) => item.evidence);
 
   let globalAuthorization:
@@ -1156,6 +1170,7 @@ export async function evaluateCandidate(request: {
   }
   const evidenceEligibility = await Promise.all(evidence.map(async (item) => ({
     item,
+    inScope: await evidenceMatchesScope(request.runtimeRoot, item, scope),
     deterministic: await isEligibleEvidence({
       evidence: item,
       runtimeRoot: request.runtimeRoot,
@@ -1166,9 +1181,7 @@ export async function evaluateCandidate(request: {
       runtimeRoot: request.runtimeRoot
     })
   })));
-  const scopedEvidenceEligibility = evidenceEligibility.filter(({ item }) =>
-    scope.kind === "global" || item.projectId === scope.projectId
-  );
+  const scopedEvidenceEligibility = evidenceEligibility.filter(({ inScope }) => inScope);
   const deterministicEvidence = scopedEvidenceEligibility
     .filter((item) => item.deterministic)
     .map((item) => item.item);

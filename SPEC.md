@@ -328,7 +328,18 @@ See [ADR-0006](./docs/adr/0006-default-to-project-scope-and-require-global-inten
 
 ## Project identity
 
-- An existing `.memstore-project` Project Marker is the highest-priority explicit identity for Git and non-Git directories.
+### Explicit session project relocation
+
+- A user may bind one exact Codex Session ID to a registered Project without changing its working directory or Project roots. The binding takes precedence over directory resolution for that Session's Hooks and automatic recall. It does not propagate to other Sessions or forks, and explicitly requested Global extraction remains Global.
+- Background extraction resolves the current Session binding when loading queued evidence and ingesting candidates. Historical evidence keeps its original Project and cwd; candidate admission and promotion recognize the authorized Session binding without weakening evidence-integrity checks.
+- An approved offline migration may relocate current project memories linked by that Session's candidates and its non-rejected/non-expired candidate records. This is an explicit exception to ordinary revision scope immutability, not permission for normal agent writes to move knowledge. Shared-source memories and target candidate collisions require separate review.
+- Relocation preserves Memory IDs, portable references, authorship, body, and provenance. It creates a successor revision in the destination, removes the old current canonical path, updates candidate fingerprints, and preserves historical capture, evidence, revisions, and receipts. Previously injected conversation context is not retractable.
+- Migration requires a paused/stopped Worker and a coherent DB/Vault backup. A persisted migration plan supports replay after interruption. The old active retrieval snapshot is unselected until a new snapshot is built; complete historical snapshots may supply integrity-checked, identity-matching embedding vectors but may not resume serving old-scope results.
+- Session routes and migration plans are machine-local runtime state. Explicit CLI/MCP calls can provide a Session ID; without one they retain normal workspace resolution rather than infer identity from inherited environment variables.
+
+### Directory-based identity
+
+- When no explicit Session binding applies, an existing `.memstore-project` Project Marker is the highest-priority explicit identity for Git and non-Git directories.
 - Resolution searches from the current directory toward its ancestors for the nearest marker and canonicalizes examined paths through realpath or equivalent symlink resolution. A malformed or unsupported nearest marker fails safely and prevents Project Memory injection; it does not fall through to a guessed Git, basename, or registered-root identity. Independently eligible Global Memory remains available.
 - A Project Marker contains a stable `project_id`, not a path to another directory. Directories that explicitly declare the same identifier share Project Memory.
 - The marker is a UTF-8 JSON object. Version 1 requires integer `schema_version: 1` and a `project_id` consisting of the `msproj_` prefix followed by a lowercase UUID v4. It must not encode a path, Git remote, username, or machine identity.

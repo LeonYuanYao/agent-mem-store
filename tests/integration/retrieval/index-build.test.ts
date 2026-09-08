@@ -77,7 +77,7 @@ test("a complete retrieval index revision publishes active Canonical Memory atom
   });
 });
 
-test("a new index revision embeds only Canonical Memory missing from the compatible active index", async () => {
+test.each([false, true])("a rebuild reuses compatible vectors even after unselecting the snapshot: %s", async (unselect) => {
   const root = await mkdtemp(join(tmpdir(), "memstore-index-incremental-"));
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -111,6 +111,12 @@ test("a new index revision embeds only Canonical Memory missing from the compati
     adapter: incrementalAdapter,
     builtAt: "2026-08-07T10:00:00.000Z"
   });
+  if (unselect) {
+    const database = await openRuntimeDatabase(runtimeRoot);
+    database.prepare("DELETE FROM active_retrieval_index WHERE singleton = 1").run();
+    database.close();
+    expect(await inspectActiveRetrievalIndex(runtimeRoot)).toBeUndefined();
+  }
 
   await writeCanonicalMemory({
     vaultRoot,

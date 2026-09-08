@@ -144,6 +144,51 @@ pnpm exec tsx src/cli/main.ts recall search "package manager" \
   --json
 ```
 
+### Move one session to another project
+
+A session route applies only to the exact Codex thread ID. Future Hook capture,
+automatic recall, and queued/background extraction use that project even when
+the working directory stays unchanged. Other threads and forks keep their own
+project resolution. Explicit global extraction remains global.
+
+```sh
+memstore project route-session --session-id THREAD_ID --project-id TARGET_PROJECT_ID \
+  --vault /path/to/vault --runtime /path/to/runtime --preview --json
+```
+
+Remove `--preview` to bind future processing. This command does **not** move
+existing knowledge. For an existing session, use the maintenance command below:
+
+```sh
+memstore project migrate-session --session-id THREAD_ID \
+  --from SOURCE_PROJECT_ID --project-id TARGET_PROJECT_ID \
+  --vault /path/to/vault --runtime /path/to/runtime --preview --json
+```
+
+Before applying, pause and stop the worker, then back up both the runtime database
+and Vault. Applying requires `worker_control.worker_paused = 1`. This is an offline
+maintenance command, not a concurrent multi-writer migration. It moves current
+project memories linked by session candidates and their live candidate records;
+rejected/expired candidate history remains historical. Shared-source memories and
+target candidate collisions require separate review. Memory IDs, numeric references,
+authorship, body, and provenance stay unchanged. Each moved memory gets a new
+revision, while capture events, evidence, old revisions, and injection receipts
+retain their original history.
+
+The migration also installs the session route. Its replayable plan lives under
+`<runtime>/state/session-migrations/`; keep it until migration verification is
+complete. An interrupted move can be retried with the same arguments while the
+worker remains stopped. Restart and unpause the worker after successful migration;
+the old retrieval snapshot is unselected and must rebuild before recall resumes.
+Previously injected conversation text cannot be removed retroactively.
+
+Session bindings live under `<runtime>/state/session-projects/` as atomic JSON
+files, avoiding an extra SQLite lock on each Hook. They are machine-local runtime
+state, not portable knowledge. Explicit CLI recall can pass `--session-id THREAD_ID`;
+`memstore_search` accepts `session_id`. Without that identity, explicit tools keep
+their normal configured-workspace scope. They do not guess a thread from inherited
+process environment variables.
+
 Repository-local operations examples:
 
 ```sh

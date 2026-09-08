@@ -19,6 +19,7 @@ export interface RecallContext {
   readonly path: string;
   readonly callerIdentity: string;
   readonly requestedAt: string;
+  readonly sessionId?: string;
   readonly embeddingAdapter?: EmbeddingAdapter;
   readonly retrievalJudge?: RetrievalJudge;
 }
@@ -26,7 +27,8 @@ export interface RecallContext {
 async function currentProjectId(context: RecallContext): Promise<string | undefined> {
   const project = await inspectProject({
     path: context.path,
-    runtimeRoot: context.runtimeRoot
+    runtimeRoot: context.runtimeRoot,
+    ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId })
   });
   return project.status === "resolved" ? project.projectId : undefined;
 }
@@ -36,7 +38,8 @@ export async function executeRecall(
   input: Readonly<Record<string, unknown>>,
   context: RecallContext
 ): Promise<unknown> {
-  const currentProject = await currentProjectId(context);
+  const sessionId = z.string().min(1).optional().parse(input.session_id ?? context.sessionId);
+  const currentProject = await currentProjectId({ ...context, ...(sessionId === undefined ? {} : { sessionId }) });
   if (operation === "search") {
     const request = z.object({
       query: z.string().min(1),

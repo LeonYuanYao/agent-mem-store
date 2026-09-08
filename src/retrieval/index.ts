@@ -112,10 +112,12 @@ async function loadReusableVectors(request: {
               revision.model_identity, revision.artifact_sha256,
               revision.dimensions, revision.normalization,
               revision.document_count
-       FROM active_retrieval_index AS selected
-       JOIN retrieval_index_revisions AS revision
-         ON revision.index_revision_id = selected.index_revision_id
-       WHERE selected.singleton = 1 AND revision.state = 'complete'`
+       FROM retrieval_index_revisions AS revision
+       LEFT JOIN active_retrieval_index AS selected
+         ON revision.index_revision_id = selected.index_revision_id AND selected.singleton = 1
+       WHERE revision.state = 'complete'
+       ORDER BY (selected.singleton IS NOT NULL) DESC, revision.built_at DESC
+       LIMIT 1`
     ).get();
     if (active !== undefined) {
       documents = database.prepare(

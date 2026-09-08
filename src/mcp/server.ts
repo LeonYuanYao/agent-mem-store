@@ -82,6 +82,7 @@ export function createMemStoreMcpServer(
     description: "Search compact memory descriptions and return stable identities for deeper reads.",
     inputSchema: {
       query: z.string().min(1),
+      session_id: z.string().min(1).optional().describe("Exact current thread ID, when using a session-specific project route."),
       scope: z.enum(["current", "global", "project", "all_projects"]).optional(),
       project_id: z.string().min(1).optional(),
       limit: z.number().int().min(1).max(50).optional(),

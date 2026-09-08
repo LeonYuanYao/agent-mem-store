@@ -7,6 +7,7 @@ import { z } from "zod";
 import { DatabaseSync } from "node:sqlite";
 
 import { openRuntimeDatabase } from "../runtime/database.js";
+import { readSessionProjectRoute } from "./session-route.js";
 import {
   writeFileAtomically,
   writeFileAtomicallyExclusive
@@ -25,6 +26,7 @@ const markerSchema = z.object({
 });
 
 export interface ProjectResolutionRequest {
+  readonly sessionId?: string;
   readonly path: string;
   readonly runtimeRoot: string;
   readonly busyTimeoutMilliseconds?: number;
@@ -46,6 +48,7 @@ export type ProjectResolution =
       readonly displayName: string;
       readonly source:
         | "marker"
+        | "session_override"
         | "registered_root"
         | "git"
         | "inherited_submodule";
@@ -279,10 +282,22 @@ async function existingRuntimeDatabasePath(runtimeRoot: string): Promise<string 
   }
 }
 
+async function inspectSessionRoute(request: ProjectResolutionRequest): Promise<ProjectResolution | undefined> {
+  if (request.sessionId === undefined) return undefined;
+  const route = await readSessionProjectRoute(request.runtimeRoot, request.sessionId);
+  if (route === undefined) return undefined;
+  return {
+    status: "resolved", projectId: route.projectId, displayName: route.displayName,
+    source: "session_override", root: resolve(request.path), notices: []
+  };
+}
+
 /** Resolve Project identity without creating or updating Registry state. */
 export async function inspectProject(
   request: ProjectResolutionRequest
 ): Promise<ProjectResolution> {
+  const routed = await inspectSessionRoute(request);
+  if (routed !== undefined) return routed;
   const resolvedPath = await realpath(request.path);
   let markerSearchPath = resolvedPath;
   const filesystemRoot = parse(markerSearchPath).root;
@@ -427,6 +442,8 @@ export async function inspectProject(
 export async function resolveProject(
   request: ProjectResolutionRequest
 ): Promise<ProjectResolution> {
+  const routed = await inspectSessionRoute(request);
+  if (routed !== undefined) return routed;
   const resolvedPath = await realpath(request.path);
   let markerSearchPath = resolvedPath;
   const filesystemRoot = parse(markerSearchPath).root;

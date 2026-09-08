@@ -21,6 +21,8 @@ import {
   rebalanceMemoryWorkingSet
 } from "../capacity/index.js";
 import { loadConfiguration } from "../configuration/index.js";
+import { readSessionProjectRoute, setSessionProjectRoute } from "../projects/session-route.js";
+import { migrateSessionProject } from "../operations/session-migration.js";
 import { loadArchiveRetentionMonths } from "../lifecycle/archive-retention.js";
 import { prepareShadowEmbedding } from "../operations/embedding-install.js";
 import { migrateMemoryCategories } from "../operations/category-migration.js";
@@ -155,6 +157,7 @@ function parseCommon(arguments_: readonly string[]) {
       runtime: { type: "string" },
       path: { type: "string" },
       "project-id": { type: "string" },
+      "session-id": { type: "string" },
       scope: { type: "string" },
       startup: { type: "string" },
       text: { type: "string" },
@@ -1124,6 +1127,25 @@ async function runProject(arguments_: readonly string[]): Promise<unknown> {
   const action = parsed.positionals[1];
   const { runtimeRoot } = roots(parsed.values);
   const path = resolve(parsed.values.path ?? process.cwd());
+  if (action === "route-session") {
+    const sessionId = z.string().min(1).parse(parsed.values["session-id"]);
+    const projectId = z.string().min(1).parse(parsed.values["project-id"]);
+    if (parsed.values.preview) {
+      return { dry_run: true, sessionId, projectId,
+        previous: await readSessionProjectRoute(runtimeRoot, sessionId) ?? null };
+    }
+    return setSessionProjectRoute({ runtimeRoot, sessionId, projectId });
+  }
+  if (action === "migrate-session") {
+    const { vaultRoot } = roots(parsed.values);
+    return migrateSessionProject({
+      runtimeRoot, vaultRoot,
+      sessionId: z.string().min(1).parse(parsed.values["session-id"]),
+      sourceProjectId: z.string().min(1).parse(parsed.values.from),
+      targetProjectId: z.string().min(1).parse(parsed.values["project-id"]),
+      preview: parsed.values.preview
+    });
+  }
   if (action === "status") return projectStatus({ runtimeRoot, path });
   if (action === "list") return { projects: await projectList(runtimeRoot) };
   if (action === "collisions") return { collisions: await projectCollisions(runtimeRoot) };
@@ -1177,6 +1199,7 @@ async function runRecall(arguments_: readonly string[]): Promise<unknown> {
     ...location,
     path,
     callerIdentity: process.env.MEMSTORE_CALLER_IDENTITY ?? `cli:${path}`,
+    ...(parsed.values["session-id"] === undefined ? {} : { sessionId: parsed.values["session-id"] }),
     requestedAt: new Date().toISOString()
   };
   const terraCodexHome = process.env.MEMSTORE_TERRA_CODEX_HOME ??
