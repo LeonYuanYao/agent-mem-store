@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -34,6 +34,8 @@ const identity = {
 test("automatic pack preparation fails open when no completed index exists", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-pack-no-index-"));
   roots.push(root);
+  await mkdir(join(root, "runtime"));
+  await writeFile(join(root, "runtime", "config.toml"), "schema_version = 1\n[adapters]\nsession_start_injection = true\n");
   const started = performance.now();
   const result = await prepareSessionStartShadowPack({
     runtimeRoot: join(root, "runtime"),

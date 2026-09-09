@@ -101,7 +101,14 @@ produces Agent-derived candidates; only admitted Durable Memory participates in
 normal recall. Human-authored assertions retain their authority, and Project
 knowledge does not automatically become Global knowledge.
 
-SessionStart selects project/global background, with a maximum of 12 items and
+SessionStart background injection is **off by default**. To opt in, set
+`session_start_injection = true` in `[adapters]` in `<runtime>/config.toml`.
+Missing or unreadable settings keep it off. The Hook reads the switch on every
+SessionStart; capture remains enabled and UserPromptSubmit retrieval is unchanged.
+The first non-empty prompt injection includes the memory legend when needed.
+Disabling the switch cannot remove memory text already present in a conversation.
+
+When enabled, SessionStart selects project/global background, with a maximum of 12 items and
 1,200 tokens. It does not rank against the first user prompt. UserPromptSubmit
 performs task-related retrieval, with a target of 600 tokens, a maximum of 1,024
 tokens, and at most six items. These are ceilings, not quotas. Retrieved items

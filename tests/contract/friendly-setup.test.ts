@@ -252,7 +252,8 @@ test("deep doctor reports a managed installation whose Worker socket is unavaila
   expect(diagnosis.checks).toContainEqual({
     name: "managed_worker",
     state: "warning",
-    detail: "Managed installation exists, but the foreground Worker socket is unavailable."
+    detail: "Managed installation exists, but the foreground Worker socket is unavailable.",
+    recoveryCondition: "The managed foreground Worker endpoint accepts local connections again."
   });
 });
 

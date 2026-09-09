@@ -139,7 +139,7 @@ export async function initializeMemStore(
     },
     projects: {},
     git_cache: {},
-    adapters: { hook_display: "summary" },
+    adapters: { hook_display: "summary", session_start_injection: false },
     embedding: {},
     luna: {},
     notifier: {},

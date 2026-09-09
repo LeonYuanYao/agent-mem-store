@@ -4,6 +4,7 @@ import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 
 import { openRuntimeDatabase } from "../runtime/database.js";
+import { readSessionStartInjection } from "../configuration/hook-display.js";
 import type { EmbeddingAdapter } from "./index.js";
 import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
 import {
@@ -735,10 +736,17 @@ async function prepareSessionStartShadowPackCore(
   const started = performance.now();
   const requestedAt = z.iso.datetime().parse(request.requestedAt);
   const epochId = `msepoch_${randomUUID()}`;
-  let active: Record<string, unknown>;
-  try {
-    active = await loadActiveIndex(request.runtimeRoot, request.snapshot);
-  } catch {
+  const startupEnabled = await readSessionStartInjection(request.runtimeRoot);
+  let active: Record<string, unknown> | undefined;
+  if (startupEnabled) {
+    try {
+      active = await loadActiveIndex(request.runtimeRoot, request.snapshot);
+    } catch {
+      // Missing indexes leave the session running without startup memory.
+    }
+  }
+  if (active === undefined) {
+    const emptyReason = startupEnabled ? "index_unavailable" : "session_start_disabled";
     const receipt = await recordAutomaticReceipt({
       runtimeRoot: request.runtimeRoot,
       callerKind: "session_start",
@@ -750,7 +758,7 @@ async function prepareSessionStartShadowPackCore(
       renderedTokenCount: 0,
       budgetTier: "session_start_1200",
       semanticStage: "not_applicable",
-      emptyReason: "index_unavailable",
+      emptyReason,
       latencyMs: Math.max(0, performance.now() - started),
       requestedAt,
       startSessionEpoch: { sessionId: request.sessionId },
@@ -769,7 +777,7 @@ async function prepareSessionStartShadowPackCore(
       receiptId: receipt.receiptId,
       receiptCommitMs: receipt.receiptCommitMs,
       epochId,
-      emptyReason: "index_unavailable",
+      emptyReason,
       semanticStage: "not_applicable"
     };
   }

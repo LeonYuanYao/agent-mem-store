@@ -70,7 +70,9 @@ Worker 就绪后，安装器会申请 macOS 通知权限。拒绝通知不会关
 
 Codex 集成会采集会话事件，交由后台提取知识。Luna 生成 Agent-derived 候选，只有通过准入的正式长期记忆才参与正常召回。人工编写的断言保留其权威性，Project 知识不会自动升级为 Global 知识。
 
-SessionStart 选择项目／全局背景，最多 12 条、1,200 tokens，不针对第一条用户消息排序。UserPromptSubmit 根据当前任务检索，目标预算为 600 tokens，最多 1,024 tokens、6 条。这些数字是上限，不要求填满。检索结果可能不相关或互相重叠，Agent 使用前应结合当前任务和显式指令判断。`<memstore-candidates>` 表示可能相关的检索结果，不表示生命周期中尚未准入的 Candidate。
+SessionStart 背景注入**默认关闭**。如需启用，在 `<runtime>/config.toml` 的 `[adapters]` 段设置 `session_start_injection = true`。配置缺失或不可读时保持关闭。Hook 在每次 SessionStart 读取开关；事件采集保留，UserPromptSubmit 检索不变。首次非空的 prompt 注入会按需附带记忆标识说明。关闭开关无法移除对话中已经存在的记忆文本。
+
+启用后，SessionStart 选择项目／全局背景，最多 12 条、1,200 tokens，不针对第一条用户消息排序。UserPromptSubmit 根据当前任务检索，目标预算为 600 tokens，最多 1,024 tokens、6 条。这些数字是上限，不要求填满。检索结果可能不相关或互相重叠，Agent 使用前应结合当前任务和显式指令判断。`<memstore-candidates>` 表示可能相关的检索结果，不表示生命周期中尚未准入的 Candidate。
 
 自动注入和显式检索使用不同预算。如果注入内容不足，可以使用受管的 `memstore-recall` Skill 搜索并阅读完整记忆；上述自动注入上限不适用于显式搜索。
 

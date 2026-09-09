@@ -211,7 +211,8 @@ test("the uninstalled Shadow loop reaches review without injecting or touching g
   if (promotedMemoryId === undefined) throw new Error("Promoted Memory is not recall eligible.");
   expect(startPack).toMatchObject({ mode: "shadow", injected: false });
   expect(promptPack).toMatchObject({ mode: "shadow", injected: false });
-  expect(startPack.items).not.toHaveLength(0);
+  expect(startPack.items).toHaveLength(0);
+  expect(startPack.emptyReason).toBe("session_start_disabled");
   if (promptPack.items.length === 0) expect(promptPack.emptyReason).toBe("already_present");
 
   for (let ordinal = 0; ordinal < 4; ordinal += 1) {

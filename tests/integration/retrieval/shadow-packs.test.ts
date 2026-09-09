@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -41,8 +41,36 @@ const adapter: EmbeddingAdapter = {
 async function createRoot() {
   const root = await mkdtemp(join(tmpdir(), "memstore-shadow-pack-"));
   roots.push(root);
+  await mkdir(join(root, "runtime"));
+  await writeFile(join(root, "runtime", "config.toml"), "schema_version = 1\n[adapters]\nsession_start_injection = true\n");
   return { runtimeRoot: join(root, "runtime"), vaultRoot: join(root, "vault") };
 }
+
+test("disabled startup leaves prompt recall and its first legend intact", async () => {
+  const roots = await createRoot();
+  await rm(join(roots.runtimeRoot, "config.toml"));
+  await writeAll(roots, [makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174991",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174992",
+    scope: { kind: "project", projectId },
+    body: "Use SQLite WAL for durable storage.",
+    compact: "Use SQLite WAL for durable storage.",
+    startup: "always"
+  })]);
+  const startup = await prepareSessionStartShadowPack({
+    ...roots, projectId, sessionId: "startup-disabled", requestedAt: "2026-08-07T12:01:00.000Z"
+  });
+  expect(startup.emptyReason).toBe("session_start_disabled");
+  expect(startup.items).toHaveLength(0);
+  expect(startup.renderedTokenCount).toBe(0);
+  const prompt = await prepareUserPromptShadowPack({
+    ...roots, projectId, sessionId: "startup-disabled", prompt: "SQLite WAL",
+    signals: { files: [], symbols: [], errors: [], commands: [] }, adapter,
+    requestedAt: "2026-08-07T12:01:01.000Z"
+  });
+  expect(prompt.items).toHaveLength(1);
+  expect(prompt.text).toContain("M=memory ref");
+});
 
 async function writeAll(
   roots: { runtimeRoot: string; vaultRoot: string },

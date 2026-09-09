@@ -5,7 +5,7 @@ import { z } from "zod";
 import { handleCodexHook } from "../adapters/codex/hook.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { requestForegroundRetrieval } from "../retrieval/foreground-client.js";
-import { readHookDisplay, renderHookDisplay } from "../configuration/hook-display.js";
+import { readHookDisplay, readSessionStartInjection, renderHookDisplay } from "../configuration/hook-display.js";
 
 const codexHookEventSchema = z.enum([
   "SessionStart",
@@ -45,6 +45,7 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
   const injectionMode = process.env.MEMSTORE_INJECTION_MODE === "active" ? "active" : "shadow";
   if (injectionMode === "active" &&
       (event === "SessionStart" || event === "UserPromptSubmit") &&
+      (event !== "SessionStart" || await readSessionStartInjection(resolve(runtimeRoot))) &&
       result.captured && result.projectId !== undefined) {
     const activeInput = activeHookInputSchema.parse(input);
     const foreground = await requestForegroundRetrieval({

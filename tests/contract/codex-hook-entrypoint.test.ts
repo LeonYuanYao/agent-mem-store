@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "vitest";
 
 import { foregroundRetrievalSocketPath } from "../../src/retrieval/foreground-client.js";
-import { adapterDisplaySchema, renderHookDisplay } from "../../src/configuration/hook-display.js";
+import { adapterDisplaySchema, readSessionStartInjection, renderHookDisplay } from "../../src/configuration/hook-display.js";
 
 const temporaryDirectories: string[] = [];
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -60,6 +60,26 @@ async function runHook(request: {
   return { status, stdout, stderr };
 }
 
+for (const setting of ["missing", "false", "invalid"] as const) {
+ test(`startup injection ${setting} stays silent while capturing the event`, async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-startup-switch-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  await mkdir(runtimeRoot);
+  if (setting !== "missing") {
+    await writeFile(join(runtimeRoot, "config.toml"), `schema_version = 1\n[adapters]\nsession_start_injection = ${setting === "false" ? "false" : '"invalid"'}\n`);
+  }
+  expect(await readSessionStartInjection(runtimeRoot)).toBe(false);
+  const result = await runHook({ runtimeRoot, event: "SessionStart",
+    environment: { MEMSTORE_INJECTION_MODE: "active" },
+    input: { session_id: "disabled-startup", cwd: root, source: "startup" }
+  });
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ continue: true });
+  expect((await readdir(join(runtimeRoot, "spool", "capture"))).length).toBeGreaterThan(0);
+ });
+}
+
 for (const event of ["SessionStart", "UserPromptSubmit"] as const) {
  for (const mode of ["off", "summary", "full", "default", "invalid"] as const) {
   test(`active ${event} preserves injection with ${mode} display`, async () => {
@@ -68,9 +88,7 @@ for (const event of ["SessionStart", "UserPromptSubmit"] as const) {
     const runtimeRoot = join(root, "runtime");
     const socketPath = foregroundRetrievalSocketPath(runtimeRoot);
     await mkdir(join(runtimeRoot, "state"), { recursive: true });
-    if (mode !== "default") {
-      await writeFile(join(runtimeRoot, "config.toml"), `schema_version = 1\n[adapters]\nhook_display = "${mode}"\n`);
-    }
+    await writeFile(join(runtimeRoot, "config.toml"), `schema_version = 1\n[adapters]\nsession_start_injection = ${String(event === "SessionStart")}\n${mode === "default" ? "" : `hook_display = "${mode}"\n`}`);
     const memoryText = "<memstore-candidates>\n[M:123 S:P A:A R:C] verified foreground memory\n</memstore-candidates>";
     const server = createServer((socket) => {
       let source = "";

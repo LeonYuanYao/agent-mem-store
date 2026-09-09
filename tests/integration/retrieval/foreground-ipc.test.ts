@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -49,6 +49,8 @@ async function fixture() {
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
   const vaultRoot = join(root, "vault");
+  await mkdir(runtimeRoot);
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n[adapters]\nsession_start_injection = true\n");
   await writeCanonicalMemory({
     runtimeRoot,
     vaultRoot,
