@@ -1,5 +1,7 @@
 # MemStore
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 MemStore is a program/data-separated long-term memory system for coding agents.
 The program lives in this repository; Canonical Memory lives in a user-selected
 Obsidian Vault; machine execution state lives under an explicit runtime root.
