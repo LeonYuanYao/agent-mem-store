@@ -19,8 +19,9 @@ separate. Use `memstore status` and `memstore doctor --deep` for live inspection
 - macOS 13 or newer.
 - Node.js `>=22.17.0 <23` and pnpm `>=10.25.0 <11`.
 - Xcode Command Line Tools with Swift 6 and `codesign`.
-- Codex CLI installed, authenticated, and entitled to the configured Luna and
-  Terra models.
+- Codex CLI installed, authenticated, and entitled to `gpt-5.6-luna` and
+  `gpt-5.6-terra`. The current adapters use Luna with `medium` reasoning and
+  Terra with `low` reasoning, both with `service_tier="default"` (not Fast mode).
 - Obsidian with the intended Vault opened at least once.
 - `~/.codex/config.toml` created by Codex. Active setup also requires explicit
   boolean `generate_memories` and `use_memories` values in its `[memories]`
@@ -91,7 +92,100 @@ only the final JSON envelope:
 ./install.sh --vault /path/to/vault --apply --json
 ```
 
-## Development
+## Everyday use
+
+### Memory capture and retrieval
+
+The Codex integration captures session events for background extraction. Luna
+produces Agent-derived candidates; only admitted Durable Memory participates in
+normal recall. Human-authored assertions retain their authority, and Project
+knowledge does not automatically become Global knowledge.
+
+SessionStart selects project/global background, with a maximum of 12 items and
+1,200 tokens. It does not rank against the first user prompt. UserPromptSubmit
+performs task-related retrieval, with a target of 600 tokens, a maximum of 1,024
+tokens, and at most six items. These are ceilings, not quotas. Retrieved items
+can be irrelevant or overlap; the agent must apply the current task and explicit
+instructions before using them. `<memstore-candidates>` labels possible retrieval
+matches, not unapproved lifecycle Candidates.
+
+Automatic injection and explicit retrieval have different budgets. Use the
+managed `memstore-recall` Skill to search and read full memories when the injected
+context is insufficient; the automatic limits above are not explicit-search limits.
+
+### Skills and MCP tools
+
+Setup manages three Skills:
+
+- `memstore-recall`: search memories, read by ID, and inspect provenance or related knowledge.
+- `memstore-remember`: save an exact Human-authored assertion or queue Luna extraction
+  from a turn, session, or file. Project is the default scope; Global requires an
+  explicit request. Extraction is asynchronous and still passes admission checks.
+- `memstore-repair`: guide a user-initiated investigation of irrelevant-retrieval
+  Bad Cases; it does not authorize silent background code repair.
+
+The MCP server exposes `memstore_search`, `memstore_get`, `memstore_provenance`,
+`memstore_related`, `memstore_report_irrelevant`, `memstore_archive`, and
+`memstore_restore`. Remembering uses the Skill/CLI path; physical deletion is CLI-only.
+
+### Storage, governance, and retention
+
+| Location | Purpose |
+| --- | --- |
+| `<vault>/Memories/` | Current canonical memory files, including retained archived memories |
+| `<vault>/_MemStore/Revisions/` | Historical memory revisions |
+| `<vault>/_MemStore/policy.toml` | Portable governance, retention, and capacity policy |
+| `<vault>/_MemStore/Review Inbox.md` | Generated review and operational notices |
+| `<runtime>/config.toml` | Machine-local paths and adapter settings |
+| `<runtime>/state/memstore.sqlite` | Queues, candidates, receipts, and other execution state |
+
+The default Runtime is `~/Library/Application Support/MemStore`. Embedding models
+and rebuildable indexes also live under Runtime, outside the Vault. Do not sync
+the live SQLite database or its WAL files through Obsidian.
+
+New installations schedule weekly governance for Monday at 19:00 and monthly
+governance for the first Monday at 19:00, using the fixed `Asia/Shanghai` timezone.
+The schedule does not follow travel-related changes to the machine timezone.
+
+Default retention settings in `policy.toml` are:
+
+- `retention.archive_months = 3`: eligible archived memories are automatically
+  physically purged after their retention deadline. Protected memories and explicit
+  per-memory deadlines are handled by the lifecycle rules. The Worker prepares and
+  verifies its managed backup before scheduled purge; manual purge commands below
+  require a separately supplied verified backup.
+- `retention.sensitivity_metadata_days = 15`: old sensitivity diagnostics are cleaned up.
+- `retention.injection_receipt_days = 30`: eligible old injection receipts are cleaned
+  up, with protected evidence retained and daily summaries recorded.
+- `retention.candidate_tombstone_days = 180`: candidate tombstone retention; this does
+  not set the retention of canonical Memory tombstones.
+
+Deletion frees space for SQLite reuse; it does not necessarily shrink the database
+file immediately. Retention maintenance is distinct from database compaction.
+
+Capacity governance limits the active recall Working Set. Project defaults are a
+2,500-item target, 3,500 hard limit, and 2,200 low-water target; Global defaults are
+300, 500, and 270. Exclusion from the Working Set preserves the memory and is
+distinct from archive or physical deletion, so the total retained knowledge count
+can exceed the Working Set limit.
+
+### Support and safety boundaries
+
+The managed host integration currently targets Codex on macOS. A Claude Code
+adapter is not included. Model calls use Codex authentication and require network
+access; local embedding does not make background extraction fully offline.
+
+The Vault stores plaintext knowledge; MemStore provides no application-level
+encryption. Do not store passwords, tokens, or credentials as memories. The current
+design does not support two MemStore writers sharing one synchronized Vault.
+Moving a Vault preserves portable knowledge, not pending jobs, session routes, or
+machine execution state; inspect `portability readiness` before migration.
+
+See [SPEC.md](SPEC.md) for detailed contracts and [the ADRs](docs/adr/) for decisions.
+Historical Gate evidence is engineering evidence, not a live health or memory-quality
+report. Inspect the running installation and review actual retrievals separately.
+
+## Development and operations
 
 ### Hook visibility
 
@@ -239,8 +333,9 @@ active Memory identities. Removing `--preview` records the reviewed result in
 machine-local Runtime Data; it never creates or changes Durable Memory.
 
 Existing managed installations can preview a narrowly scoped upgrade before
-applying it. The current upgrade adds only a missing owned `memstore` CLI and
-reports—but does not rewrite—any previously installed target that has drifted:
+applying it. The current upgrade can add a missing managed `memstore` CLI or update
+an unchanged owned CLI wrapper. It reports other target drift without rewriting
+those targets, and refuses a CLI wrapper that differs from its recorded identity:
 
 ```sh
 pnpm exec tsx src/cli/main.ts integration upgrade \

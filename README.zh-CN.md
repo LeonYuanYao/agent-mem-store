@@ -13,7 +13,7 @@ MemStore 是面向 coding agent 的长期记忆系统，采用程序与数据分
 - macOS 13 或更新版本。
 - Node.js `>=22.17.0 <23`，pnpm `>=10.25.0 <11`。
 - Xcode Command Line Tools，包含 Swift 6 和 `codesign`。
-- 已安装并登录 Codex CLI，且账号有权使用配置中的 Luna 和 Terra 模型。
+- 已安装并登录 Codex CLI，且账号有权使用 `gpt-5.6-luna` 和 `gpt-5.6-terra`。当前适配器固定使用 Luna `medium` 思考深度和 Terra `low` 思考深度，两者均为 `service_tier="default"`，不使用 Fast 模式。
 - 已在 Obsidian 中至少打开过一次准备使用的 Vault。
 - Codex 已创建 `~/.codex/config.toml`。安装为 Active 模式时，还要求其 `[memories]` 段显式设置布尔值 `generate_memories` 和 `use_memories`，以便回滚时准确恢复原状态。
 
@@ -64,7 +64,61 @@ Worker 就绪后，安装器会申请 macOS 通知权限。拒绝通知不会关
 ./install.sh --vault /path/to/vault --apply --json
 ```
 
-## 开发
+## 日常使用
+
+### 记忆采集与检索
+
+Codex 集成会采集会话事件，交由后台提取知识。Luna 生成 Agent-derived 候选，只有通过准入的正式长期记忆才参与正常召回。人工编写的断言保留其权威性，Project 知识不会自动升级为 Global 知识。
+
+SessionStart 选择项目／全局背景，最多 12 条、1,200 tokens，不针对第一条用户消息排序。UserPromptSubmit 根据当前任务检索，目标预算为 600 tokens，最多 1,024 tokens、6 条。这些数字是上限，不要求填满。检索结果可能不相关或互相重叠，Agent 使用前应结合当前任务和显式指令判断。`<memstore-candidates>` 表示可能相关的检索结果，不表示生命周期中尚未准入的 Candidate。
+
+自动注入和显式检索使用不同预算。如果注入内容不足，可以使用受管的 `memstore-recall` Skill 搜索并阅读完整记忆；上述自动注入上限不适用于显式搜索。
+
+### Skills 与 MCP 工具
+
+安装器管理三个 Skill：
+
+- `memstore-recall`：搜索记忆、按 ID 深读、查看来源和相关知识。
+- `memstore-remember`：保存精确的人工断言，或让 Luna 从一轮对话、整个 Session 或文件中提取知识。默认使用 Project 范围，Global 需要显式请求。提取异步执行，仍需通过准入检查。
+- `memstore-repair`：指导用户主动发起的不相关检索 Bad Case 排查，不授权后台静默修改代码。
+
+MCP server 提供 `memstore_search`、`memstore_get`、`memstore_provenance`、`memstore_related`、`memstore_report_irrelevant`、`memstore_archive` 和 `memstore_restore`。记忆写入通过 Skill／CLI 完成，物理删除仅通过 CLI 提供。
+
+### 存储、治理与保留策略
+
+| 位置 | 用途 |
+| --- | --- |
+| `<vault>/Memories/` | 当前正式记忆文件，包括保留期内的归档记忆 |
+| `<vault>/_MemStore/Revisions/` | 记忆历史修订 |
+| `<vault>/_MemStore/policy.toml` | 可迁移的治理、保留和容量策略 |
+| `<vault>/_MemStore/Review Inbox.md` | 自动生成的复核事项和运行提示 |
+| `<runtime>/config.toml` | 机器本地路径与适配器设置 |
+| `<runtime>/state/memstore.sqlite` | 队列、候选、回执及其他运行状态 |
+
+Runtime 默认位于 `~/Library/Application Support/MemStore`。Embedding 模型和可重建索引也保存在 Runtime 中，与 Vault 分离。不要通过 Obsidian 同步正在使用的 SQLite 数据库或其 WAL 文件。
+
+新安装默认按固定的 `Asia/Shanghai` 时区执行治理：每周一 19:00 执行周治理，每月第一个周一 19:00 执行月治理。计划不会跟随出差时机器时区的变化。
+
+`policy.toml` 中的默认保留设置：
+
+- `retention.archive_months = 3`：符合条件的归档记忆到期后自动物理清除。受保护记忆和单条记忆显式指定的期限按生命周期规则处理。定时清除前，Worker 会准备并验证受管备份；下文的手动清除命令则要求另行提供经过验证的备份。
+- `retention.sensitivity_metadata_days = 15`：清理过期的脱敏诊断记录。
+- `retention.injection_receipt_days = 30`：清理符合条件的过期注入回执，保留受保护证据并记录每日汇总。
+- `retention.candidate_tombstone_days = 180`：候选墓碑的保留期，不是正式 Memory 墓碑的保留期。
+
+删除数据会释放 SQLite 内部可复用空间，但不一定立即缩小数据库文件。保留期清理与数据库压缩是两项不同的维护操作。
+
+容量治理限制的是正常参与召回的 Working Set。Project 默认目标为 2,500 条、硬上限 3,500 条、回落目标 2,200 条；Global 分别为 300、500、270 条。移出 Working Set 会保留记忆，与归档、物理删除不同，因此完整保留的知识条数可以超过 Working Set 上限。
+
+### 支持范围与安全边界
+
+当前受管宿主集成面向 macOS 上的 Codex，尚未提供 Claude Code 适配器。模型调用使用 Codex 登录凭据并依赖网络；本地 Embedding 不代表后台提取可以完全离线运行。
+
+Vault 以明文保存知识，MemStore 不提供应用层加密。不要把密码、token 或其他凭据存为记忆。当前设计不支持两个 MemStore 写入端同时使用同一个同步 Vault。迁移 Vault 保留的是可迁移知识，不包含待处理任务、Session 路由或机器运行状态；迁移前应检查 `portability readiness`。
+
+详细约定见 [SPEC.md](SPEC.md)，设计决策见 [ADR 目录](docs/adr/)。历史 Gate 证据用于工程验证，不能代替实时健康检查或记忆质量评估；运行状态和实际检索效果需要分别检查。
+
+## 开发与运维
 
 ### Hook 注入内容的显示方式
 
@@ -175,7 +229,7 @@ pnpm exec tsx src/cli/main.ts shadow verify \
 
 `shadow verify` 根据精确的采集事件和当前有效的记忆身份，校验一次 source-first review（基于原始来源的复核）。移除 `--preview` 后，会将已复核结果写入机器本地 Runtime 数据；它不会创建或修改正式长期记忆（Durable Memory）。
 
-已有受管安装可以先预览小范围升级，再决定是否应用。当前升级仅补充缺失的受管 `memstore` CLI；对于已安装但偏离预期的目标，只报告而不改写：
+已有受管安装可以先预览小范围升级，再决定是否应用。当前升级可以补充缺失的受管 `memstore` CLI，也可以更新未被改动的受管 CLI 包装脚本。其他目标偏离预期时，只报告而不改写；CLI 包装脚本与记录的身份不符时会拒绝升级：
 
 ```sh
 pnpm exec tsx src/cli/main.ts integration upgrade \
