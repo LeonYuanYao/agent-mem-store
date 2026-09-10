@@ -46,7 +46,7 @@ async function createRoot() {
   return { runtimeRoot: join(root, "runtime"), vaultRoot: join(root, "vault") };
 }
 
-test("disabled startup leaves prompt recall and its first legend intact", async () => {
+test("a first prompt works before disabled startup processing and late startup preserves its epoch", async () => {
   const roots = await createRoot();
   await rm(join(roots.runtimeRoot, "config.toml"));
   await writeAll(roots, [makeCanonicalMemory({
@@ -57,12 +57,6 @@ test("disabled startup leaves prompt recall and its first legend intact", async 
     compact: "Use SQLite WAL for durable storage.",
     startup: "always"
   })]);
-  const startup = await prepareSessionStartShadowPack({
-    ...roots, projectId, sessionId: "startup-disabled", requestedAt: "2026-08-07T12:01:00.000Z"
-  });
-  expect(startup.emptyReason).toBe("session_start_disabled");
-  expect(startup.items).toHaveLength(0);
-  expect(startup.renderedTokenCount).toBe(0);
   const prompt = await prepareUserPromptShadowPack({
     ...roots, projectId, sessionId: "startup-disabled", prompt: "SQLite WAL",
     signals: { files: [], symbols: [], errors: [], commands: [] }, adapter,
@@ -70,6 +64,22 @@ test("disabled startup leaves prompt recall and its first legend intact", async 
   });
   expect(prompt.items).toHaveLength(1);
   expect(prompt.text).toContain("M=memory ref");
+  const startup = await prepareSessionStartShadowPack({
+    ...roots, projectId, sessionId: "startup-disabled", requestedAt: "2026-08-07T12:01:00.000Z"
+  });
+  expect(startup.emptyReason).toBe("session_start_disabled");
+  expect(startup.items).toHaveLength(0);
+  expect(startup.renderedTokenCount).toBe(0);
+  expect(startup.epochId).toBe(prompt.epochId);
+  const repeated = await prepareUserPromptShadowPack({
+    ...roots, projectId, sessionId: "startup-disabled", prompt: "SQLite WAL",
+    signals: { files: [], symbols: [], errors: [], commands: [] }, adapter,
+    requestedAt: "2026-08-07T12:01:02.000Z"
+  });
+  expect(repeated.epochId).toBe(prompt.epochId);
+  expect(repeated.items).toHaveLength(0);
+  const receipt = await inspectRetrievalReceipt(roots.runtimeRoot, repeated.receiptId);
+  expect(receipt?.automaticEpochTotal).toBe(prompt.renderedTokenCount);
 });
 
 async function writeAll(

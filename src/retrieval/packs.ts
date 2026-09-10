@@ -494,19 +494,30 @@ async function loadActiveIndex(
   }
 }
 
-async function loadEpoch(runtimeRoot: string, sessionId: string): Promise<{
+async function loadEpoch(runtimeRoot: string, sessionId: string, projectId: string, requestedAt: string): Promise<{
   readonly epochId: string;
   readonly tokenTotal: number;
   readonly memoryLegendVersion: number;
   readonly injectedRevisions: ReadonlySet<string>;
 }> {
-  const database = await openRuntimeDatabase(runtimeRoot);
+  const database = await openRuntimeDatabase(runtimeRoot, { busyTimeoutMilliseconds: 50 });
   try {
-    const row = database.prepare(
+    const select = database.prepare(
       `SELECT epoch_id, automatic_token_total, memory_legend_version
        FROM context_epochs WHERE session_id = ? AND state = 'active'`
-    ).get(sessionId);
-    if (row === undefined) throw new Error("UserPromptSubmit requires an active Context Epoch.");
+    );
+    let row = select.get(sessionId);
+    if (row === undefined) {
+      // The partial unique index makes concurrent first-use initialization idempotent.
+      // Existing sessions never acquire a write lock just to load their epoch.
+      database.prepare(`INSERT INTO context_epochs(
+        epoch_id, session_id, project_id, state, automatic_token_total, started_at
+      ) VALUES (?, ?, ?, 'active', 0, ?) ON CONFLICT DO NOTHING`).run(
+        `msepoch_${randomUUID()}`, sessionId, projectId, requestedAt
+      );
+      row = select.get(sessionId);
+    }
+    if (row === undefined) throw new Error("Context Epoch initialization failed.");
     const epochId = z.string().parse(row.epoch_id);
     const revisions = database.prepare(
       `SELECT item.memory_id, item.revision_id
@@ -735,8 +746,11 @@ async function prepareSessionStartShadowPackCore(
 ): Promise<ShadowPack> {
   const started = performance.now();
   const requestedAt = z.iso.datetime().parse(request.requestedAt);
-  const epochId = `msepoch_${randomUUID()}`;
+  let epochId = `msepoch_${randomUUID()}`;
   const startupEnabled = await readSessionStartInjection(request.runtimeRoot);
+  if (!startupEnabled) {
+    epochId = (await loadEpoch(request.runtimeRoot, request.sessionId, request.projectId, requestedAt)).epochId;
+  }
   let active: Record<string, unknown> | undefined;
   if (startupEnabled) {
     try {
@@ -761,7 +775,7 @@ async function prepareSessionStartShadowPackCore(
       emptyReason,
       latencyMs: Math.max(0, performance.now() - started),
       requestedAt,
-      startSessionEpoch: { sessionId: request.sessionId },
+      ...(startupEnabled ? { startSessionEpoch: { sessionId: request.sessionId } } : {}),
       ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
       ...(request.foregroundControl === undefined
         ? {}
@@ -1394,7 +1408,7 @@ async function prepareUserPromptShadowPackCore(
   const requestedAt = z.iso.datetime().parse(request.requestedAt);
   const normalizedPrompt = request.prompt.trim().replace(/\s+/gu, " ");
   const epochLoadStarted = performance.now();
-  const epoch = await loadEpoch(request.runtimeRoot, request.sessionId);
+  const epoch = await loadEpoch(request.runtimeRoot, request.sessionId, request.projectId, requestedAt);
   const includeMemoryLegend = epoch.memoryLegendVersion < MEMORY_LEGEND_VERSION;
   await request.foregroundControl?.checkpoint("prompt_epoch_loaded");
   const epochLoadMs = Math.max(0, performance.now() - epochLoadStarted);

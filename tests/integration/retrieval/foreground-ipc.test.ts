@@ -255,6 +255,30 @@ async function corroboratedHistoryFixture() {
   return { runtimeRoot, vaultRoot, adapter: contextualAdapter };
 }
 
+test("a prompt over the socket succeeds before captured disabled startup is processed", async () => {
+  const roots = await fixture();
+  await writeFile(join(roots.runtimeRoot, "config.toml"), "schema_version = 1\n[adapters]\nsession_start_injection = false\n");
+  await captureEvent({ runtimeRoot: roots.runtimeRoot, event: {
+    schemaVersion: 1, agent: "codex", eventKind: "SessionStart",
+    eventId: "delayed-startup", deduplicationKey: "delayed-startup",
+    sessionId: "prompt-first", projectId, occurredAt: "2026-08-25T12:01:00.000Z", payload: {}
+  } });
+  const server = await startForegroundRetrievalServer({ ...roots, adapter });
+  try {
+    const request = { runtimeRoot: roots.runtimeRoot, event: "UserPromptSubmit" as const,
+      projectId, sessionId: "prompt-first", prompt: "SQLite WAL",
+      requestedAt: "2026-08-25T12:01:01.000Z" };
+    const first = await requestForegroundRetrieval(request);
+    expect(first.state).toBe("completed");
+    if (first.state !== "completed") throw new Error("First prompt failed.");
+    expect(first.text).toContain("M=memory ref");
+    const background = await runNextShadowEvaluation({ ...roots, adapter, now: "2026-08-25T12:01:02.000Z" });
+    expect(background.state).toBe("completed");
+    const repeated = await requestForegroundRetrieval({ ...request, requestedAt: "2026-08-25T12:01:03.000Z" });
+    expect(repeated).toMatchObject({ state: "empty", reason: "already_present" });
+  } finally { await server.close(); }
+});
+
 test("the foreground server returns bounded SessionStart and UserPrompt packs over a private socket", async () => {
   const roots = await fixture();
   const server = await startForegroundRetrievalServer({ ...roots, adapter });
