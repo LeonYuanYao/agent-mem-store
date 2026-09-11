@@ -469,7 +469,7 @@ test("UserPromptSubmit does not promote an entire project cluster from one share
     {
       suffix: "603",
       body: "ACME tool schemas must remain self-contained and must not reference workspace paths.",
-      applicability: "适用于 ACME Ask AI workspace 工具定义。"
+      applicability: "适用于 ACME assistant workspace 工具定义。"
     },
     {
       suffix: "604",
@@ -478,12 +478,12 @@ test("UserPromptSubmit does not promote an entire project cluster from one share
     },
     {
       suffix: "605",
-      body: "ACME formal evaluation runs from a fixed local Lark JSON snapshot.",
-      applicability: "适用于 acme Ask AI self-optimization 评估。"
+      body: "ACME formal evaluation runs from a fixed local JSON snapshot.",
+      applicability: "适用于 acme assistant self-optimization 评估。"
     },
     {
       suffix: "606",
-      body: "Summarize ACME Use and Preview CLI progress in Chinese and English.",
+      body: "Summarize ACME build and preview CLI progress in Chinese and English.",
       applicability: "适用于总结 ACME KR 进展。"
     }
   ].map((item) => makeCanonicalMemory({

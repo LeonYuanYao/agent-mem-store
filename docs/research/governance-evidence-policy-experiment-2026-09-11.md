@@ -1,5 +1,7 @@
 # Governance evidence policy experiment
 
+> Publication note: Project names, sample identifiers and private repository references are anonymized. Examples are generalized; aggregate measurements and experimental conclusions are unchanged. This is not a new experiment, and private inputs are not distributed with the repository. Sample aliases are report-only labels, not live Memory IDs.
+
 Date: 2026-09-11
 
 ## Decision

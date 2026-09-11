@@ -18,7 +18,7 @@ MemStore will use the user's Obsidian-managed Memory Vault as durable, portable,
 ## Confirmed boundaries
 
 - MemStore Project lives at `AgentScratchpad/MemStore` and contains program artifacts only.
-- Memory Vault currently lives at `<vault-root>` and is the authority for personal memory data.
+- Memory Vault lives at the user-configured `<vault-root>` and is the authority for personal memory data.
 - Personal memory data does not enter the AgentScratchpad Git history by default.
 - The project must not maintain a second authoritative copy of Memory Vault content.
 - Machine-local vault discovery or configuration must be separable from portable project configuration.
