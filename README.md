@@ -150,8 +150,10 @@ The default Runtime is `~/Library/Application Support/MemStore`. Embedding model
 and rebuildable indexes also live under Runtime, outside the Vault. Do not sync
 the live SQLite database or its WAL files through Obsidian.
 
-New installations schedule weekly governance for Monday at 19:00 and monthly
-governance for the first Monday at 19:00, using the fixed `Asia/Shanghai` timezone.
+Incremental governance (internal type `weekly`) runs every three days at 19:00,
+anchored to 2026-09-11. Full governance (internal type `monthly`) runs every Monday
+at 19:00, using the fixed `Asia/Shanghai` timezone. Missed occurrences are coalesced
+for catch-up; restarts do not reset the calendar interval.
 The schedule does not follow travel-related changes to the machine timezone.
 
 Default retention settings in `policy.toml` are:
@@ -398,3 +400,17 @@ for stdout and diagnostics go to stderr.
 
 Do not point development tests at a real Memory Vault. Tests create their own
 operating-system temporary directories.
+
+## Agent and module documentation
+
+Start with [AGENTS.md](AGENTS.md) for development boundaries and validation commands,
+then use the [source map](src/README.md) to find the README for the module you are
+changing. Module guides describe entry points, collaborators, state ownership,
+invariants and focused tests. [CONTEXT.md](CONTEXT.md), [SPEC.md](SPEC.md) and
+[ADRs](docs/adr/) provide terminology, product contracts and design history.
+
+## License
+
+MemStore is licensed under the [MIT License](LICENSE), copyright 2026 Yuan Yao.
+Third-party dependencies and model artifacts retain their respective licenses.
+Your private Vault content is separate from this software license.

@@ -99,7 +99,7 @@ MCP server 提供 `memstore_search`、`memstore_get`、`memstore_provenance`、`
 
 Runtime 默认位于 `~/Library/Application Support/MemStore`。Embedding 模型和可重建索引也保存在 Runtime 中，与 Vault 分离。不要通过 Obsidian 同步正在使用的 SQLite 数据库或其 WAL 文件。
 
-新安装默认按固定的 `Asia/Shanghai` 时区执行治理：每周一 19:00 执行周治理，每月第一个周一 19:00 执行月治理。计划不会跟随出差时机器时区的变化。
+治理按固定的 `Asia/Shanghai` 时区执行：增量治理（内部类型 `weekly`）每 3 天 19:00 执行一次，以 2026-09-11 为日历起点；全量治理（内部类型 `monthly`）每周一 19:00 执行。计划不会跟随出差时机器时区的变化。离线错过的任务会合并补跑，重启不会重置日历周期。
 
 `policy.toml` 中的默认保留设置：
 
@@ -276,3 +276,12 @@ memstore purge-memory M:123 --backup /path/to/verified-vault-backup \
 构建后的可执行入口为 `memstore` 和 `memstore-mcp`。MCP server 读取 `MEMSTORE_VAULT_ROOT` 和 `MEMSTORE_RUNTIME_ROOT`；stdout 专用于协议输出，诊断信息写入 stderr。
 
 **不要将开发测试指向真实的记忆 Vault。** 测试会创建自己的操作系统临时目录。
+
+## Agent 与模块文档
+
+开发前先阅读 [AGENTS.md](AGENTS.md) 中的工作边界和验证命令，再通过[源码地图](src/README.md) 找到所修改模块的 README。模块说明涵盖关键入口、协作关系、数据归属、约束及专项测试；[CONTEXT.md](CONTEXT.md)、[SPEC.md](SPEC.md) 和 [ADR](docs/adr/) 分别提供领域术语、产品约定及设计决策背景。
+
+## 许可证
+
+MemStore 使用 [MIT License](LICENSE)，版权署名为 2026 Yuan Yao。
+第三方依赖和模型文件保留各自的许可证；你私有 Vault 中的知识内容独立于本软件许可证。

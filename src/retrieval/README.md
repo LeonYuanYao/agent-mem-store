@@ -1,0 +1,46 @@
+# Indexing, recall and automatic injection
+
+[Source map](../../src/README.md) · [Agent guide](../../AGENTS.md)
+
+## Responsibility
+
+Builds derived search snapshots, selects relevant memories and serves both explicit recall and automatic hook injection.
+
+## Start here
+
+- [index.ts](index.ts)
+- [snapshot.ts](snapshot.ts)
+- [recall.ts](recall.ts)
+- [packs.ts](packs.ts)
+- [foreground-runtime.ts](foreground-runtime.ts)
+
+## Flow and collaborators
+
+index.ts builds indexes; snapshot.ts loads immutable search data; recall.ts serves explicit search/show/related/provenance; packs.ts ranks and budgets automatic candidates; foreground-* files own worker IPC and execution.
+
+- [embeddings/README.md](embeddings/README.md)
+- [health/README.md](../../src/health/README.md)
+- [configuration/hook-display.ts](../../src/configuration/hook-display.ts)
+- [operations/recall.ts](../../src/operations/recall.ts)
+
+## State and side effects
+
+Writes indexes, receipts, attempt records and irrelevant feedback. index-coordinator.ts handles publication; receipt-retention.ts handles historical receipts. judge.ts owns the explicit retrieval judge; do not move it into every hook call.
+
+## Invariants and change risks
+
+Preserve project scope, lifecycle/working-set eligibility and relevance gates. Automatic hook retrieval has a deadline and cannot block on background extraction. Explicit recall and automatic injection have different budgets and model paths.
+
+## Verification
+
+Run from the repository root:
+
+```sh
+pnpm exec vitest run tests/integration/retrieval tests/fault/automatic-retrieval.test.ts tests/fault/foreground-deadline-cancellation.test.ts tests/contract/progressive-recall.test.ts
+```
+
+Check these test scenarios before changing behavior.
+
+## Design references
+
+Use [CONTEXT.md](../../CONTEXT.md) for domain vocabulary, [SPEC.md](../../SPEC.md) for product contracts and the [ADR directory](../../docs/adr/) for decision history. Update this guide when responsibilities, state ownership or verification paths change.
