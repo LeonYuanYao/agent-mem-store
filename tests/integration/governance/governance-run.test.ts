@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
+import { captureEvent } from "../../../src/capture/index.js";
 
 import {
   initializeGovernanceSchedule,
@@ -30,6 +31,40 @@ function memoryId(): string {
 function revisionId(): string {
   return `msrev_${randomUUID()}`;
 }
+
+test.each([
+  { stopping: false, eventCount: 1, expected: "scheduled" },
+  { stopping: true, eventCount: 1, expected: "deferred" },
+  { stopping: false, eventCount: 64, expected: "deferred" }
+])("weekly governance distinguishes actionable Turn work: $stopping / $eventCount", async ({ stopping, eventCount, expected }) => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-governance-open-turn-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  await initializeGovernanceSchedule({
+    runtimeRoot, timeZone: "UTC", registeredAt: "2026-08-04T00:00:00.000Z"
+  });
+  for (let index = 0; index < eventCount; index += 1) {
+    await captureEvent({ runtimeRoot, event: {
+    schemaVersion: 1, eventId: `open-turn-prompt-${String(index)}`, deduplicationKey: `open-turn-prompt-${String(index)}`,
+    agent: "codex", eventKind: "UserPromptSubmit", sessionId: "open-session",
+    turnId: "open-turn", occurredAt: "2026-08-10T19:00:00.000Z",
+    payload: { prompt: "Continue the long-running task." }
+  }});
+  }
+  if (stopping) {
+    await captureEvent({ runtimeRoot, event: {
+      schemaVersion: 1, eventId: "closed-turn-stop", deduplicationKey: "closed-turn-stop",
+      agent: "codex", eventKind: "Stop", sessionId: "open-session", turnId: "open-turn",
+      occurredAt: "2026-08-10T19:00:30.000Z", payload: {}
+    }});
+  }
+  await expect(scheduleDueGovernance({
+    runtimeRoot, now: "2026-08-10T19:01:00.000Z",
+    workerStartedAt: "2026-08-10T18:00:00.000Z"
+  })).resolves.toMatchObject(expected === "scheduled"
+    ? { state: "scheduled", kind: "weekly" }
+    : { state: "deferred", reason: "foreground_backlog" });
+});
 
 test("weekly governance applies only authorized Agent changes and suggests Human review", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-governance-run-"));

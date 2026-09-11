@@ -44,12 +44,24 @@ const futurePurgeSchema = z.object({
   notBefore: z.iso.datetime(),
   reason: z.string().min(1).max(1024)
 });
+export const governanceDecisionEvidenceSchema = z.object({
+  targetMemoryId: z.string().min(1),
+  kind: z.enum(["archive", "supersede", "mark_review_due", "review_suggestion"]),
+  basis: z.enum(["transient_progress", "explicit_retirement", "reviewed_successor", "concrete_change"]),
+  remainingDurableValue: z.enum(["none", "preserved_by_successor", "still_present"]),
+  citations: z.array(z.object({
+    memoryId: z.string().min(1),
+    revisionId: z.string().min(1),
+    quote: z.string().min(1).max(1024)
+  })).min(1).max(8)
+});
 export const governanceOutputSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal("governance_page_review"),
   agentActions: z.array(governanceAgentActionSchema).max(100),
   reviewSuggestions: z.array(reviewSuggestionSchema).max(100),
   futurePurgeObligations: z.array(futurePurgeSchema).max(100),
+  decisionEvidence: z.array(governanceDecisionEvidenceSchema).max(200).optional(),
   summaryItems: z.array(z.string().min(1).max(240)).max(16)
 });
 
@@ -58,9 +70,13 @@ export const governanceOutputJsonSchema = {
   additionalProperties: false,
   required: [
     "schemaVersion", "kind", "agentActions", "reviewSuggestions",
-    "futurePurgeObligations", "summaryItems"
+    "futurePurgeObligations", "summaryItems", "decisionEvidence"
   ],
   properties: {
+    decisionEvidence: {
+      type: "array", maxItems: 200,
+      items: z.toJSONSchema(governanceDecisionEvidenceSchema)
+    },
     schemaVersion: { type: "integer", const: 1 },
     kind: { type: "string", const: "governance_page_review" },
     agentActions: {

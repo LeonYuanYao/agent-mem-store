@@ -73,8 +73,8 @@ const policySchema = z.object({
   injection: extensibleSectionSchema,
   governance: z.object({
     timezone: z.string().min(1),
-    weekly: z.literal("MONDAY 19:00"),
-    monthly: z.literal("FIRST_MONDAY 19:00")
+    weekly: z.enum(["MONDAY 19:00", "EVERY_3_DAYS 19:00"]).transform(() => "EVERY_3_DAYS 19:00" as const),
+    monthly: z.enum(["FIRST_MONDAY 19:00", "MONDAY 19:00"]).transform(() => "MONDAY 19:00" as const)
   }),
   review: extensibleSectionSchema,
   anomalies: extensibleSectionSchema,
@@ -119,8 +119,8 @@ export interface LoadedConfiguration {
     readonly sensitivityMetadataDays: number;
     readonly injectionReceiptDays: number;
     readonly governanceTimezone: string;
-    readonly weeklyGovernance: "MONDAY 19:00";
-    readonly monthlyGovernance: "FIRST_MONDAY 19:00";
+    readonly weeklyGovernance: "EVERY_3_DAYS 19:00";
+    readonly monthlyGovernance: "MONDAY 19:00";
     readonly memoryCapacity: {
       readonly project: {
         readonly target: number;

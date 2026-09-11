@@ -103,8 +103,8 @@ test("initialization creates separate portable and machine configuration", async
       sensitivityMetadataDays: 15,
       injectionReceiptDays: 30,
       governanceTimezone: "Asia/Shanghai",
-      weeklyGovernance: "MONDAY 19:00",
-      monthlyGovernance: "FIRST_MONDAY 19:00",
+      weeklyGovernance: "EVERY_3_DAYS 19:00",
+      monthlyGovernance: "MONDAY 19:00",
       memoryCapacity: {
         project: { target: 2_500, hardLimit: 3_500, lowWater: 2_200 },
         global: { target: 300, hardLimit: 500, lowWater: 270 },

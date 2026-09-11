@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import { enforceGovernanceDecisionPolicy, governancePolicyInputSchema } from "./decision-policy.js";
+import { completePageEvidence } from "./page-evidence.js";
 
 import { LunaInvocationError } from "../luna/index.js";
 import {
@@ -91,7 +93,8 @@ function memoryInput(memory: CanonicalMemory): GovernanceMemoryInput {
 async function loadAuditSignals(
   runtimeRoot: string,
   from: string,
-  through: string
+  through: string,
+  pageMemoryIds: readonly string[]
 ): Promise<GovernanceAuditSignals> {
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
@@ -138,8 +141,9 @@ async function loadAuditSignals(
       duplicateMap.set(key, ids);
     }
     const exactDuplicateGroups = [...duplicateMap.values()]
-      .filter((ids) => ids.length > 1)
+      .filter((ids) => ids.length > 1 && ids.some(id => pageMemoryIds.includes(id)))
       .slice(0, 100);
+    const pageSlots = pageMemoryIds.map(() => "?").join(",");
     const reviewedDuplicateClusters = database.prepare(
       `SELECT cluster.cluster_id, cluster.left_memory_id, cluster.right_memory_id,
               cluster.decision, cluster.reason_code
@@ -153,8 +157,9 @@ async function loadAuditSignals(
          AND left_memory.current_revision_id = cluster.left_revision_id
          AND right_memory.current_revision_id = cluster.right_revision_id
          AND left_memory.lifecycle = 'active' AND right_memory.lifecycle = 'active'
+         AND (cluster.left_memory_id IN (${pageSlots}) OR cluster.right_memory_id IN (${pageSlots}))
        ORDER BY cluster.completed_at DESC, cluster.cluster_id LIMIT 100`
-    ).all().map((row) => ({
+    ).all(...pageMemoryIds, ...pageMemoryIds).map((row) => ({
       clusterId: z.string().parse(row.cluster_id),
       memoryIds: [
         z.string().parse(row.left_memory_id),
@@ -515,7 +520,21 @@ async function applyReviewedCheckpoint(request: {
   if (sha256(outputSource) !== request.checkpoint.output_sha256) {
     throw new Error("Governance checkpoint output integrity check failed.");
   }
-  const review = governanceOutputSchema.parse(JSON.parse(outputSource));
+  const parsedReview = governanceOutputSchema.parse(JSON.parse(outputSource));
+  const frozenInput = governancePolicyInputSchema.parse(JSON.parse(z.string().parse(request.checkpoint.input_json)));
+  const currentRevisions = new Map<string, string>();
+  if (parsedReview.decisionEvidence !== undefined) {
+    const evidenceDatabase = await openRuntimeDatabase(request.runtimeRoot);
+    try {
+      const lookup = evidenceDatabase.prepare("SELECT current_revision_id FROM memory_catalog WHERE memory_id = ?");
+      for (const memory of frozenInput.memories) {
+        const row = lookup.get(memory.memoryId);
+        if (typeof row?.current_revision_id === "string") currentRevisions.set(memory.memoryId, row.current_revision_id);
+      }
+    } finally { evidenceDatabase.close(); }
+  }
+  const review = parsedReview.decisionEvidence === undefined ? parsedReview :
+    enforceGovernanceDecisionPolicy(frozenInput, parsedReview, currentRevisions);
   for (const [index, action] of review.agentActions.entries()) {
     await applyAgentAction({
       runtimeRoot: request.runtimeRoot,
@@ -532,6 +551,20 @@ async function applyReviewedCheckpoint(request: {
     database.exec("BEGIN IMMEDIATE");
     try {
       for (const [index, suggestion] of review.reviewSuggestions.entries()) {
+        const proof = review.decisionEvidence?.find(item =>
+          item.kind === "review_suggestion" && item.targetMemoryId === suggestion.targetMemoryId);
+        const evidenceRefs = proof === undefined ? suggestion.evidenceRefs :
+          [...proof.citations.map(item => `${item.memoryId}@${item.revisionId}`),
+            ...frozenInput.memories.filter(memory => memory.memoryId === suggestion.targetMemoryId)
+              .map(memory => `target:${memory.memoryId}@${memory.revisionId}`)].sort();
+        const evidenceSource = JSON.stringify([...new Set(evidenceRefs)]);
+        // The same revision evidence must not create another reminder each month,
+        // including after a user dismissed or accepted the previous suggestion.
+        const existing = database.prepare(
+          `SELECT suggestion_id FROM governance_review_suggestions
+           WHERE target_memory_id = ? AND suggestion_kind = ? AND evidence_refs_json = ? LIMIT 1`
+        ).get(suggestion.targetMemoryId, suggestion.kind, evidenceSource);
+        if (existing !== undefined) continue;
         const actionKey = sha256(`${request.run.runId}:${checkpointId}:review:${String(index)}:${JSON.stringify(suggestion)}`);
         const suggestionId = `msgovsuggest_${randomUUID()}`;
         database.prepare(
@@ -541,7 +574,7 @@ async function applyReviewedCheckpoint(request: {
            ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?)`
         ).run(
           suggestionId, request.run.runId, suggestion.targetMemoryId,
-          suggestion.kind, suggestion.reason, JSON.stringify(suggestion.evidenceRefs), request.now
+          suggestion.kind, suggestion.reason, evidenceSource, request.now
         );
         database.prepare(
           `INSERT OR IGNORE INTO governance_actions(
@@ -771,8 +804,41 @@ export async function runNextGovernanceStep(request: {
     const from = run.currentPhase === "weekly" ? run.weeklyFrom : run.monthlyFrom;
     if (from === null) throw new Error("Governance phase has no coverage start.");
     const auditSignals = run.currentPhase === "monthly"
-      ? await loadAuditSignals(request.runtimeRoot, from, run.coverageThrough)
+      ? await loadAuditSignals(request.runtimeRoot, from, run.coverageThrough, memories.map(memory => memory.memoryId))
       : undefined;
+    let completedPage = { memories, auditSignals };
+    if (auditSignals !== undefined) {
+      const evidenceDatabase = await openRuntimeDatabase(request.runtimeRoot);
+      try {
+        const frozen = evidenceDatabase.prepare(
+          `SELECT member.revision_id FROM governance_run_members AS member
+           JOIN memory_catalog AS catalog ON catalog.memory_id = member.memory_id
+           WHERE member.run_id = ? AND member.phase = 'monthly' AND member.memory_id = ?
+             AND member.revision_id = catalog.current_revision_id AND catalog.lifecycle = 'active'`
+        );
+        // Filter stale base revisions too: current cluster conclusions must not
+        // be applied to a different frozen revision of the same identity.
+        const current = (id: string): string | undefined => {
+          const row = frozen.get(run.runId, id);
+          return typeof row?.revision_id === "string" ? row.revision_id : undefined;
+        };
+        const usable = (ids: readonly string[]): boolean => ids.every(id => {
+          const revision = current(id);
+          const base = memories.find(memory => memory.memoryId === id);
+          return revision !== undefined && (base === undefined || base.revisionId === revision);
+        });
+        completedPage = await completePageEvidence(memories, {
+          ...auditSignals,
+          exactDuplicateGroups: auditSignals.exactDuplicateGroups.filter(usable),
+          reviewedDuplicateClusters: auditSignals.reviewedDuplicateClusters.filter(cluster => usable(cluster.memoryIds))
+        }, async id => {
+          const revisionId = current(id);
+          if (revisionId === undefined) return undefined;
+          const result = await readCanonicalRevision({ runtimeRoot: request.runtimeRoot, vaultRoot: request.vaultRoot, memoryId: id, revisionId });
+          return result === undefined ? undefined : memoryInput(result.memory);
+        });
+      } finally { evidenceDatabase.close(); }
+    }
     preparedInput = {
       source: JSON.stringify({
         schemaVersion: 1,
@@ -781,8 +847,8 @@ export async function runNextGovernanceStep(request: {
         phase: run.currentPhase,
         coverage: { from, through: run.coverageThrough },
         pageOrdinal,
-        memories,
-        ...(auditSignals === undefined ? {} : { auditSignals })
+        memories: completedPage.memories,
+        ...(completedPage.auditSignals === undefined ? {} : { auditSignals: completedPage.auditSignals })
       } satisfies GovernancePageRequest),
       lastMemoryId: z.string().parse(memories.at(-1)?.memoryId)
     };

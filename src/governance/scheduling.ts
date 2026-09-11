@@ -3,6 +3,7 @@ import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
 
 import { openRuntimeDatabase } from "../runtime/database.js";
+import { distillationBatchReady } from "../worker/distillation.js";
 
 const cadenceSchema = z.enum(["weekly", "monthly"]);
 type Cadence = z.infer<typeof cadenceSchema>;
@@ -66,7 +67,7 @@ function instantIso(value: Temporal.Instant): string {
   return new Date(value.epochMilliseconds).toISOString();
 }
 
-function dueOccurrences(
+export function dueOccurrences(
   cadence: Cadence,
   fromExclusive: string,
   throughInclusive: string,
@@ -79,8 +80,14 @@ function dueOccurrences(
   const due: string[] = [];
   while (Temporal.PlainDate.compare(date, lastDate) <= 0) {
     const firstMonday = date.dayOfWeek === 1 && date.day <= 7;
-    const cadenceMatches = date.dayOfWeek === 1 &&
-      (cadence === "weekly" || firstMonday);
+    // Preserve historical obligations before the cadence change. A fixed calendar
+    // anchor keeps restarts and delayed completion from shifting the schedule.
+    const anchor = Temporal.PlainDate.from("2026-09-11");
+    const cadenceMatches = Temporal.PlainDate.compare(date, anchor) < 0
+      ? date.dayOfWeek === 1 && (cadence === "weekly" || firstMonday)
+      : cadence === "monthly"
+        ? date.dayOfWeek === 1
+        : anchor.until(date, { largestUnit: "days" }).days % 3 === 0;
     if (cadenceMatches) {
       const occurrence = date.toZonedDateTime({
         timeZone,
@@ -152,6 +159,14 @@ export async function scheduleDueGovernance(request: {
     if (pendingObligation === undefined && !occurrenceIsDue) {
       return { state: "idle" };
     }
+    // Open Turns intentionally retain pending events until a batching boundary.
+    // Only actionable capture work should defer a new governance run.
+    const readyCaptureBatch = await distillationBatchReady({
+      runtimeRoot: request.runtimeRoot,
+      preparedAt: now,
+      maximumEvents: 64,
+      minimumEventAgeMilliseconds: 30_000
+    });
     database.exec("BEGIN IMMEDIATE");
     try {
       const schedule = database.prepare(
@@ -202,13 +217,13 @@ export async function scheduleDueGovernance(request: {
       }
       const captureBacklog = database.prepare(
         `SELECT 1 FROM capture_events
-         WHERE state IN ('pending', 'processing', 'retrying') LIMIT 1`
+         WHERE state IN ('processing', 'retrying') LIMIT 1`
       ).get();
       const indexBacklog = database.prepare(
         `SELECT 1 FROM retrieval_index_build_activity
          WHERE singleton = 1 AND state = 'building' AND lease_until > ?`
       ).get(now);
-      if (indexBacklog !== undefined || captureBacklog !== undefined) {
+      if (indexBacklog !== undefined || captureBacklog !== undefined || readyCaptureBatch) {
         database.exec("COMMIT");
         return { state: "deferred", reason: "foreground_backlog" };
       }

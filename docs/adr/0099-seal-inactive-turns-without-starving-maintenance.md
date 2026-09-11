@@ -18,6 +18,18 @@ distillation Batch, an active Luna operation, or an active Governance Run.
 Recent pending events that are still waiting for `Stop` do not indefinitely
 block a due quality or duplicate scan.
 
+Governance startup follows the same actionable-work boundary. Pending events
+inside an open Turn do not defer a due run until the existing distillation
+eligibility check reports a ready Batch. Processing/retrying Capture Events
+and an active index build still defer startup. This does not seal the Turn,
+discard events, or change the governance coverage cursor before completion.
+
+The September 2026 manual weekly run exposed the previous inconsistency:
+governance startup required every pending event to disappear, even while the
+Worker deliberately retained an unfinished Turn. Apparent queue inactivity
+therefore did not establish that the Worker was hung. Regression coverage
+distinguishes an open Turn from a Stop-sealed or 64-event Batch.
+
 ---
 status: accepted
 ---

@@ -3,6 +3,7 @@ import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
+import { enforceGovernanceDecisionPolicy } from "../governance/decision-policy.js";
 
 import {
   governanceOutputJsonSchema,
@@ -1564,19 +1565,24 @@ export class CodexLunaAdapter {
   public async reviewPage(
     request: GovernancePageRequest
   ): Promise<GovernancePageReview> {
-    return this.#invokeStructured(
+    const review = await this.#invokeStructured(
       "governance-page-output.schema.json",
       governanceOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 3,
+        promptVersion: 4,
         task: "review_memory_governance_page",
         rules: [
           "Use only the frozen Memory revisions and audit signals supplied in this page.",
-          "Never propose an Agent action against Human-authored Memory; use a Review Suggestion instead.",
+          "Never propose an Agent action against Human-authored Memory. A Review Suggestion requires a concrete new contradictory or changed fact; missing repository corroboration does not require human reconfirmation.",
           "Archive Agent-derived Memory when its own body and provenance establish that it is an operational probe, exact-response check, temporary progress or current run state rather than reusable knowledge; cite those supplied fields as evidence.",
-          "Do not preserve a time-bound status as a timeless fact. Archive an intrinsically transient Agent-derived status; use a Review Suggestion for Human-authored content or when staleness is only suspected.",
-          "Use mark_review_due for an otherwise durable Agent-derived Memory whose current correctness is time-sensitive or plausibly outdated but not disproven; this removes it from automatic injection while preserving explicit identity reads with a warning.",
+          "A report listing checks completed and checks not yet executed for one configuration/run is transient_progress when it contains no reusable method, constraint or confirmed incompatibility. An unfinished verification is not a durable failure diagnosis. An applicability clause such as until validation completes does not by itself give such a progress report durable value.",
+          "Do not preserve a time-bound status as a timeless fact. Distinguish one-off execution progress from reusable conditional architecture, configuration, versions, ports and constraints. The words current or currently never establish transience. Preserve mixed progress plus durable obligations rather than archiving the whole Memory.",
+          "Use mark_review_due only when another supplied Memory provides a concrete changed fact or contradiction affecting this claim. Possible future changes, age, version numbers, missing verification, scan count or zero retrieval are insufficient. Without new evidence retain the existing state. Never mark an existing review_due again.",
+          "Every archive, supersede, mark_review_due and Review Suggestion requires exactly one matching decisionEvidence record with targetMemoryId, kind, basis, remainingDurableValue, and exact body quotes bound to supplied memoryId/revisionId. Do not invent references or quote applicability as body.",
+          "Archive basis transient_progress requires no remaining durable value and a quote from the target proving a one-off probe/check/progress report. Conditional architecture is still durable. Archive basis explicit_retirement requires a quote from another same-scope Memory explicitly withdrawing or retiring the claim, with no remaining durable value.",
+          "Supersede basis reviewed_successor requires a current reviewedDuplicateClusters or exactDuplicateGroups match and preserved_by_successor value. mark_review_due and Review Suggestions require concrete_change with a quote from another same-scope Memory. A merely similar or unrelated quote is not evidence of change. Explain in reason what changed and what durable conditions remain.",
+          "Monthly full scans use the same evidence threshold as weekly scans. Audit counts, repeated reviews and model health do not establish that an individual claim is obsolete. Do not create reminders merely because Human knowledge cannot be verified from code.",
           "Prefer one condition-preserving successor when Agent-derived Memories in the same scope and applicability materially duplicate each other; supersede weaker duplicates without broadening the retained claim.",
           "For non-exact semantic duplicate, subsumption, or conflict decisions, act only when auditSignals includes a current reviewedDuplicateClusters entry; do not infer a cluster from similarity alone.",
           "Otherwise archive or supersede Agent-derived Memory only with stronger traceable evidence while preserving scope and applicability.",
@@ -1592,6 +1598,7 @@ export class CodexLunaAdapter {
       },
       governanceOutputSchema
     );
+    return enforceGovernanceDecisionPolicy(request, review);
   }
 
   async #invokeStructured<Output>(

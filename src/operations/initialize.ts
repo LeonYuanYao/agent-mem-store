@@ -124,8 +124,8 @@ export async function initializeMemStore(
     injection: {},
     governance: {
       timezone,
-      weekly: "MONDAY 19:00",
-      monthly: "FIRST_MONDAY 19:00"
+      weekly: "EVERY_3_DAYS 19:00",
+      monthly: "MONDAY 19:00"
     },
     review: {},
     anomalies: {},
