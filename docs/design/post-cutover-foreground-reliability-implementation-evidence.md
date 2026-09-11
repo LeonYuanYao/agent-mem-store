@@ -4,7 +4,7 @@ Status: ready for Implementation Evidence Review on 2026-08-26. Activation is no
 
 ## Reviewed source state
 
-- Base commit: `reliability-baseline-2026-08-26`
+- Historical baseline label (not a Git reference): `reliability-baseline-2026-08-26`
 - Branch: `main`, one pre-existing commit ahead of `origin/main`
 - Implementation state: uncommitted working-tree diff; no commit or push was authorized
 - Migration 0050 SHA-256: `650a13ebd312e6413e3dee5ee035fbf1f470f61e5c1b6c87a1aaf73f6feb57eb`

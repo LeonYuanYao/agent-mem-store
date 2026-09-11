@@ -7,9 +7,10 @@ changed while preparing this package.
 
 ## Execution record
 
-The Human approved Gate 6 on 2026-08-25. Program commit
+The Human approved Gate 6 on 2026-08-25. The program snapshot labeled
 `cutover-baseline-2026-08-25` was pushed to `origin/main`, the
 Worker restarted onto that build, and `doctor --deep` passed before activation.
+The label identifies the historical baseline; it is not a Git reference.
 The approved digest remained unchanged, so the single Cutover activated at
 `2026-08-25T22:08:54.636Z`.
 

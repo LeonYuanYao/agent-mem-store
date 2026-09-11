@@ -73,7 +73,7 @@ Managed Agents 需要 API key；会在服务端持有会话、状态和输出，
 
 ## 6. MemStore 已有能力与实际缺口
 
-检查基线：`main`，commit `dreaming-baseline-2026-09-10`。以下为代码检查，不是本轮线上质量测试。
+检查基线：当时的 `main`，以 `dreaming-baseline-2026-09-10` 标识该历史快照（非 Git 引用）。以下为代码检查，不是本轮线上质量测试。
 
 | 能力 | 当前实现 | 对 Dreaming 的意义 |
 | --- | --- | --- |
