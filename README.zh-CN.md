@@ -20,7 +20,7 @@ MemStore 是面向 coding agent 的长期记忆系统，采用程序与数据分
 将 MemStore 克隆到长期保留的固定路径，然后预览安装：
 
 ```sh
-git clone https://github.com/LeonYuanYao/AMemStore.git ~/Applications/MemStore
+git clone https://github.com/LeonYuanYao/agent-mem-store.git ~/Applications/MemStore
 cd ~/Applications/MemStore
 ./install.sh
 ```

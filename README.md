@@ -30,7 +30,7 @@ separate. Use `memstore status` and `memstore doctor --deep` for live inspection
 Clone MemStore into a path that will remain stable, then ask it for a preview:
 
 ```sh
-git clone https://github.com/LeonYuanYao/AMemStore.git ~/Applications/MemStore
+git clone https://github.com/LeonYuanYao/agent-mem-store.git ~/Applications/MemStore
 cd ~/Applications/MemStore
 ./install.sh
 ```
