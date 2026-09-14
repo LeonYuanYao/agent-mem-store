@@ -76,6 +76,18 @@ export function admittedOutput<T extends DistillationOutput | ConsolidationOutpu
   };
 }
 
+/** Consolidation spans many batches; the admission bound applies to each page. */
+export function admittedConsolidationPages(output: ConsolidationOutput): ConsolidationOutput[] {
+  const pages: ConsolidationOutput[] = [];
+  for (let offset = 0; offset < output.candidates.length; offset += maximumAdmittedCandidates) {
+    pages.push(admittedOutput({
+      ...output,
+      candidates: output.candidates.slice(offset, offset + maximumAdmittedCandidates)
+    }));
+  }
+  return pages;
+}
+
 export async function recordAdmissionAudit(request: {
   readonly runtimeRoot: string;
   readonly operationId: string;

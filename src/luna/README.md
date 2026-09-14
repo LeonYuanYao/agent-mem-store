@@ -27,6 +27,8 @@ Spawns Codex and uses isolated runtime work files; operation records live in SQL
 
 Keep background calls isolated from workspace instructions, hooks and recursive MemStore capture. Do not silently change model, reasoning or service tier. Preserve schema validation and distinguish invocation failure from a valid empty result.
 
+The exported consolidation output schema also validates the Worker's saved model checkpoint. Its 128-clause model-response bound is distinct from the Worker's final result, which may additionally contain locally restored priority Candidates and is admitted in pages.
+
 ## Verification
 
 Run from the repository root:

@@ -29,6 +29,101 @@ afterEach(async () => {
   );
 });
 
+test.each([false, true])("a long Session admits more than 64 protected clauses (interrupted: %s)", async (interrupted) => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-long-admission-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const sessionId = "long-admission-session";
+  for (let index = 0; index < 66; index += 1) {
+    for (const eventKind of ["UserPromptSubmit", "Stop"] as const) {
+      await captureEvent({ runtimeRoot, event: {
+        schemaVersion: 1, eventId: `msevent_long_${String(index)}_${eventKind}`,
+        deduplicationKey: `long:${String(index)}:${eventKind}`, agent: "codex", eventKind,
+        occurredAt: "2026-09-10T01:00:00.000Z", projectId: "msproj_long_admission",
+        sessionId, turnId: `turn-${String(index)}`,
+        payload: eventKind === "UserPromptSubmit"
+          ? { prompt: `Preserve durable project rule ${String(index)}.` }
+          : { assistantMessage: "Acknowledged." }
+      } });
+    }
+  }
+  await captureEvent({ runtimeRoot, event: {
+    schemaVersion: 1, eventId: "msevent_long_end", deduplicationKey: "long:end",
+    agent: "codex", eventKind: "SessionEnd", occurredAt: "2026-09-10T01:01:00.000Z",
+    projectId: "msproj_long_admission", sessionId, payload: { reason: "other" }
+  } });
+  const consolidateSession = vi.fn<LunaWorkerAdapter["consolidateSession"]>((request) => {
+    const first = request.batchResults.flatMap((batch) => batch.candidates)[0];
+    if (first === undefined) throw new Error("Expected durable inputs.");
+    return Promise.resolve({ schemaVersion: 1, kind: "consolidation", candidates: [first] });
+  });
+  const adapter: LunaWorkerAdapter = {
+    distillBatch(request) {
+      return Promise.resolve({ schemaVersion: 1, kind: "distillation",
+        candidates: request.evidence.filter((item) => item.evidenceClass === "explicit_user_statement")
+          .map((item) => ({
+            statement: `Durable rule for ${item.evidenceId}.`, primaryCategory: "preference_constraint",
+            categoryTags: ["preference_constraint"], applicabilitySummary: "future project work",
+            conditions: [], exclusions: [], preservedNegations: [], certainty: "asserted",
+            sensitivity: "normal", evidenceIds: [item.evidenceId],
+            retentionDecision: "long_term", durability: makeLongTermCandidateDurability(),
+            importanceTags: [], importanceReasons: []
+          }))
+      });
+    },
+    consolidateSession
+  };
+  for (let index = 0; index < 3; index += 1) {
+    await expect(prepareNextDistillationBatch({ runtimeRoot, maximumEvents: 64,
+      preparedAt: "2026-09-10T01:02:00.000Z" })).resolves.toMatchObject({ state: "queued" });
+    await expect(runNextLunaWork({ runtimeRoot, workerId: "long-worker", adapter,
+      currentTime: () => "2026-09-10T01:03:00.000Z",
+      now: "2026-09-10T01:03:00.000Z" })).resolves.toMatchObject({ state: "completed" });
+  }
+  if (interrupted) {
+    const database = await openRuntimeDatabase(runtimeRoot);
+    try {
+      database.exec(`CREATE TRIGGER interrupt_candidate_ingestion
+        BEFORE INSERT ON memory_candidates
+        WHEN (SELECT COUNT(*) FROM memory_candidates) >= 64
+        BEGIN SELECT RAISE(FAIL, 'Injected admission interruption'); END`);
+    } finally {
+      database.close();
+    }
+    await expect(runNextLunaWork({ runtimeRoot, workerId: "long-worker", adapter,
+      currentTime: () => "2026-09-10T01:04:00.000Z",
+      now: "2026-09-10T01:04:00.000Z" })).resolves.toMatchObject({ state: "retrying" });
+    await expect(listSessionCandidates(runtimeRoot, sessionId)).resolves.toHaveLength(64);
+    const recoveryDatabase = await openRuntimeDatabase(runtimeRoot);
+    try {
+      expect(recoveryDatabase.prepare(
+        "SELECT COUNT(*) AS count FROM session_distillation_cursors WHERE session_id = ?"
+      ).get(sessionId)?.count).toBe(0);
+      recoveryDatabase.exec("DROP TRIGGER interrupt_candidate_ingestion");
+    } finally {
+      recoveryDatabase.close();
+    }
+  }
+  await expect(runNextLunaWork({ runtimeRoot, workerId: "long-worker", adapter,
+    currentTime: () => "2026-09-10T02:05:00.000Z",
+    now: "2026-09-10T02:05:00.000Z" })).resolves.toMatchObject({ state: "completed" });
+  await expect(listSessionCandidates(runtimeRoot, sessionId)).resolves.toHaveLength(66);
+  expect(consolidateSession).toHaveBeenCalledTimes(1);
+  const completedDatabase = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(completedDatabase.prepare(
+      "SELECT COUNT(*) AS count FROM session_distillation_cursors WHERE session_id = ?"
+    ).get(sessionId)?.count).toBe(1);
+    const result = completedDatabase.prepare(
+      "SELECT state, result_json FROM session_consolidations WHERE session_id = ?"
+    ).get(sessionId);
+    expect(result?.state).toBe("completed");
+    expect(String(result?.result_json)).not.toContain("consolidation_model_checkpoint");
+  } finally {
+    completedDatabase.close();
+  }
+});
+
 test("a long Session is distilled in batches and consolidated from structured results", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-distillation-"));
   temporaryDirectories.push(root);

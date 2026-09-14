@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
-import { admittedOutput, recordAdmissionAudit } from "../admission/audit.js";
+import { admittedOutput, admittedConsolidationPages, recordAdmissionAudit } from "../admission/audit.js";
 import { readCapturedEvent } from "../capture/index.js";
 import { createAgentCandidate } from "../candidates/index.js";
 import { recordHumanGlobalAuthorization } from "../candidates/human.js";
 import {
   LunaInvocationError,
+  consolidationOutputSchema,
   type DistillBatchRequest,
   type ConsolidateSessionRequest,
   type ConsolidationOutput,
@@ -1331,15 +1332,17 @@ export async function runNextLunaWork(request: {
       let batchRows: readonly Record<string, unknown>[];
       let consolidationGeneration: number;
       let throughBatchOrdinal: number;
+      let savedResult: unknown;
       try {
         const consolidation = database.prepare(
-          `SELECT session_id, generation, from_batch_ordinal, through_batch_ordinal
+          `SELECT session_id, generation, from_batch_ordinal, through_batch_ordinal, result_json
            FROM session_consolidations WHERE operation_id = ?`
         ).get(operation.operationId);
         if (consolidation === undefined || consolidation.session_id !== payload.sessionId) {
           throw new Error("Consolidation range is unavailable.");
         }
         consolidationGeneration = z.number().int().positive().parse(consolidation.generation);
+        savedResult = consolidation.result_json;
         const fromBatchOrdinal = z.number().int().nonnegative().parse(
           consolidation.from_batch_ordinal
         );
@@ -1373,8 +1376,37 @@ export async function runNextLunaWork(request: {
         sessionId: payload.sessionId,
         batchResults
       } satisfies ConsolidateSessionRequest;
-      const modelOutput = await request.adapter.consolidateSession(batchResultsRequest);
-      const completedAt = z.iso.datetime().parse(currentTime());
+      const inputSha256 = createHash("sha256").update(JSON.stringify(batchResultsRequest)).digest("hex");
+      const checkpointSchema = z.object({
+        kind: z.literal("consolidation_model_checkpoint"),
+        inputSha256: z.literal(inputSha256),
+        completedAt: z.iso.datetime(),
+        output: consolidationOutputSchema
+      });
+      const checkpoint = savedResult === null
+        ? checkpointSchema.parse({
+          kind: "consolidation_model_checkpoint",
+          inputSha256,
+          output: await request.adapter.consolidateSession(batchResultsRequest),
+          completedAt: currentTime()
+        })
+        : checkpointSchema.parse(JSON.parse(z.string().parse(savedResult)));
+      if (savedResult === null) {
+        const checkpointDatabase = await openRuntimeDatabase(request.runtimeRoot);
+        try {
+          const saved = checkpointDatabase.prepare(
+            `UPDATE session_consolidations SET result_json = ?
+             WHERE operation_id = ? AND EXISTS (
+               SELECT 1 FROM luna_operations
+               WHERE operation_id = ? AND state = 'processing' AND lease_token = ?
+             )`
+          ).run(JSON.stringify(checkpoint), operation.operationId, operation.operationId, claimed.leaseToken);
+          if (saved.changes !== 1) throw new Error("Consolidation checkpoint lease is no longer owned.");
+        } finally {
+          checkpointDatabase.close();
+        }
+      }
+      const modelOutput = checkpoint.output;
       const sessionEvidence = (
         await Promise.all(
           batchRows.map((row) =>
@@ -1394,20 +1426,25 @@ export async function runNextLunaWork(request: {
         sourceId: payload.sessionId,
         candidates: output.candidates,
         promptVersion: 6,
-        createdAt: completedAt
+        createdAt: checkpoint.completedAt
       });
-      const admitted = admittedOutput(output);
+      const pages = admittedConsolidationPages(output);
+      const admitted: ConsolidationOutput = {
+        ...output,
+        candidates: pages.flatMap((page) => page.candidates)
+      };
       const projectIds = new Set(
         sessionEvidence.flatMap((item) => item.projectId === null ? [] : [item.projectId])
       );
-      await ingestDistilledCandidates({
+      for (const page of pages) await ingestDistilledCandidates({
         runtimeRoot: request.runtimeRoot,
         sessionId: payload.sessionId,
         projectId: projectIds.size === 1 ? [...projectIds][0] ?? null : null,
-        output: admitted,
+        output: page,
         evidence: sessionEvidence.flatMap((item) => item.evidence),
-        createdAt: completedAt
+        createdAt: checkpoint.completedAt
       });
+      const completedAt = z.iso.datetime().parse(currentTime());
       const updateDatabase = await openRuntimeDatabase(request.runtimeRoot);
       try {
         updateDatabase.exec("BEGIN IMMEDIATE");

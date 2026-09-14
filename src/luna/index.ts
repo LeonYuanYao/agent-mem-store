@@ -494,7 +494,7 @@ const distillationOutputJsonSchema = {
   }
 } as const;
 
-const consolidationOutputSchema = z.object({
+export const consolidationOutputSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal("consolidation"),
   candidates: z.array(durableCandidateOutputSchema).max(maximumRawAdmissionClauses),

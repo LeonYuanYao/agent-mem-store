@@ -12,7 +12,7 @@ Classifies model output before Candidate creation; records why statements were a
 
 ## Flow and collaborators
 
-classifyAdmission / admittedOutput filter distillation and consolidation output; recordAdmissionAudit persists the bounded audit trail.
+classifyAdmission / admittedOutput filter model output; admittedConsolidationPages applies the same rules to Session output in pages of at most 64. recordAdmissionAudit persists one bounded audit trail for the whole operation.
 
 - [worker/distillation.ts](../../src/worker/distillation.ts)
 - [luna/index.ts](../../src/luna/index.ts)
@@ -25,6 +25,8 @@ Admission audit rows live in runtime SQLite and have their own retention. Sensit
 ## Invariants and change risks
 
 Session-only and no-memory statements are rejected; uncertain statements are isolated. Task observations are not durable merely because the model labels them long-term. Admission does not grant promotion or Human authority.
+
+The 64-Candidate distillation limit remains enforced. Consolidation can span many Batches and restore omitted priority Candidates; its total is not limited to 64. Preserve all qualifying clauses through paged ingestion.
 
 ## Verification
 
