@@ -69,6 +69,33 @@ test("a non-empty body-free digest is delivered, snoozed, and acknowledged durab
     reminderId: prepared.reminderId,
     acknowledgedAt: "2026-08-17T11:02:00.000Z"
   })).resolves.toEqual({ state: "acknowledged", reminderId: prepared.reminderId });
+  // macOS may deliver the same response again; opening twice is not a failure.
+  await expect(acknowledgeReminder({
+    runtimeRoot,
+    reminderId: prepared.reminderId,
+    acknowledgedAt: "2026-08-17T11:03:00.000Z"
+  })).resolves.toEqual({ state: "acknowledged", reminderId: prepared.reminderId });
+});
+
+test("a fast notification click is preserved before delivery bookkeeping finishes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-fast-reminder-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const database = await openRuntimeDatabase(runtimeRoot);
+  database.prepare(`INSERT INTO reminder_obligations(
+    reminder_id,digest_key,state,counts_json,issue_categories_json,inbox_path,due_at,created_at,updated_at
+  ) VALUES ('msreminder_fast','fast','pending','{}','[]','/vault/_MemStore/Review Inbox.md',?,?,?)`)
+    .run("2026-08-08T02:00:00.000Z", "2026-08-08T02:00:00.000Z", "2026-08-08T02:00:00.000Z");
+  database.close();
+  await dispatchNextReminder({ runtimeRoot, now: "2026-08-08T02:01:00.000Z", notifier: {
+    async deliver() {
+      await snoozeReminder({ runtimeRoot, reminderId: "msreminder_fast", snoozedAt: "2026-08-08T02:01:01.000Z" });
+      return { state: "delivered", receipt: "test:delivery" };
+    }
+  } });
+  const inspected = await openRuntimeDatabase(runtimeRoot);
+  expect(inspected.prepare("SELECT state FROM reminder_obligations WHERE reminder_id='msreminder_fast'").get()?.state).toBe("snoozed");
+  inspected.close();
 });
 
 test("an empty Inbox creates no reminder obligation", async () => {

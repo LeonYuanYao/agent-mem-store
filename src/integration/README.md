@@ -27,6 +27,8 @@ Writes host configuration and managed files, and can control launch services. Te
 
 Never overwrite unmanaged user configuration merely to make installation pass. Preserve preview-first behavior and divergence detection. Installing, enabling active injection and changing native memory are explicit operations.
 
+`integration upgrade` can update the owned CLI and the notifier executable, Info.plist and signature resources from the supplied built app. It compares current bytes with the ownership manifest before replacement; notifier drift is not adopted silently. This upgrade does not rewrite Hooks, change native memory or restart the Worker. Register the installed bundle with LaunchServices after updating native artifacts and validate notification click behavior separately from delivery.
+
 ## Verification
 
 Run from the repository root:

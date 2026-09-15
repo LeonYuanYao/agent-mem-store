@@ -146,6 +146,28 @@ async function replaceManagedHooksWithLegacyRecipe(
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
+test("notifier upgrade replaces only owned app bytes and refuses user drift", async () => {
+  const data = await fixture();
+  const request = { ...data, installedAt: "2026-09-15T00:00:00.000Z" };
+  await applyManagedIntegration(request, await previewManagedIntegration(request));
+  const beforeHooks = await readFile(data.hooksPath, "utf8");
+  const beforeConfig = await readFile(data.configPath, "utf8");
+  const executable = join(data.notifierSource, "Contents", "MacOS", "memstore-notifier");
+  await writeFile(executable, "new notifier\n");
+  const preview = await previewManagedIntegrationUpgrade(request);
+  expect(preview.targets.map(target => target.label)).toEqual(["notifier"]);
+  await applyManagedIntegrationUpgrade(request, preview);
+  const installed = join(data.runtimeRoot, "bin", "MemStore Notifier.app", "Contents", "MacOS", "memstore-notifier");
+  expect(await readFile(installed, "utf8")).toBe("new notifier\n");
+  expect(await readFile(data.hooksPath, "utf8")).toBe(beforeHooks);
+  expect(await readFile(data.configPath, "utf8")).toBe(beforeConfig);
+  expect((await previewManagedIntegrationUpgrade(request)).targets).toEqual([]);
+  await writeFile(executable, "next notifier\n");
+  await writeFile(installed, "user change\n");
+  await expect(previewManagedIntegrationUpgrade(request)).rejects.toThrow("notifier diverged");
+  expect(await readFile(installed, "utf8")).toBe("user change\n");
+});
+
 test("preview is mutation-free and install, repair, and uninstall preserve unrelated state", async () => {
   const data = await fixture();
   const beforeConfig = await readFile(data.configPath, "utf8");

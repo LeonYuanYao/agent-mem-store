@@ -1139,24 +1139,33 @@ export async function previewManagedIntegrationUpgrade(
   const observedDivergedTargetLabels = await divergedTargetLabels(manifest.targets);
   const existingCli = manifest.targets.find((target) => target.label === "memstore_cli");
   const cli = await plannedCliTarget(request);
-  if (existingCli !== undefined && sameIdentity(existingCli.expectedPost, cli.expectedPost)) {
-    return {
-      schemaVersion: 1,
-      state: "upgrade_preview",
-      dryRun: true,
-      installationId: manifest.installationId,
-      requestIdentity: manifest.requestIdentity,
-      targets: [],
-      observedDivergedTargetLabels,
-      explicitNoEffects: ["Installation already owns the MemStore CLI"]
-    };
+  const targets: PlannedTarget[] = [];
+  if (existingCli === undefined || !sameIdentity(existingCli.expectedPost, cli.expectedPost)) {
+    if (existingCli === undefined) {
+      requireInstallableBefore(cli.path, cli.before);
+    } else if (!sameIdentity(cli.before, existingCli.expectedPost)) {
+      throw new Error(
+        "memstore_cli diverged; upgrade cannot distinguish the change from user-authored state."
+      );
+    }
+    targets.push(cli);
   }
-  if (existingCli === undefined) {
-    requireInstallableBefore(cli.path, cli.before);
-  } else if (!sameIdentity(cli.before, existingCli.expectedPost)) {
-    throw new Error(
-      "memstore_cli diverged; upgrade cannot distinguish the change from user-authored state."
-    );
+  // Upgrade the complete signed notifier recipe; do not rewrite Hooks or restart the Worker.
+  for (const [label, relativePath] of [
+    ["notifier", "Contents/MacOS/memstore-notifier"],
+    ["notifier_info_plist", "Contents/Info.plist"],
+    ["notifier_code_resources", "Contents/_CodeSignature/CodeResources"]
+  ]) {
+    if (label === undefined || relativePath === undefined) throw new Error("Invalid notifier recipe.");
+    const previous = manifest.targets.find(target => target.label === label);
+    const path = join(resolve(request.runtimeRoot), "bin", "MemStore Notifier.app", relativePath);
+    if (previous === undefined || previous.path !== path) throw new Error("Notifier ownership is missing or mismatched.");
+    const source = await readFile(join(resolve(request.notifierSource), relativePath));
+    const expectedPost = { state: "file" as const, sha256: sha256(source) };
+    if (sameIdentity(previous.expectedPost, expectedPost)) continue;
+    const before = await identity(path);
+    if (!sameIdentity(before, previous.expectedPost)) throw new Error(`${label} diverged; refusing notifier upgrade.`);
+    targets.push({ label, path, kind: "owned_file", before, expectedPost, expectedSourceBase64: source.toString("base64") });
   }
   return {
     schemaVersion: 1,
@@ -1164,7 +1173,7 @@ export async function previewManagedIntegrationUpgrade(
     dryRun: true,
     installationId: manifest.installationId,
     requestIdentity: manifest.requestIdentity,
-    targets: [cli],
+    targets,
     observedDivergedTargetLabels,
     explicitNoEffects: [
       "No Codex config or Hook change",

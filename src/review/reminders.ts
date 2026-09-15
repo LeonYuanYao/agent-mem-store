@@ -271,7 +271,7 @@ export async function snoozeReminder(request: {
     const result = database.prepare(
       `UPDATE reminder_obligations
        SET state = 'snoozed', snoozed_until = ?, updated_at = ?
-       WHERE reminder_id = ? AND state IN ('pending', 'delivered', 'failed', 'fallback', 'snoozed')`
+       WHERE reminder_id = ? AND state IN ('pending', 'delivering', 'delivered', 'failed', 'fallback', 'snoozed')`
     ).run(snoozedUntil, snoozedAt, request.reminderId);
     if (result.changes !== 1) throw new Error("Reminder cannot be snoozed from its current state.");
     return { state: "snoozed", reminderId: request.reminderId, snoozedUntil };
@@ -288,10 +288,15 @@ export async function acknowledgeReminder(request: {
   const acknowledgedAt = z.iso.datetime().parse(request.acknowledgedAt);
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
+    if (database.prepare(
+      "SELECT 1 FROM reminder_obligations WHERE reminder_id = ? AND state = 'acknowledged'"
+    ).get(request.reminderId) !== undefined) {
+      return { state: "acknowledged", reminderId: request.reminderId };
+    }
     const result = database.prepare(
       `UPDATE reminder_obligations
        SET state = 'acknowledged', acknowledged_at = ?, updated_at = ?
-       WHERE reminder_id = ? AND state IN ('delivered', 'snoozed', 'fallback')`
+       WHERE reminder_id = ? AND state IN ('delivering', 'delivered', 'snoozed', 'fallback')`
     ).run(acknowledgedAt, acknowledgedAt, request.reminderId);
     if (result.changes !== 1) throw new Error("Reminder cannot be acknowledged from its current state.");
     return { state: "acknowledged", reminderId: request.reminderId };

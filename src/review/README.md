@@ -28,6 +28,8 @@ Writes the generated Review Inbox and reminder/action state. Host notification p
 
 Keep notification content body-free and preserve snooze/acknowledgement semantics. Delivery failure must remain observable and retryable. A reminder is not permission to rewrite Human knowledge.
 
+Native notification actions call the same Review CLI as manual actions. Repeated acknowledgement is idempotent; a click during `delivering` may acknowledge or snooze the reminder, and the later delivery receipt must not overwrite that choice. Opening a reminder never resolves individual knowledge reviews.
+
 ## Verification
 
 Run from the repository root:
