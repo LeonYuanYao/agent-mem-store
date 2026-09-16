@@ -31,6 +31,13 @@ Writes indexes, receipts, attempt records and irrelevant feedback. index-coordin
 
 Preserve project scope, lifecycle/working-set eligibility and relevance gates. Automatic hook retrieval has a deadline and cannot block on background extraction. Explicit recall and automatic injection have different budgets and model paths.
 
+Automatic exact-term evidence trims trailing periods and colons before matching, preserving
+internal API, filename, path and error-code structure. Common prose/configuration words cannot
+become strong singleton anchors through capitalization or rarity alone. They remain eligible
+for lexical and corroborated multi-term matching; this is not a stop-word filter or a change to
+embedding inputs, semantic thresholds, term weights or contextual recall. See
+[ADR-0134](../../docs/adr/0134-normalize-automatic-exact-term-boundaries.md).
+
 ## Verification
 
 Run from the repository root:

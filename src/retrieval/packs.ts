@@ -41,6 +41,16 @@ const AUTOMATIC_SIGNAL_TERM_LIMIT = 16;
 const AUTOMATIC_SIGNAL_CANDIDATE_LIMIT = 64;
 const AUTOMATIC_RARE_TERM_FRACTION = 0.01;
 const AUTOMATIC_SINGLE_RARE_TERM_MINIMUM_LENGTH = 3;
+// These words still participate in lexical and multi-term exact matching. Only
+// the corpus-rare singleton shortcut is disallowed, regardless of capitalization.
+const AUTOMATIC_GENERIC_SINGLETON_TERMS = new Set(`
+  the a an and or of to for in on at is are be been this that these those it its
+  my your our me you we please can could would should do does did have has as by
+  with from then than into about how what which where when why
+  name version users user request response task skill code file data value type
+  state status local default config configuration setup setting set change update
+  modify create check test result example first last only start end use run output input
+`.trim().split(/\s+/u));
 const AUTOMATIC_STRONG_EXACT_COVERAGE = 0.5;
 const AUTOMATIC_STRONG_APPLICABILITY_COVERAGE = 0.25;
 const AUTOMATIC_RARE_APPLICABILITY_COVERAGE = 0.15;
@@ -1113,16 +1123,18 @@ async function automaticCandidates(request: {
   for (const memoryId of directMemoryIds) {
     if (eligibleIds.has(memoryId)) candidateIds.add(memoryId);
   }
-  const rawExactTerms = request.prompt.match(
+  const rawExactTerms = (request.prompt.match(
     /[A-Za-z][A-Za-z0-9_.:/-]{3,}|[A-Z]{2,}[0-9-]*/gu
-  ) ?? [];
+  ) ?? []).map((term) => term.replace(/[.:]+$/gu, "")).filter((term) => term.length > 0);
   const exactTerms = [...new Set(
     rawExactTerms.map((term) => term.normalize("NFKC").toLocaleLowerCase("en-US"))
   )].filter((term) => documentFrequency(term) > 0);
   const structuredExactTerms = new Set(rawExactTerms.flatMap((term) => {
     const uppercaseCount = term.match(/[A-Z]/gu)?.length ?? 0;
-    return /[0-9_.:/-]/u.test(term) || uppercaseCount >= 2
-      ? [term.normalize("NFKC").toLocaleLowerCase("en-US")]
+    const normalizedTerm = term.normalize("NFKC").toLocaleLowerCase("en-US");
+    return !AUTOMATIC_GENERIC_SINGLETON_TERMS.has(normalizedTerm) &&
+      (/[0-9_.:/-]/u.test(term) || uppercaseCount >= 2)
+      ? [normalizedTerm]
       : [];
   }));
   const exactTermWeights = new Map(

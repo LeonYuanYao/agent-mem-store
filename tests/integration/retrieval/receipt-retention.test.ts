@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { inspectStatus } from "../../../src/operations/status.js";
@@ -10,6 +10,7 @@ import { runWorkerOnce } from "../../../src/worker/main.js";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
     rm(directory, { recursive: true, force: true })
   ));
@@ -54,6 +55,9 @@ function insertReceipt(
 }
 
 test("the Worker aggregates and removes expired Injection Receipts while protecting reported Bad Cases", async () => {
+  // Status uses wall time; align it with the explicit Worker clock in this fixture.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-01T00:00:00.000Z"));
   const root = await mkdtemp(join(tmpdir(), "memstore-receipt-retention-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");

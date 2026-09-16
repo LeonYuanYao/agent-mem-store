@@ -446,6 +446,85 @@ test("UserPromptSubmit does not treat one rare natural-language term as an exact
   expect(pack.items.map((item) => item.memoryId)).toEqual([relevant.memoryId]);
 });
 
+test.each([
+  ["request.", "request."],
+  ["skill:", "skill:"],
+  ["users:", "users:"],
+  ["NAME", "name"],
+  ["VERSION", "version"],
+  ["DEFAULT", "default"]
+])("UserPromptSubmit does not use %s as a singleton technical anchor", async (promptTerm, storedTerm) => {
+  const roots = await createRoot();
+  await writeAll(roots, [makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174581",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174582",
+    scope: { kind: "project", projectId },
+    body: `Retain ${storedTerm} records in the separate calendar system.`,
+    startup: "never"
+  })]);
+  const pack = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "singleton-boundary",
+    prompt: `Investigate Ubuntu authentication deployment networking access permissions firewall routing credentials ${promptTerm}`,
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    requestedAt: "2026-08-07T12:03:00.000Z"
+  });
+
+  expect(pack.semanticStage).toBe("lexical_only");
+  expect(pack.items).toEqual([]);
+  expect(pack.emptyReason).toBe("no_relevant_memory");
+});
+
+test.each(["AudioComponent.playMode", "package.json", "src/settings.ts", "EACCES", "fs-extra"])(
+  "UserPromptSubmit preserves a real %s anchor before sentence punctuation",
+  async (identifier) => {
+    const roots = await createRoot();
+    const memory = makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174583",
+      revisionId: "msrev_123e4567-e89b-42d3-a456-426614174584",
+      scope: { kind: "project", projectId },
+      body: `Inspect ${identifier} before proceeding.`,
+      startup: "never"
+    });
+    await writeAll(roots, [memory]);
+    const pack = await prepareUserPromptShadowPack({
+      ...roots,
+      projectId,
+      sessionId: "real-identifier-boundary",
+      prompt: `Investigate Ubuntu authentication deployment networking access permissions firewall routing credentials ${identifier}.`,
+      signals: { files: [], symbols: [], errors: [], commands: [] },
+      requestedAt: "2026-08-07T12:03:00.000Z"
+    });
+
+    expect(pack.items.map((item) => item.memoryId)).toEqual([memory.memoryId]);
+    expect(pack.items[0]?.reasons).toContain("exact_metadata");
+  }
+);
+
+test("UserPromptSubmit retains corroborated matches of generic configuration fields", async () => {
+  const roots = await createRoot();
+  const memory = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174585",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174586",
+    scope: { kind: "project", projectId },
+    body: "Validate NAME VERSION together against the configuration schema.",
+    startup: "never"
+  });
+  await writeAll(roots, [memory]);
+  const pack = await prepareUserPromptShadowPack({
+    ...roots,
+    projectId,
+    sessionId: "generic-fields-together",
+    prompt: "NAME VERSION",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    requestedAt: "2026-08-07T12:03:00.000Z"
+  });
+
+  expect(pack.items.map((item) => item.memoryId)).toEqual([memory.memoryId]);
+  expect(pack.items[0]?.reasons).toContain("exact_metadata");
+});
+
 test("UserPromptSubmit does not promote an entire project cluster from one shared exact term", async () => {
   const roots = await createRoot();
   const relevant = makeCanonicalMemory({
