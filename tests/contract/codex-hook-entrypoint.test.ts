@@ -15,10 +15,12 @@ const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
 const hookEntrypoint = fileURLToPath(new URL("../../src/cli/hook.ts", import.meta.url));
 const legacyEntrypoint = fileURLToPath(new URL("../../src/cli/main.ts", import.meta.url));
 
-test("display preserves ordering, stays silent without memories, and validates modes", () => {
+test("display omits summary IDs, preserves body ordering, stays silent without memories, and validates modes", () => {
   const body = "<memstore-candidates>\n[M:92 S:P] first\n[M:3 S:G] second\n</memstore-candidates>";
   expect(renderHookDisplay("summary", "UserPromptSubmit", body, 42))
-    .toBe("MemStore (UserPromptSubmit): 2 memories · 42 tokens · M:92, M:3");
+    .toBe("MemStore (UserPromptSubmit): 2 memories · 42 tokens");
+  expect(renderHookDisplay("full", "UserPromptSubmit", body, 42))
+    .toBe(`MemStore (UserPromptSubmit): 2 memories · 42 tokens\n${body}`);
   expect(renderHookDisplay("full", "UserPromptSubmit", "", 0)).toBeUndefined();
   expect(renderHookDisplay("full", "UserPromptSubmit", "<memstore-context>legend only</memstore-context>", 10)).toBeUndefined();
   expect(adapterDisplaySchema.safeParse({ hook_display: "invalid" }).success).toBe(false);
@@ -125,7 +127,7 @@ for (const event of ["SessionStart", "UserPromptSubmit"] as const) {
       expect(JSON.parse(result.stdout)).toEqual({
         continue: true,
         ...(mode === "off" ? {} : {
-          systemMessage: `MemStore (${event}): 1 memories · 8 tokens · M:123${mode === "full" ? `\n${memoryText}` : ""}`
+          systemMessage: `MemStore (${event}): 1 memories · 8 tokens${mode === "full" ? `\n${memoryText}` : ""}`
         }),
         hookSpecificOutput: {
           hookEventName: event,

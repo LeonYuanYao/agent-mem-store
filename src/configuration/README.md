@@ -27,6 +27,8 @@ Reads TOML/configuration documents; explicit activation and last-known-good main
 
 Keep program, Vault and runtime paths distinct. Failures must not silently select a different Vault. Displaying a hook summary and injecting memory context are separate controls.
 
+Hook summaries show the event, memory count and token count without repeating Memory IDs. Full display preserves the original body, including each item's ID and order; model context delivery is unchanged.
+
 ## Verification
 
 Run from the repository root:

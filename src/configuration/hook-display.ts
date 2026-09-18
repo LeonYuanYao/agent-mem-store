@@ -40,8 +40,8 @@ export function renderHookDisplay(
   mode: HookDisplay, event: string, text: string, tokens: number
 ): string | undefined {
   if (mode === "off" || text.trim().length === 0) return undefined;
-  const refs = [...text.matchAll(/^\[M:([^\s\]]+)/gm)].map((match) => match[0].slice(1));
-  if (refs.length === 0) return undefined;
-  const summary = `MemStore (${event}): ${String(refs.length)} memories · ${String(tokens)} tokens · ${refs.join(", ")}`;
+  const memoryCount = [...text.matchAll(/^\[M:([^\s\]]+)/gm)].length;
+  if (memoryCount === 0) return undefined;
+  const summary = `MemStore (${event}): ${String(memoryCount)} memories · ${String(tokens)} tokens`;
   return mode === "full" ? `${summary}\n${text}` : summary;
 }
