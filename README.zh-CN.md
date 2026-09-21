@@ -122,6 +122,25 @@ Vault 以明文保存知识，MemStore 不提供应用层加密。不要把密�
 
 ## 开发与运维
 
+### 可选的 Jev 相关性筛选
+
+不接入 Jev 也能正常使用 MemStore，默认仍采用本地 embedding、关键词匹配和适用范围规则。需要额外筛选每轮 UserPromptSubmit 的候选时，在机器本地 `<runtime>/config.toml` 中添加：
+
+```toml
+[jev]
+enabled = true
+threshold = 0.5
+timeout_ms = 600
+```
+
+将 `JEV_MODEL_API_KEY` 提供给 Worker 进程，或把密钥以单行形式存入 `<runtime>/secrets/jev-api-key`：目录权限 `0700`，文件权限 `0600`，由运行 Worker 的用户持有，不能使用符号链接。macOS LaunchAgent 通常不会继承交互式终端的环境变量，MemStore 也不会执行 `.zshrc`。凭据不要放进 Vault、TOML 或 Git。省略此配置或设置 `enabled = false` 即可只使用本地检索；仅有密钥不会自动开启云端调用。
+
+开启后，当前请求、需要消解指代时的少量用户历史，以及最多 6 条已选记忆摘要会发送给 TypeSafe。请求会移除记忆身份头；检测到疑似凭据时跳过发送。这些检查不保证完全匿名化，请只为允许发送给该服务的内容开启。
+
+固定使用 `jev-1.13.0`，保留评分 ≥ 0.5 的候选，维持本地原有顺序。未配置凭据、断网、额度不足、异常响应或超时时，返回原有本地候选。每轮不立即重试，最多等待 600ms，并在当前 1 秒前台预算内预留返回时间；失败冷却期结束后自动再尝试。成功判断全部不相关时不注入。SessionStart、显式搜索/Terra 和后台 Luna 不受影响。相关性评分不代表事实正确，也不构成执行操作的授权。
+
+新代码运行后，每次非空候选包都会读取设置，修改开关不需要重启。旧版本安装需要先构建更新，再重启托管 Worker 一次。检索回执的 `timings.jev` 提供状态、回退原因、耗时和可用的 token 用量；被过滤条目的省略原因是 `jev_below_threshold`。不会额外保存原始请求或响应日志。
+
 ### Hook 注入内容的显示方式
 
 在机器本地 `<runtime>/config.toml` 的 `[adapters]` 段中，将 `hook_display` 设置为 `"off"`、`"summary"`（默认）或 `"full"`：

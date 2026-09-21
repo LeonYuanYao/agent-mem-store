@@ -7,6 +7,7 @@ import { openRuntimeDatabase } from "../runtime/database.js";
 import { readSessionStartInjection } from "../configuration/hook-display.js";
 import type { EmbeddingAdapter } from "./index.js";
 import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
+import { jevTelemetrySchema, type JevTelemetry, type AutomaticRelevanceFilter } from "./jev.js";
 import {
   ForegroundExecutionAborted,
   type ForegroundExecutionControl
@@ -103,6 +104,7 @@ interface RetrievalStageTimings {
   readonly rankingAndRelationshipMs: number;
   readonly receiptWriteMs: number;
   readonly totalMs: number;
+  readonly jev?: JevTelemetry | undefined;
 }
 
 type RetrievalPreReceiptTimings = Omit<RetrievalStageTimings, "receiptWriteMs" | "totalMs">;
@@ -114,7 +116,8 @@ const retrievalStageTimingsSchema = z.object({
   vectorScanMs: z.number().nonnegative(),
   rankingAndRelationshipMs: z.number().nonnegative(),
   receiptWriteMs: z.number().nonnegative(),
-  totalMs: z.number().nonnegative()
+  totalMs: z.number().nonnegative(),
+  jev: jevTelemetrySchema.optional()
 });
 
 export interface ShadowPackItem {
@@ -1396,6 +1399,8 @@ export interface UserPromptShadowPackRequest {
   readonly sessionId: string;
   readonly prompt: string;
   readonly recentPrompts?: readonly string[];
+  readonly relevanceFilter?: AutomaticRelevanceFilter;
+  readonly foregroundDeadlineAt?: number;
   readonly signals: {
     readonly files: readonly string[];
     readonly symbols: readonly string[];
@@ -1746,6 +1751,32 @@ async function prepareUserPromptShadowPackCore(
       }
     }
   }
+  let jev: JevTelemetry | undefined;
+  const jevScores = new Map<string, number>();
+  if (request.relevanceFilter !== undefined && selected.length > 0) {
+    const judgment = await request.relevanceFilter.filter({
+      prompt: normalizedPrompt,
+      // The existing context-dependence gate and 256-token history budget also
+      // bound cloud judging; standalone prompts do not send unrelated history.
+      recentPrompts: contextualHistoryAvailable ? [...recentPromptContext].reverse() : [],
+      items: selected.map(item => ({
+        memoryId: item.memoryId,
+        text: item.text.replace(/^\[M:[^\]]+\]\s*/u, "")
+      })),
+      deadlineAt: request.foregroundDeadlineAt ?? Date.now() + 800,
+      ...(request.foregroundControl === undefined ? {} : { signal: request.foregroundControl.signal })
+    });
+    jev = judgment.telemetry;
+    if (judgment.scores !== undefined && jev.state === "filtered") {
+      for (const item of judgment.scores) jevScores.set(item.memoryId, item.score);
+      const retained = selected.filter(item => {
+        const keep = (jevScores.get(item.memoryId) ?? 0) >= judgment.telemetry.threshold;
+        if (!keep) promptOmissionReasons.set(item.memoryId, "jev_below_threshold");
+        return keep;
+      }).map(item => ({ ...item, reasons: [...item.reasons, `jev_score:${String(jevScores.get(item.memoryId))}`] }));
+      selected.splice(0, selected.length, ...retained);
+    }
+  }
   const rendered = renderPack(
     selected,
     selected.length > 0 && selected.every((item) => item.relevanceBand === "probable")
@@ -1759,7 +1790,9 @@ async function prepareUserPromptShadowPackCore(
     revisionId: item.memory.revisionId,
     relevanceBand: item.band,
     score: item.score,
-    reasons: item.reasons,
+    reasons: jevScores.has(item.memory.memoryId)
+      ? [...item.reasons, `jev_score:${String(jevScores.get(item.memory.memoryId))}`]
+      : item.reasons,
     omissionReason: item.band === "weak"
       ? "weak_relevance"
       : epoch.injectedRevisions.has(`${item.memory.memoryId}:${item.memory.revisionId}`)
@@ -1771,6 +1804,7 @@ async function prepareUserPromptShadowPackCore(
   }));
   const emptyReason = selected.length > 0
     ? undefined
+    : jev?.state === "filtered" ? "jev_no_relevant_memory"
     : isContinuationOnly(normalizedPrompt)
       ? "continuation_only"
       : epoch.tokenTotal >= hardLimit
@@ -1807,7 +1841,8 @@ async function prepareUserPromptShadowPackCore(
       scopeLoadMs,
       embeddingMs: semantic.embeddingMs,
       vectorScanMs: semantic.vectorScanMs,
-      rankingAndRelationshipMs: Math.max(0, performance.now() - rankingAndRelationshipStarted)
+      rankingAndRelationshipMs: Math.max(0, performance.now() - rankingAndRelationshipStarted - (jev?.elapsedMs ?? 0)),
+      ...(jev === undefined ? {} : { jev })
     },
     requestedAt,
     ...(request.eventId === undefined ? {} : { eventId: request.eventId }),

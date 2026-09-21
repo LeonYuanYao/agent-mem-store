@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
 import { join } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 
 import { captureEvent } from "../../../src/capture/index.js";
 import { buildRetrievalIndex, type EmbeddingAdapter } from "../../../src/retrieval/index.js";
@@ -41,7 +41,97 @@ const adapter: EmbeddingAdapter = {
 };
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+test("optional Jev filters before rendering, receipts and epoch deduplication, with local fallback", async () => {
+  const location = await fixture();
+  const server = await startForegroundRetrievalServer({ ...location, adapter });
+  vi.stubEnv("JEV_MODEL_API_KEY", "synthetic-test-key");
+  const config = (enabled: boolean) => writeFile(join(location.runtimeRoot, "config.toml"),
+    `schema_version = 1\n[adapters]\nsession_start_injection = false\n[jev]\nenabled = ${String(enabled)}\nthreshold = 0.5\ntimeout_ms = 100\n`);
+  const fetcher = vi.spyOn(globalThis, "fetch");
+  const start = (sessionId: string) => requestForegroundRetrieval({
+    runtimeRoot: location.runtimeRoot, projectId, sessionId,
+    event: "SessionStart", requestedAt: "2026-08-25T12:00:01.000Z"
+  });
+  const recall = (sessionId: string) => requestForegroundRetrieval({
+    runtimeRoot: location.runtimeRoot, projectId, sessionId,
+    event: "UserPromptSubmit", prompt: "SQLite WAL queue recovery",
+    requestedAt: "2026-08-25T12:00:02.000Z"
+  });
+  const inspect = async (result: Awaited<ReturnType<typeof recall>>) => {
+    if (result.state !== "completed") throw new Error(`Expected completed, got ${result.state}`);
+    const receipt = await inspectRetrievalReceipt(location.runtimeRoot, result.receiptId);
+    if (receipt === undefined) throw new Error("Missing receipt");
+    return receipt;
+  };
+  try {
+    await config(false);
+    await start("jev-baseline");
+    const baseline = await recall("jev-baseline");
+    const baselineReceipt = await inspect(baseline);
+    expect(baselineReceipt.selectedMemoryIds).toHaveLength(2);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    await config(true);
+    await start("jev-filtered");
+    fetcher.mockImplementation((_url, options) => {
+      const body = typeof options?.body === "string" ? options.body : "";
+      expect(body).not.toContain("msmem_");
+      expect(body).not.toContain("msproj_");
+      return Promise.resolve(Response.json({ model: "jev-1.13.0", answers: {
+        c1: { type: "noul", noul: 0.5 }, c2: { type: "noul", noul: 0.49 }
+      }, usage: { input_tokens: 120, output_tokens: 20 } }));
+    });
+    const filtered = await recall("jev-filtered");
+    const filteredReceipt = await inspect(filtered);
+    expect(filteredReceipt.selectedMemoryIds).toEqual(baselineReceipt.selectedMemoryIds.slice(0, 1));
+    expect(filteredReceipt.renderedTokenCount).toBeLessThan(baselineReceipt.renderedTokenCount);
+    expect(filteredReceipt.automaticEpochTotal).toBe(filteredReceipt.renderedTokenCount);
+    expect(filteredReceipt.timings?.jev).toMatchObject({ state: "filtered", threshold: 0.5, inputTokens: 120 });
+    const rejected = filteredReceipt.omittedItems.find(item => item.memoryId === baselineReceipt.selectedMemoryIds[1]);
+    expect(rejected?.omissionReason).toBe("jev_below_threshold");
+    expect(rejected?.reasons).toContain("jev_score:0.49");
+
+    // A failed enhancement must not mark the previously filtered revision as injected.
+    fetcher.mockRejectedValue(new Error("offline"));
+    const next = await recall("jev-filtered");
+    const nextReceipt = await inspect(next);
+    expect(nextReceipt.selectedMemoryIds).toEqual(baselineReceipt.selectedMemoryIds.slice(1));
+    expect(nextReceipt.timings?.jev).toMatchObject({ state: "fallback", reason: "network_error" });
+
+    await start("jev-cooldown");
+    const duringCooldown = await recall("jev-cooldown");
+    expect((await inspect(duringCooldown)).selectedMemoryIds).toEqual(baselineReceipt.selectedMemoryIds);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  } finally { await server.close(); }
+});
+
+test("a valid Jev empty selection stays empty and does not consume the context epoch", async () => {
+  const location = await fixture();
+  await writeFile(join(location.runtimeRoot, "config.toml"), "schema_version = 1\n[adapters]\nsession_start_injection = false\n[jev]\nenabled = true\n");
+  vi.stubEnv("JEV_MODEL_API_KEY", "synthetic-test-key");
+  const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
+    model: "jev-1.13.0", answers: { c1: { type: "noul", noul: 0.1 }, c2: { type: "noul", noul: 0.2 } },
+    usage: { input_tokens: 100, output_tokens: 20 }
+  }));
+  const server = await startForegroundRetrievalServer({ ...location, adapter });
+  const common = { runtimeRoot: location.runtimeRoot, projectId, sessionId: "jev-empty", requestedAt: "2026-08-25T12:00:02.000Z" };
+  try {
+    await requestForegroundRetrieval({ ...common, event: "SessionStart" });
+    const first = await requestForegroundRetrieval({ ...common, event: "UserPromptSubmit", prompt: "SQLite WAL queue recovery" });
+    expect(first).toMatchObject({ state: "empty", reason: "jev_no_relevant_memory" });
+    await writeFile(join(location.runtimeRoot, "config.toml"), "schema_version = 1\n");
+    const second = await requestForegroundRetrieval({ ...common, event: "UserPromptSubmit", prompt: "SQLite WAL queue recovery" });
+    if (second.state !== "completed") throw new Error("Expected local candidates after disabling Jev");
+    const receipt = await inspectRetrievalReceipt(location.runtimeRoot, second.receiptId);
+    expect(receipt?.selectedMemoryIds).toHaveLength(2);
+    expect(receipt?.automaticEpochTotal).toBe(receipt?.renderedTokenCount);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  } finally { await server.close(); }
 });
 
 async function fixture() {

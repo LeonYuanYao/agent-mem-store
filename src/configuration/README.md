@@ -23,6 +23,13 @@ loadConfiguration resolves and validates documents; rememberLastKnownGoodConfigu
 
 Reads TOML/configuration documents; explicit activation and last-known-good maintenance can write configuration state. Do not add machine-specific paths to portable policy.
 
+jev.ts reads the optional machine-local `[jev]` settings (disabled by default,
+threshold 0.5, at most 600 ms) and credentials from `JEV_MODEL_API_KEY` or the
+owner-only `<runtime>/secrets/jev-api-key` regular file. It never sources shell
+configuration. Missing or invalid optional settings and unavailable credentials
+leave local retrieval usable. Do not put credentials in TOML or portable Vault
+policy. The foreground worker re-reads these settings when it has a nonempty pack.
+
 ## Invariants and change risks
 
 Keep program, Vault and runtime paths distinct. Failures must not silently select a different Vault. Displaying a hook summary and injecting memory context are separate controls.

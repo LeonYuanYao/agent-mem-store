@@ -196,6 +196,47 @@ report. Inspect the running installation and review actual retrievals separately
 
 ## Development and operations
 
+### Optional Jev relevance filtering
+
+MemStore works without Jev: local embedding, lexical matching and applicability
+rules remain the default. To enable an additional UserPromptSubmit filter, add
+this section to machine-local `<runtime>/config.toml`:
+
+```toml
+[jev]
+enabled = true
+threshold = 0.5
+timeout_ms = 600
+```
+
+Provide `JEV_MODEL_API_KEY` to the Worker process, or provision the key as a single
+line in `<runtime>/secrets/jev-api-key` (directory mode `0700`, file mode `0600`,
+owned by the Worker user, no symlink). A macOS LaunchAgent usually does not inherit
+interactive shell exports. MemStore does not source `.zshrc`. Keep credentials
+out of the Vault, TOML and Git. Omit this section or set `enabled = false` to use
+only local retrieval; a key alone does not enable cloud calls.
+
+Enabling Jev sends the current prompt, limited context-dependent user history and
+up to six selected memory representations to TypeSafe. Identity headers are
+removed and detected credential patterns skip transmission; this is not complete
+anonymization. Only enable it for content you may send to that provider.
+
+The pinned model `jev-1.13.0` keeps scores at least 0.5, preserving local order.
+Missing credentials, offline service, quota limits, invalid responses or timeout
+return the original local candidates. Calls have no immediate retry, a maximum
+600 ms budget and a reserve inside the existing one-second foreground deadline.
+Failure cooldowns expire automatically. A successful response rejecting all items
+produces no injection. SessionStart, explicit search/Terra and background Luna
+are unchanged. Relevance scores do not establish factual correctness or authorize
+actions.
+
+Settings are read for each nonempty foreground pack; changing them needs no
+Worker restart once this code version is running. Existing installations must
+build the updated code and restart their managed Worker once to load it.
+Receipt inspection exposes state, fallback reason, latency and available usage
+under `timings.jev`; filtered entries use omission reason `jev_below_threshold`.
+No additional raw prompt/response logs are created.
+
 ### Hook visibility
 
 Set `hook_display` in the `[adapters]` section of the machine-local

@@ -27,6 +27,14 @@ index.ts builds indexes; snapshot.ts loads immutable search data; recall.ts serv
 
 Writes indexes, receipts, attempt records and irrelevant feedback. index-coordinator.ts handles publication; receipt-retention.ts handles historical receipts. judge.ts owns the explicit retrieval judge; do not move it into every hook call.
 
+jev.ts provides a separate, opt-in UserPromptSubmit filter after the local pack
+has been selected. foreground-ipc.ts owns its lifetime and short failure cooldown.
+It is disabled by default and falls back to the unchanged local pack when
+unconfigured or unavailable. A valid all-rejected result stays empty. packs.ts
+filters before rendering and recording epoch tokens/deduplication, and records
+provider telemetry under receipt `timings.jev`. SessionStart and explicit recall
+do not invoke Jev. See [ADR-0135](../../docs/adr/0135-add-opt-in-jev-automatic-relevance-filter.md).
+
 ## Invariants and change risks
 
 Preserve project scope, lifecycle/working-set eligibility and relevance gates. Automatic hook retrieval has a deadline and cannot block on background extraction. Explicit recall and automatic injection have different budgets and model paths.
@@ -44,6 +52,7 @@ Run from the repository root:
 
 ```sh
 pnpm exec vitest run tests/integration/retrieval tests/fault/automatic-retrieval.test.ts tests/fault/foreground-deadline-cancellation.test.ts tests/contract/progressive-recall.test.ts
+pnpm exec vitest run tests/contract/jev-relevance.test.ts
 ```
 
 Check these test scenarios before changing behavior.

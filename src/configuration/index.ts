@@ -25,6 +25,7 @@ const machineOwnedKeys = [
   "git_cache",
   "adapters",
   "embedding",
+  "jev",
   "luna",
   "notifier",
   "launch_agent"
@@ -91,6 +92,7 @@ const machineSchema = z.object({
   git_cache: extensibleSectionSchema,
   adapters: adapterDisplaySchema,
   embedding: extensibleSectionSchema,
+  jev: extensibleSectionSchema,
   luna: extensibleSectionSchema,
   notifier: extensibleSectionSchema,
   launch_agent: extensibleSectionSchema

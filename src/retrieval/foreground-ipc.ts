@@ -26,6 +26,7 @@ import {
 } from "./foreground-protocol.js";
 import { loadRetrievalSnapshot, type RetrievalSnapshot } from "./snapshot.js";
 import { validateRetrievalSnapshot } from "./snapshot.js";
+import { JevAutomaticRelevanceFilter, type AutomaticRelevanceFilter } from "./jev.js";
 
 const maximumRecentPromptSessions = 128;
 const maximumStoredPromptCharacters = 16 * 1024;
@@ -56,6 +57,7 @@ async function prepareResponse(request: ForegroundRequest, options: {
   readonly snapshot: RetrievalSnapshot;
   readonly control: ForegroundExecutionControl;
   readonly recentPrompts: readonly string[];
+  readonly relevanceFilter: AutomaticRelevanceFilter;
   readonly onReceiptCommitted: (receiptCommitMs: number) => void;
 }): Promise<ForegroundWireResponse> {
   await options.control.checkpoint("before_reservation");
@@ -94,6 +96,8 @@ async function prepareResponse(request: ForegroundRequest, options: {
           sessionId: request.sessionId,
           prompt: request.prompt,
           recentPrompts: options.recentPrompts,
+          relevanceFilter: options.relevanceFilter,
+          foregroundDeadlineAt: Date.parse(request.deadlineAt),
           signals: request.signals,
           adapter: options.adapter,
           requestedAt: request.requestedAt,
@@ -265,6 +269,7 @@ export async function startForegroundRetrievalServer(request: {
   }
   const requestSnapshotIds = new Map<string, string>();
   const requestReceiptCommitMs = new Map<string, number>();
+  const relevanceFilter = new JevAutomaticRelevanceFilter({ runtimeRoot: request.runtimeRoot });
   const recentPromptsBySession = new Map<string, readonly string[]>();
   const lane = createForegroundRetrievalLane<ForegroundRequest, ForegroundWireResponse>({
     execute: (foregroundRequest, control) => {
@@ -306,6 +311,7 @@ export async function startForegroundRetrievalServer(request: {
           snapshot,
           control,
           recentPrompts,
+          relevanceFilter,
           onReceiptCommitted: (receiptCommitMs) => {
             requestReceiptCommitMs.set(foregroundRequest.requestId, receiptCommitMs);
           }
