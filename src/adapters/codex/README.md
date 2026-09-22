@@ -14,6 +14,13 @@ Maps supported Codex events into project-scoped, durable capture and bounded ses
 
 handleCodexHook validates host input and resolves the project/session route before capture; the CLI hook entry owns output rendering and foreground IPC.
 
+Stop has a shared monotonic capture budget. Read-only Project discovery has at
+most 200 ms and aborts its Git child on expiry; unresolved discovery is deferred
+to Inbox import instead of falling back to synchronous registry creation. Import
+must pass the exact Session identity so session-specific routes still win.
+Capture failures expose only an allowlisted code, stage, elapsed time and
+persistence state; never forward arbitrary exception messages or input bodies.
+
 - [../../capture/README.md](../../capture/README.md)
 - [../../projects/README.md](../../projects/README.md)
 - [../../cli/codex-hook.ts](../../cli/codex-hook.ts)

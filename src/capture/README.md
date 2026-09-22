@@ -16,6 +16,14 @@ Accepts host events and makes them recoverable for background processing without
 
 prepareCaptureEventForPersistence applies input and sensitivity checks; appendCaptureDisposition persists inbox work; importCaptureInboxBatch imports it; claim/complete/fail functions manage processing.
 
+`deadline.ts` carries optional monotonic capture progress across stages and
+renders body-free failure diagnostics. Stop's lock wait uses the remaining total
+budget, reserving 100 ms; other callers retain the 750 ms lock-wait limit. Normal
+event validation/serialization happens before lock acquisition; normal and
+body-free file capacity are each scanned once under the lock. Publication still
+requires the existing atomic, synced write. Persistence is `unconfirmed` once a
+write begins, not optimistically successful on timeout.
+
 - [adapters/codex/hook.ts](../../src/adapters/codex/hook.ts)
 - [worker/evidence.ts](../../src/worker/evidence.ts)
 - [runtime/database.ts](../../src/runtime/database.ts)

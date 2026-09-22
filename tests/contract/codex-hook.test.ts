@@ -121,13 +121,15 @@ test("a Hook capture failure fails open with a body-free diagnostic", async () =
     }
   });
 
-  expect(result).toEqual({
+  expect(result).toMatchObject({
     continue: true,
     captured: false,
     state: "capture_unavailable",
     diagnostic: {
-      code: "capture_unavailable",
-      eventKind: "Stop"
+      code: "storage_path_unavailable",
+      eventKind: "Stop",
+      stage: "inbox_lock",
+      persistence: "not_saved"
     }
   });
   expect(JSON.stringify(result)).not.toContain("must not appear");

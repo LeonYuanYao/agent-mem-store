@@ -160,14 +160,17 @@ export async function configureProjectMarker(
   };
 }
 
-async function gitValue(path: string, arguments_: readonly string[]): Promise<string | undefined> {
+async function gitValue(path: string, arguments_: readonly string[], signal?: AbortSignal): Promise<string | undefined> {
+  signal?.throwIfAborted();
   try {
     const result = await execFileAsync("git", ["-C", path, ...arguments_], {
-      encoding: "utf8"
+      encoding: "utf8",
+      ...(signal === undefined ? {} : { signal, killSignal: "SIGKILL" })
     });
     const value = result.stdout.trim();
     return value.length === 0 ? undefined : value;
   } catch {
+    signal?.throwIfAborted();
     return undefined;
   }
 }
@@ -224,8 +227,8 @@ interface GitEvidence {
   readonly inheritedSubmodule: boolean;
 }
 
-async function inspectGit(path: string): Promise<GitEvidence | undefined> {
-  const topLevel = await gitValue(path, ["rev-parse", "--show-toplevel"]);
+async function inspectGit(path: string, signal?: AbortSignal): Promise<GitEvidence | undefined> {
+  const topLevel = await gitValue(path, ["rev-parse", "--show-toplevel"], signal);
   if (topLevel === undefined) {
     return undefined;
   }
@@ -234,18 +237,18 @@ async function inspectGit(path: string): Promise<GitEvidence | undefined> {
   let superproject = await gitValue(repositoryRoot, [
     "rev-parse",
     "--show-superproject-working-tree"
-  ]);
+  ], signal);
   while (superproject !== undefined) {
     repositoryRoot = await realpath(superproject);
     superproject = await gitValue(repositoryRoot, [
       "rev-parse",
       "--show-superproject-working-tree"
-    ]);
+    ], signal);
   }
   const commonDirectoryValue = await gitValue(repositoryRoot, [
     "rev-parse",
     "--git-common-dir"
-  ]);
+  ], signal);
   if (commonDirectoryValue === undefined) {
     return undefined;
   }
@@ -255,7 +258,7 @@ async function inspectGit(path: string): Promise<GitEvidence | undefined> {
       : join(repositoryRoot, commonDirectoryValue)
   );
   const originIdentity = await normalizeOrigin(
-    await gitValue(repositoryRoot, ["remote", "get-url", "origin"]),
+    await gitValue(repositoryRoot, ["remote", "get-url", "origin"], signal),
     repositoryRoot
   );
   const basenameKey = basename(repositoryRoot).normalize("NFC");
@@ -294,9 +297,11 @@ async function inspectSessionRoute(request: ProjectResolutionRequest): Promise<P
 
 /** Resolve Project identity without creating or updating Registry state. */
 export async function inspectProject(
-  request: ProjectResolutionRequest
+  request: ProjectResolutionRequest & { readonly signal?: AbortSignal }
 ): Promise<ProjectResolution> {
+  request.signal?.throwIfAborted();
   const routed = await inspectSessionRoute(request);
+  request.signal?.throwIfAborted();
   if (routed !== undefined) return routed;
   const resolvedPath = await realpath(request.path);
   let markerSearchPath = resolvedPath;
@@ -304,18 +309,20 @@ export async function inspectProject(
 
   let searchingForMarker = true;
   while (searchingForMarker) {
+    request.signal?.throwIfAborted();
     const markerPath = join(markerSearchPath, ".memstore-project");
     if (await isFile(markerPath)) {
       try {
         const marker = markerSchema.parse(
           JSON.parse(await readFile(markerPath, "utf8")) as unknown
         );
-        const git = await inspectGit(markerSearchPath);
+        const git = await inspectGit(markerSearchPath, request.signal);
         const notices: ProjectNotice[] = [];
         if (git?.inheritedSubmodule === true) {
           const inherited = await inspectProject({
             path: git.repositoryRoot,
-            runtimeRoot: request.runtimeRoot
+            runtimeRoot: request.runtimeRoot,
+            ...(request.signal === undefined ? {} : { signal: request.signal })
           });
           if (inherited.status === "resolved") {
             notices.push({
@@ -335,6 +342,7 @@ export async function inspectProject(
           notices
         };
       } catch {
+        request.signal?.throwIfAborted();
         return {
           status: "unresolved",
           reason: "invalid_marker",
@@ -351,6 +359,7 @@ export async function inspectProject(
   }
 
   const databasePath = await existingRuntimeDatabasePath(request.runtimeRoot);
+  request.signal?.throwIfAborted();
   if (databasePath === undefined) {
     return {
       status: "unresolved",
@@ -362,7 +371,8 @@ export async function inspectProject(
 
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    const git = await inspectGit(resolvedPath);
+    const git = await inspectGit(resolvedPath, request.signal);
+    request.signal?.throwIfAborted();
     if (git !== undefined) {
       const match = database.prepare(
         `SELECT p.project_id, p.display_name

@@ -25,6 +25,7 @@ import {
 } from "../../src/capture/index.js";
 import { openRuntimeDatabase } from "../../src/runtime/database.js";
 import { runWorkerOnce } from "../../src/worker/main.js";
+import { resolveProject } from "../../src/projects/index.js";
 
 const roots: string[] = [];
 
@@ -154,6 +155,8 @@ test("one Worker iteration drains a bounded Capture Inbox batch before other wor
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
   const vaultRoot = join(root, "vault");
+  // This test measures bounded Inbox import, not first-use Project discovery.
+  await resolveProject({ runtimeRoot, path: root });
   for (const ordinal of [1, 2]) {
     await handleCodexHook({
       runtimeRoot,

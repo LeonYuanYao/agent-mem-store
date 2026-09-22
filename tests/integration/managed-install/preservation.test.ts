@@ -214,6 +214,9 @@ test("preview is mutation-free and install, repair, and uninstall preserve unrel
     ?.flatMap((route) => route.hooks ?? [])
     .find((hook) => hook.command?.includes("memstore:gate5-shadow-v1:PostToolUse:shadow") === true);
   expect(managedPostToolUse).toMatchObject({ timeout: 2 });
+  expect(installedHooks).toMatchObject({
+    hooks: { Stop: [{ hooks: [{ timeout: 2, statusMessage: "MemStore (Stop)" }] }] }
+  });
   const contextHandlers = (["SessionStart", "UserPromptSubmit"] as const).map((event) =>
     (installedHooks.hooks as Record<
       string,

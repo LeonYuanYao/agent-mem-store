@@ -17,6 +17,13 @@ Parses user commands, resolves configuration and dispatches operations; provides
 
 command.ts composes normal CLI operations and worker adapters. codex-hook.ts reads host JSON, captures the event and requests eligible foreground injection.
 
+Stop shares a 1,300 ms internal capture budget and a 1,450 ms async-stall watchdog
+under its two-second host limit. The watchdog emits one fail-open systemMessage
+and stderr diagnostic, then exits; it cannot guarantee output after a host kill,
+blocked event loop or OS suspension. Failure output distinguishes `not_saved`,
+`unconfirmed`, `saved` and body-free persistence without raw exception text.
+Successful hooks stay silent unless ordinary retrieval display is enabled.
+
 - [operations/README.md](../../src/operations/README.md)
 - [adapters/codex/README.md](../../src/adapters/codex/README.md)
 - [configuration/README.md](../../src/configuration/README.md)

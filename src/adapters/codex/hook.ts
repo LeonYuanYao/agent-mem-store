@@ -12,6 +12,7 @@ import {
 } from "../../capture/inbox.js";
 import { classifyLocalSensitivity } from "../../contracts/sensitivity.js";
 import { inspectProject, resolveProject } from "../../projects/index.js";
+import { CaptureProgress, captureErrorCode, type CaptureDiagnostic } from "../../capture/deadline.js";
 
 const hookInputSchema = z.object({
   hook_event_name: z.enum([
@@ -42,6 +43,7 @@ export interface CodexHookRequest {
   readonly runtimeRoot: string;
   readonly input: unknown;
   readonly receivedAt?: string;
+  readonly progress?: CaptureProgress;
 }
 
 export type CodexHookResult =
@@ -62,10 +64,7 @@ export type CodexHookResult =
       readonly continue: true;
       readonly captured: false;
       readonly state: "capture_unavailable";
-      readonly diagnostic: {
-        readonly code: "capture_unavailable";
-        readonly eventKind: string;
-      };
+      readonly diagnostic: CaptureDiagnostic;
     };
 
 const maximumToolFieldBytes = 16 * 1024;
@@ -188,6 +187,9 @@ export async function handleCodexHook(
   let occurredAt = new Date().toISOString();
   let emergencyEvent: CaptureEvent | undefined;
   let resolvedProjectId: string | undefined;
+  const progress = request.progress ?? new CaptureProgress(
+    hookInputSchema.safeParse(request.input).data?.hook_event_name === "Stop" ? 1300 : Infinity
+  );
   try {
     const input = hookInputSchema.parse(request.input);
     eventKind = input.hook_event_name;
@@ -204,14 +206,17 @@ export async function handleCodexHook(
       ...(input.turn_id === undefined ? {} : { turnId: input.turn_id }),
       payload: hookPayload(input)
     };
+    progress.enter("project_lookup");
     const inspectedProject = await inspectProject({
       sessionId: input.session_id,
       path: input.cwd,
       runtimeRoot: request.runtimeRoot,
-      busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds
+      busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds,
+      ...(eventKind === "Stop" ? { signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(200, progress.remaining())))) } : {})
     }).catch(() => undefined);
     const project = inspectedProject?.status === "resolved"
       ? inspectedProject
+      : eventKind === "Stop" ? undefined
       : await resolveProject({
           sessionId: input.session_id,
           path: input.cwd,
@@ -223,6 +228,7 @@ export async function handleCodexHook(
       ...emergencyEvent,
       ...(resolvedProjectId === undefined ? {} : { projectId: resolvedProjectId })
     };
+    progress.enter("sanitize");
     const disposition = await prepareCaptureDisposition({
       runtimeRoot: request.runtimeRoot,
       event: emergencyEvent
@@ -231,9 +237,12 @@ export async function handleCodexHook(
       runtimeRoot: request.runtimeRoot,
       projectPath: input.cwd,
       capturedAt: occurredAt,
-      disposition
+      disposition,
+      progress
     });
-    if (project !== undefined) {
+    progress.persistence = disposition.state === "event" ? "saved" : "body_free";
+    if (progress.remaining() > 100) {
+      progress.enter("health");
       await recoverCaptureHealthIncident({
         runtimeRoot: request.runtimeRoot,
         category: "hook_capture",
@@ -259,8 +268,8 @@ export async function handleCodexHook(
   } catch (error) {
     const errorCode = error instanceof z.ZodError
       ? "invalid_hook_input"
-      : "capture_unavailable";
-    await recordCaptureHealthIncident({
+      : captureErrorCode(error);
+    if (progress.remaining() > 80) await recordCaptureHealthIncident({
       runtimeRoot: request.runtimeRoot,
       category: "hook_capture",
       errorCode,
@@ -271,7 +280,7 @@ export async function handleCodexHook(
       continue: true,
       captured: false,
       state: "capture_unavailable",
-      diagnostic: { code: "capture_unavailable", eventKind }
+      diagnostic: progress.diagnostic(eventKind, errorCode)
     };
   }
 }

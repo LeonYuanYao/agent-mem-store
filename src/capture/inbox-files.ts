@@ -6,6 +6,7 @@ import { z } from "zod";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { writeFileAtomicallyExclusive } from "../contracts/atomic-file.js";
 import { resolveProject } from "../projects/index.js";
+import { CaptureFailure, type CaptureProgress } from "./deadline.js";
 import {
   captureRecoveredEvent,
   captureEventSchema,
@@ -75,14 +76,22 @@ async function validateExistingSpoolEntry(path: string, eventId: string): Promis
   }
 }
 
-export async function appendCaptureInboxEventFile(request: {
+interface CaptureInboxEventFileRequest {
   readonly runtimeRoot: string;
   readonly projectPath: string;
   readonly spooledAt: string;
   readonly event: CaptureEvent;
   readonly reservedPendingEntries?: number;
   readonly reservedPendingBytes?: number;
-}): Promise<{ readonly state: "spooled"; readonly eventId: string }> {
+  readonly progress?: CaptureProgress;
+}
+
+export async function appendCaptureInboxEventFile(request: CaptureInboxEventFileRequest) {
+  return prepareCaptureInboxEventWrite(request)(request);
+}
+
+/** Validate and serialize before taking the Inbox capacity lock. */
+export function prepareCaptureInboxEventWrite(request: CaptureInboxEventFileRequest) {
   const event = captureEventSchema.parse(request.event);
   const prepared = prepareCaptureEventForPersistence(event);
   if (prepared.state !== "normal") {
@@ -105,43 +114,48 @@ export async function appendCaptureInboxEventFile(request: {
     ...content,
     contentSha256: contentIdentity(content)
   });
-  const directory = pendingRoot(request.runtimeRoot);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const targetPath = join(directory, spoolFileName(event.eventId, request.spooledAt));
-  if (await validateExistingSpoolEntry(targetPath, event.eventId)) {
-    return { state: "spooled", eventId: event.eventId };
-  }
-  const pendingFiles = await jsonFileNames(directory);
-  const reservedPendingEntries = request.reservedPendingEntries ?? 0;
-  const reservedPendingBytes = request.reservedPendingBytes ?? 0;
-  if (pendingFiles.length + reservedPendingEntries >= captureInboxFileMaximumPendingEntries) {
-    throw new Error(
-      `Capture Inbox capacity exceeded (${String(captureInboxFileMaximumPendingEntries)} pending events).`
-    );
-  }
   const serializedEntry = `${JSON.stringify(entry)}\n`;
-  const pendingBytes = (await Promise.all(pendingFiles.map(async (fileName) =>
-    (await stat(join(directory, fileName))).size
-  ))).reduce((total, bytes) => total + bytes, 0);
-  if (
-    pendingBytes + reservedPendingBytes + Buffer.byteLength(serializedEntry, "utf8") >
-      captureInboxFileMaximumPendingBytes
-  ) {
-    throw new Error(
-      `Capture Inbox byte capacity exceeded (${String(captureInboxFileMaximumPendingBytes)} bytes).`
-    );
-  }
-  try {
-    await writeFileAtomicallyExclusive(
-      targetPath,
-      serializedEntry,
-      0o600
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    await validateExistingSpoolEntry(targetPath, event.eventId);
-  }
-  return { state: "spooled", eventId: event.eventId };
+  const directory = pendingRoot(request.runtimeRoot);
+  const targetPath = join(directory, spoolFileName(event.eventId, request.spooledAt));
+  return async (capacity: {
+    readonly reservedPendingEntries?: number;
+    readonly reservedPendingBytes?: number;
+    readonly progress?: CaptureProgress;
+  }): Promise<{ readonly state: "spooled"; readonly eventId: string }> => {
+    capacity.progress?.enter("inbox_scan");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    if (await validateExistingSpoolEntry(targetPath, event.eventId)) {
+      return { state: "spooled", eventId: event.eventId };
+    }
+    const pendingFiles = await jsonFileNames(directory);
+    const reservedPendingEntries = capacity.reservedPendingEntries ?? 0;
+    const reservedPendingBytes = capacity.reservedPendingBytes ?? 0;
+    if (pendingFiles.length + reservedPendingEntries >= captureInboxFileMaximumPendingEntries) {
+      throw new CaptureFailure("inbox_capacity_exceeded");
+    }
+    const pendingBytes = (await Promise.all(pendingFiles.map(async (fileName) =>
+      (await stat(join(directory, fileName))).size
+    ))).reduce((total, bytes) => total + bytes, 0);
+    if (
+      pendingBytes + reservedPendingBytes + Buffer.byteLength(serializedEntry, "utf8") >
+        captureInboxFileMaximumPendingBytes
+    ) {
+      throw new CaptureFailure("inbox_capacity_exceeded");
+    }
+    capacity.progress?.enter("inbox_write");
+    if (capacity.progress !== undefined) capacity.progress.persistence = "unconfirmed";
+    try {
+      await writeFileAtomicallyExclusive(
+        targetPath,
+        serializedEntry,
+        0o600
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      await validateExistingSpoolEntry(targetPath, event.eventId);
+    }
+    return { state: "spooled", eventId: event.eventId };
+  };
 }
 
 export type CaptureInboxFileImportResult =
@@ -239,7 +253,8 @@ export async function importNextCaptureInboxEventFile(request: {
     const project = parsed.event.projectId === undefined
       ? await resolveProject({
           path: parsed.projectPath,
-          runtimeRoot: request.runtimeRoot
+          runtimeRoot: request.runtimeRoot,
+          ...(parsed.event.sessionId === undefined ? {} : { sessionId: parsed.event.sessionId })
         })
       : undefined;
     const event = captureEventSchema.parse({

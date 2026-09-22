@@ -14,10 +14,11 @@ import {
 import {
   captureInboxFileMaximumPendingBytes,
   captureInboxFileMaximumPendingEntries,
-  appendCaptureInboxEventFile,
+  prepareCaptureInboxEventWrite,
   importNextCaptureInboxEventFile,
   inspectCaptureInboxFiles
 } from "./inbox-files.js";
+import { CaptureFailure, type CaptureProgress } from "./deadline.js";
 
 export const captureInboxMaximumPendingEntries = captureInboxFileMaximumPendingEntries;
 export const captureInboxMaximumPendingBytes = captureInboxFileMaximumPendingBytes;
@@ -175,11 +176,15 @@ async function pendingCapacity(runtimeRoot: string): Promise<{
   };
 }
 
-async function withCapacityLock<T>(runtimeRoot: string, action: () => Promise<T>): Promise<T> {
+async function withCapacityLock<T>(runtimeRoot: string, action: () => Promise<T>, progress?: CaptureProgress): Promise<T> {
+  progress?.enter("inbox_lock");
   const lockPath = capacityLockPath(runtimeRoot);
   await mkdir(join(runtimeRoot, "spool", "capture"), { recursive: true, mode: 0o700 });
-  const deadline = performance.now() + captureInboxCapacityLockTimeoutMilliseconds;
+  const deadline = progress !== undefined && Number.isFinite(progress.deadlineAt)
+    ? progress.deadlineAt - 100
+    : performance.now() + captureInboxCapacityLockTimeoutMilliseconds;
   for (;;) {
+    if (performance.now() >= deadline) throw new CaptureFailure("inbox_lock_timeout");
     try {
       await mkdir(lockPath, { mode: 0o700 });
       break;
@@ -196,7 +201,7 @@ async function withCapacityLock<T>(runtimeRoot: string, action: () => Promise<T>
         throw inspectionError;
       }
       if (performance.now() >= deadline) {
-        throw new Error("Capture Inbox capacity lock timed out.");
+        throw new CaptureFailure("inbox_lock_timeout");
       }
       await delay(5);
     }
@@ -257,24 +262,28 @@ export async function appendCaptureDisposition(request: {
   readonly projectPath: string;
   readonly capturedAt: string;
   readonly disposition: CaptureDisposition;
+  readonly progress?: CaptureProgress;
 }): Promise<{
   readonly state: "durable";
   readonly eventId: string;
 }> {
   if (request.disposition.state === "event") {
     const event = request.disposition.event;
+    const persist = prepareCaptureInboxEventWrite({
+      runtimeRoot: request.runtimeRoot, projectPath: request.projectPath,
+      spooledAt: request.capturedAt, event
+    });
     return withCapacityLock(request.runtimeRoot, async () => {
-      const capacity = await pendingCapacity(request.runtimeRoot);
-      const result = await appendCaptureInboxEventFile({
-        runtimeRoot: request.runtimeRoot,
-        projectPath: request.projectPath,
-        spooledAt: request.capturedAt,
-        event,
-        reservedPendingEntries: capacity.dispositionCount,
-        reservedPendingBytes: capacity.dispositionBytes
+      request.progress?.enter("inbox_scan");
+      const dispositions = await dispositionFileNames(request.runtimeRoot);
+      const dispositionBytes = await fileBytes(dispositionRoot(request.runtimeRoot), dispositions);
+      const result = await persist({
+        reservedPendingEntries: dispositions.length,
+        reservedPendingBytes: dispositionBytes,
+        ...(request.progress === undefined ? {} : { progress: request.progress })
       });
       return { state: "durable" as const, eventId: result.eventId };
-    });
+    }, request.progress);
   }
   const content = bodyFreeDispositionContentSchema.parse({
     schemaVersion: 1,
@@ -288,6 +297,7 @@ export async function appendCaptureDisposition(request: {
     contentSha256: dispositionIdentity(content)
   });
   return withCapacityLock(request.runtimeRoot, async () => {
+    request.progress?.enter("inbox_scan");
     const directory = dispositionRoot(request.runtimeRoot);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const path = join(
@@ -315,21 +325,19 @@ export async function appendCaptureDisposition(request: {
     if (
       capacity.normalCount + capacity.dispositionCount >= captureInboxMaximumPendingEntries
     ) {
-      throw new Error(
-        `Capture Inbox capacity exceeded (${String(captureInboxMaximumPendingEntries)} pending dispositions).`
-      );
+      throw new CaptureFailure("inbox_capacity_exceeded");
     }
     if (
       capacity.normalBytes + capacity.dispositionBytes +
         Buffer.byteLength(serializedFile, "utf8") > captureInboxMaximumPendingBytes
     ) {
-      throw new Error(
-        `Capture Inbox byte capacity exceeded (${String(captureInboxMaximumPendingBytes)} bytes).`
-      );
+      throw new CaptureFailure("inbox_capacity_exceeded");
     }
+    request.progress?.enter("inbox_write");
+    if (request.progress !== undefined) request.progress.persistence = "unconfirmed";
     await writeFileAtomicallyExclusive(path, serializedFile, 0o600);
     return { state: "durable" as const, eventId: content.event.eventId };
-  });
+  }, request.progress);
 }
 
 export async function inspectCaptureInbox(runtimeRoot: string): Promise<{

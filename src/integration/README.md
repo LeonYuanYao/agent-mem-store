@@ -15,6 +15,11 @@ Plans and applies installation of hooks, MCP configuration, worker launch settin
 
 previewFriendlySetup / applyFriendlySetup provide the installer workflow; managed.ts owns manifests, preservation, upgrades, uninstall and native-memory cutover.
 
+Managed command hooks have an explicit `MemStore (<event>)` statusMessage.
+Stop, SessionStart, UserPromptSubmit and PostToolUse allow two host seconds;
+SessionEnd allows three. Updating an existing hook definition may require Codex
+trust review; never fabricate a host-owned trusted hash to suppress that review.
+
 - [operations/initialize.ts](../../src/operations/initialize.ts)
 - [cli/command.ts](../../src/cli/command.ts)
 - [adapters/README.md](../../src/adapters/README.md)
