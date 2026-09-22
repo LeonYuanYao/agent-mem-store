@@ -15,6 +15,11 @@ Loads portable Vault policy and machine-bound runtime configuration, validates c
 
 loadConfiguration resolves and validates documents; rememberLastKnownGoodConfiguration supports recovery; hook-display.ts reads display and SessionStart settings.
 
+`[adapters].subagents_enabled` defaults false. Every Hook reads it before capture
+and retrieval; missing or invalid configuration keeps subagents disabled. This
+machine-local setting does not disable explicit MCP/Skill operations or change
+Codex native memory configuration.
+
 - [operations/initialize.ts](../../src/operations/initialize.ts)
 - [integration/setup.ts](../../src/integration/setup.ts)
 - [cli/codex-hook.ts](../../src/cli/codex-hook.ts)

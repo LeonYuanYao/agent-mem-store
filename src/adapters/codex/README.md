@@ -9,10 +9,19 @@ Maps supported Codex events into project-scoped, durable capture and bounded ses
 ## Start here
 
 - [hook.ts](hook.ts)
+- [session-kind.ts](session-kind.ts)
 
 ## Flow and collaborators
 
 handleCodexHook validates host input and resolves the project/session route before capture; the CLI hook entry owns output rendering and foreground IPC.
+
+Before capture, the CLI applies the default-off subagent policy. session-kind.ts
+reads the exact thread's source from the newest `state_N.sqlite` under
+`CODEX_HOME` (or `~/.codex`), read-only with no SQLite lock wait. Its fallback reads
+at most 1 MiB of the host-provided transcript's first record and requires a
+matching session ID. Both formats are host implementation details; unknown
+identity skips automatic memory work with a body-free notice. No transcript or
+host metadata is retained.
 
 Stop has a shared monotonic capture budget. Read-only Project discovery has at
 most 200 ms and aborts its Git child on expiry; unresolved discovery is deferred

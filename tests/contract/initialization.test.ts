@@ -81,6 +81,7 @@ test("initialization creates separate portable and machine configuration", async
     readFile(join(vaultRoot, "_MemStore", "policy.toml"), "utf8"),
     readFile(join(runtimeRoot, "config.toml"), "utf8")
   ]);
+  expect(machineSource).toContain("subagents_enabled = false");
 
   expect(result).toEqual({
     schemaVersion: 1,

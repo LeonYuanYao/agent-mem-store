@@ -101,6 +101,21 @@ produces Agent-derived candidates; only admitted Durable Memory participates in
 normal recall. Human-authored assertions retain their authority, and Project
 knowledge does not automatically become Global knowledge.
 
+Automatic capture and injection are **disabled for Codex subagents by default**.
+To enable them, add `subagents_enabled = true` to the existing `[adapters]` section
+in `<runtime>/config.toml`. Use `false` to disable them again. Hooks read this on
+each event; no Worker restart is needed. Missing, invalid or unreadable settings
+keep subagents disabled. Primary sessions, including standalone `codex exec`,
+keep their normal behavior. Unknown session identity produces a body-free
+`session_kind_unknown` notice and skips that event; the next event retries identification.
+
+This switch leaves explicit MCP/Skill operations available, preserves already
+captured work, and cannot remove inherited parent context. Results returned to
+the parent can still be captured there. Codex native memory has separate controls:
+set `use_memories = false` and `generate_memories = false` under `[memories]` in
+the custom agent's TOML file. See the official [memory controls](https://learn.chatgpt.com/docs/customization/memories)
+and [custom agent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents).
+
 SessionStart background injection is **off by default**. To opt in, set
 `session_start_injection = true` in `[adapters]` in `<runtime>/config.toml`.
 Missing or unreadable settings keep it off. The Hook reads the switch on every

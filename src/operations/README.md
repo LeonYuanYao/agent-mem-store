@@ -18,6 +18,9 @@ Provides user-facing use cases shared by command and tool surfaces: setup, recal
 
 Start at the file matching the command. project.ts and session-migration.ts manage scope changes; portability.ts owns handoff/backup; quality.ts and knowledge-verification.ts expose quality workflows.
 
+Initialization writes `[adapters].subagents_enabled = false` in machine-local
+configuration. Older configurations receive the same default at Hook read time.
+
 - [cli/command.ts](../../src/cli/command.ts)
 - [mcp/server.ts](../../src/mcp/server.ts)
 - [candidates/README.md](../../src/candidates/README.md)

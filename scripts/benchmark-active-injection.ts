@@ -9,6 +9,7 @@ import { startForegroundRetrievalServer } from "../src/retrieval/foreground-ipc.
 import { buildRetrievalIndex } from "../src/retrieval/index.js";
 import { writeCanonicalMemory } from "../src/vault/index.js";
 import { makeCanonicalMemory } from "../tests/helpers/canonical-memory.js";
+import { codexPrimaryInput } from "../tests/helpers/codex-primary-input.js";
 
 const configuredRuntimeIndex = process.argv.indexOf("--configured-runtime");
 const configuredRuntime = resolve(
@@ -63,11 +64,13 @@ function summarize(values: readonly number[]) {
 }
 
 async function invokeHook(event: "SessionStart" | "UserPromptSubmit", input: Record<string, unknown>) {
+  const hostInput = await codexPrimaryInput(root, input);
   const started = performance.now();
   const child = spawn(process.execPath, [hookEntrypoint, "codex", event], {
     cwd: resolve("."),
     env: {
       ...process.env,
+      CODEX_HOME: join(root, "absent-codex"),
       MEMSTORE_RUNTIME_ROOT: runtimeRoot,
       MEMSTORE_INJECTION_MODE: "active"
     },
@@ -77,7 +80,7 @@ async function invokeHook(event: "SessionStart" | "UserPromptSubmit", input: Rec
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
-  child.stdin.end(JSON.stringify(input));
+  child.stdin.end(JSON.stringify(hostInput));
   const status = await new Promise<number | null>((resolveExit) => child.once("close", resolveExit));
   const latencyMilliseconds = performance.now() - started;
   if (status !== 0) throw new Error(`Active Hook failed: ${stderr}`);

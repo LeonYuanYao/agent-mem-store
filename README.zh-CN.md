@@ -70,6 +70,10 @@ Worker 就绪后，安装器会申请 macOS 通知权限。拒绝通知不会关
 
 Codex 集成会采集会话事件，交由后台提取知识。Luna 生成 Agent-derived 候选，只有通过准入的正式长期记忆才参与正常召回。人工编写的断言保留其权威性，Project 知识不会自动升级为 Global 知识。
 
+Codex 子代理的自动采集和注入**默认关闭**。如需开启，在 `<runtime>/config.toml` 已有的 `[adapters]` 段设置 `subagents_enabled = true`；改回 `false` 即可关闭。Hook 每次执行都会读取开关，无需重启 Worker。配置缺失、无效或不可读时保持关闭。主会话（包括独立启动的 `codex exec`）保持原有行为。如果本地元数据无法确认会话身份，MemStore 显示无正文的 `session_kind_unknown` 提示，跳过本次事件，下次事件重新识别。
+
+开关不影响显式 MCP/Skill 操作，不删除已采集数据，也不移除从父会话继承的上下文；子代理返回给父会话的结果仍可能被父会话采集。Codex 原生记忆另有配置：在自定义子代理 TOML 的 `[memories]` 下，将 `use_memories` 和 `generate_memories` 都设为 `false`，分别关闭原生记忆使用和生成。参见官方[记忆配置](https://learn.chatgpt.com/docs/customization/memories)和[自定义子代理配置](https://learn.chatgpt.com/docs/agent-configuration/subagents)。这些配置不控制 MemStore。
+
 SessionStart 背景注入**默认关闭**。如需启用，在 `<runtime>/config.toml` 的 `[adapters]` 段设置 `session_start_injection = true`。配置缺失或不可读时保持关闭。Hook 在每次 SessionStart 读取开关；事件采集保留，UserPromptSubmit 检索不变。首次非空的 prompt 注入会按需附带记忆标识说明。关闭开关无法移除对话中已经存在的记忆文本。
 
 启用后，SessionStart 选择项目／全局背景，最多 12 条、1,200 tokens，不针对第一条用户消息排序。UserPromptSubmit 根据当前任务检索，目标预算为 600 tokens，最多 1,024 tokens、6 条。这些数字是上限，不要求填满。检索结果可能不相关或互相重叠，Agent 使用前应结合当前任务和显式指令判断。`<memstore-candidates>` 表示可能相关的检索结果，不表示生命周期中尚未准入的 Candidate。

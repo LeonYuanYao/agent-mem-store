@@ -5,7 +5,8 @@ import { z } from "zod";
 import { handleCodexHook } from "../adapters/codex/hook.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { requestForegroundRetrieval } from "../retrieval/foreground-client.js";
-import { readHookDisplay, readSessionStartInjection, renderHookDisplay } from "../configuration/hook-display.js";
+import { readHookDisplay, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
+import { inspectCodexSessionKind } from "../adapters/codex/session-kind.js";
 import { CaptureProgress, captureErrorCode, renderCaptureDiagnostic } from "../capture/deadline.js";
 
 const codexHookEventSchema = z.enum([
@@ -32,6 +33,7 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
   }
   const progress = new CaptureProgress(event === "Stop" ? 1300 : Infinity);
   const watchdogState = { expired: false };
+  const watchdogExpired = (): boolean => watchdogState.expired;
   // Leave startup/output headroom inside the two-second host limit. A hard
   // host kill cannot print diagnostics; this watchdog handles async stalls first.
   const watchdog = event === "Stop" ? setTimeout(() => {
@@ -45,12 +47,24 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
     const input = z.record(z.string(), z.unknown()).parse(
       JSON.parse(await consumeText(process.stdin))
     );
+    progress.enter("session_policy");
+    if (!await readSubagentsEnabled(resolve(runtimeRoot))) {
+      const kind = await inspectCodexSessionKind(input);
+      if (watchdogExpired()) return;
+      if (kind !== "primary") {
+        process.stdout.write(`${JSON.stringify({ continue: true,
+          ...(kind === "unknown" ? { systemMessage: `MemStore (${event}): session_kind_unknown; capture and injection skipped. The session will continue.` } : {})
+        })}\n`);
+        return;
+      }
+    }
+    if (watchdogExpired()) return;
     const result = await handleCodexHook({
       runtimeRoot: resolve(runtimeRoot),
       input: { ...input, hook_event_name: event },
       progress
     });
-    if (watchdogState.expired) return;
+    if (watchdogExpired()) return;
     if (result.state === "capture_unavailable") {
       process.stderr.write(`${renderCaptureDiagnostic(result.diagnostic)}\n`);
     }
@@ -92,7 +106,7 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
     }
     process.stdout.write(`${JSON.stringify(output)}\n`);
   } catch (error) {
-    if (watchdogState.expired) return;
+    if (watchdogExpired()) return;
     const code = error instanceof z.ZodError || error instanceof SyntaxError
       ? "invalid_hook_input" : captureErrorCode(error);
     const message = renderCaptureDiagnostic(progress.diagnostic(event, code));

@@ -8,8 +8,21 @@ export type HookDisplay = z.infer<typeof hookDisplaySchema>;
 
 export const adapterDisplaySchema = z.object({
   hook_display: hookDisplaySchema.default("summary"),
-  session_start_injection: z.boolean().default(false)
-}).loose().default({ hook_display: "summary", session_start_injection: false });
+  session_start_injection: z.boolean().default(false),
+  subagents_enabled: z.boolean().default(false)
+}).loose().default({ hook_display: "summary", session_start_injection: false, subagents_enabled: false });
+
+export async function readSubagentsEnabled(runtimeRoot: string): Promise<boolean> {
+  try {
+    const config = z.object({
+      schema_version: z.literal(1),
+      adapters: z.object({ subagents_enabled: z.boolean().default(false) })
+    }).parse(parse(await readFile(join(runtimeRoot, "config.toml"), "utf8")));
+    return config.adapters.subagents_enabled;
+  } catch {
+    return false;
+  }
+}
 
 export async function readSessionStartInjection(runtimeRoot: string): Promise<boolean> {
   try {

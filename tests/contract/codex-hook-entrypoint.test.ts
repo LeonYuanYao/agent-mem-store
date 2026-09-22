@@ -9,6 +9,7 @@ import { afterEach, expect, test } from "vitest";
 
 import { foregroundRetrievalSocketPath } from "../../src/retrieval/foreground-client.js";
 import { adapterDisplaySchema, readSessionStartInjection, renderHookDisplay } from "../../src/configuration/hook-display.js";
+import { codexPrimaryInput } from "../helpers/codex-primary-input.js";
 
 const temporaryDirectories: string[] = [];
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -40,6 +41,7 @@ async function runHook(request: {
   readonly input: Record<string, unknown>;
   readonly environment?: Record<string, string>;
 }): Promise<{ readonly status: number | null; readonly stdout: string; readonly stderr: string }> {
+  const input = await codexPrimaryInput(join(request.runtimeRoot, ".."), request.input);
   const child = spawn(
     process.execPath,
     ["--import", "tsx", hookEntrypoint, "codex", request.event],
@@ -47,6 +49,7 @@ async function runHook(request: {
       cwd: repositoryRoot,
       env: {
         ...process.env,
+        CODEX_HOME: join(request.runtimeRoot, "absent-codex"),
         MEMSTORE_RUNTIME_ROOT: request.runtimeRoot,
         ...request.environment
       },
@@ -57,7 +60,7 @@ async function runHook(request: {
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
-  child.stdin.end(JSON.stringify(request.input));
+  child.stdin.end(JSON.stringify(input));
   const status = await new Promise<number | null>((resolveExit) => child.once("close", resolveExit));
   return { status, stdout, stderr };
 }
@@ -167,7 +170,7 @@ test("the external Codex Hook entrypoint captures PostToolUse within its one-sec
   const root = await mkdtemp(join(tmpdir(), "memstore-hook-entrypoint-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
-  const input = JSON.stringify({
+  const input = JSON.stringify(await codexPrimaryInput(root, {
     hook_event_name: "PostToolUse",
     session_id: "session-entrypoint",
     turn_id: "turn-entrypoint",
@@ -176,7 +179,7 @@ test("the external Codex Hook entrypoint captures PostToolUse within its one-sec
     tool_use_id: "call-entrypoint",
     tool_input: { cmd: "git status --short" },
     tool_response: { status: "ok", exit_code: 0 }
-  });
+  }));
 
   const result = spawnSync(
     process.execPath,
@@ -184,7 +187,7 @@ test("the external Codex Hook entrypoint captures PostToolUse within its one-sec
     {
       cwd: repositoryRoot,
       encoding: "utf8",
-      env: { ...process.env, MEMSTORE_RUNTIME_ROOT: runtimeRoot },
+      env: { ...process.env, CODEX_HOME: join(root, "absent-codex"), MEMSTORE_RUNTIME_ROOT: runtimeRoot },
       input,
       timeout: 1_000
     }
@@ -198,7 +201,7 @@ test("the external Codex Hook entrypoint captures PostToolUse within its one-sec
 test("the installed legacy CLI Hook route also returns within its one-second host deadline", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-legacy-hook-entrypoint-"));
   temporaryDirectories.push(root);
-  const input = JSON.stringify({
+  const input = JSON.stringify(await codexPrimaryInput(root, {
     hook_event_name: "PostToolUse",
     session_id: "legacy-session-entrypoint",
     turn_id: "legacy-turn-entrypoint",
@@ -207,7 +210,7 @@ test("the installed legacy CLI Hook route also returns within its one-second hos
     tool_use_id: "legacy-call-entrypoint",
     tool_input: { cmd: "git status --short" },
     tool_response: { status: "ok", exit_code: 0 }
-  });
+  }));
 
   const result = spawnSync(
     process.execPath,
@@ -217,6 +220,7 @@ test("the installed legacy CLI Hook route also returns within its one-second hos
       encoding: "utf8",
       env: {
         ...process.env,
+        CODEX_HOME: join(root, "absent-codex"),
         MEMSTORE_RUNTIME_ROOT: join(root, "runtime")
       },
       input,
@@ -233,13 +237,13 @@ test("the external Stop Hook spools within its host deadline while Runtime SQLit
   const root = await mkdtemp(join(tmpdir(), "memstore-busy-hook-entrypoint-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
-  const environment = { ...process.env, MEMSTORE_RUNTIME_ROOT: runtimeRoot };
-  const initialInput = JSON.stringify({
+  const environment = { ...process.env, CODEX_HOME: join(root, "absent-codex"), MEMSTORE_RUNTIME_ROOT: runtimeRoot };
+  const initialInput = JSON.stringify(await codexPrimaryInput(root, {
     session_id: "busy-entrypoint-session",
     turn_id: "turn-1",
     cwd: root,
     last_assistant_message: "initial capture"
-  });
+  }));
   const initialized = spawnSync(
     process.execPath,
     ["--import", "tsx", hookEntrypoint, "codex", "Stop"],
@@ -265,6 +269,7 @@ test("the external Stop Hook spools within its host deadline while Runtime SQLit
         encoding: "utf8",
         env: environment,
         input: JSON.stringify({
+          transcript_path: join(root, "primary-transcript.jsonl"),
           session_id: "busy-entrypoint-session",
           turn_id: "turn-2",
           cwd: root,

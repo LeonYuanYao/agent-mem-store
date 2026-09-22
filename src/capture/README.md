@@ -24,6 +24,9 @@ body-free file capacity are each scanned once under the lock. Publication still
 requires the existing atomic, synced write. Persistence is `unconfirmed` once a
 write begins, not optimistically successful on timeout.
 
+The CLI's `session_policy` stage precedes this module. A disabled subagent or
+unknown session identity never enters capture or creates a health incident.
+
 - [adapters/codex/hook.ts](../../src/adapters/codex/hook.ts)
 - [worker/evidence.ts](../../src/worker/evidence.ts)
 - [runtime/database.ts](../../src/runtime/database.ts)

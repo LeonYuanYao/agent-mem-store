@@ -1,5 +1,5 @@
 /** Monotonic, process-local capture budget. Never includes user content. */
-export type CaptureStage = "input" | "project_lookup" | "sanitize" | "inbox_lock" |
+export type CaptureStage = "input" | "session_policy" | "project_lookup" | "sanitize" | "inbox_lock" |
   "inbox_scan" | "inbox_write" | "health";
 export type CapturePersistence = "not_saved" | "unconfirmed" | "saved" | "body_free";
 

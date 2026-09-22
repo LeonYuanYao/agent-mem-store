@@ -17,6 +17,11 @@ Parses user commands, resolves configuration and dispatches operations; provides
 
 command.ts composes normal CLI operations and worker adapters. codex-hook.ts reads host JSON, captures the event and requests eligible foreground injection.
 
+Both CLI hook routes share the default-off subagent gate before capture,
+Project resolution and foreground IPC. Excluded subagents return `continue: true`;
+unknown identity adds a body-free `session_kind_unknown` notice. Neither path
+creates capture, sensitivity, receipt or health state.
+
 Stop shares a 1,300 ms internal capture budget and a 1,450 ms async-stall watchdog
 under its two-second host limit. The watchdog emits one fail-open systemMessage
 and stderr diagnostic, then exits; it cannot guarantee output after a host kill,
