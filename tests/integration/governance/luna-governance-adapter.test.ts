@@ -54,7 +54,7 @@ test("the real Luna adapter exposes a versioned authority-safe governance task",
   });
 
   const prompt = requests[0]?.standardInput;
-  expect(prompt).toContain('"promptVersion":4');
+  expect(prompt).toContain('"promptVersion":5');
   expect(prompt).toContain("Conditional architecture is still durable");
   expect(prompt).toContain("Monthly full scans use the same evidence threshold");
   expect(prompt).toContain('"task":"review_memory_governance_page"');

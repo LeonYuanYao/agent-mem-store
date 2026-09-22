@@ -213,10 +213,64 @@ See [ADR-0033](./docs/adr/0033-store-bad-case-state-and-diagnostics-separately.m
 - Crossing high water creates a recoverable local obligation. The Worker catches missed wake-ups and resolves pressure no later than six hours after observation when local storage is available. Snapshot-publication failure retains the prior larger foreground set and retries without losing knowledge.
 - At the hard limit, ordinary Agent-derived Candidate promotion waits with reason `memory_space_capacity_hard_limit`; the limit is evaluated against ranked Agent-derived Memory plus in-flight reservations, not the complete durable corpus. Capture, distillation, Candidate retention, Human-authored writes, and explicit retrieval continue.
 - If hard-protected entries exceed low water, reconciliation retains them and exposes `low_water_unreachable`; it never weakens protection to satisfy a numeric target. Successful routine rebalancing does not create per-Memory Review Inbox noise.
-- Durable-corpus reduction remains separate. A Memory may leave the corpus only through reviewed successor/correction/invalidation, source-first transient cleanup, explicit user action, or future atom-preserving consolidation. Age or low retrieval frequency alone is insufficient.
+- Durable-corpus reduction remains separate. A Memory may leave the corpus through reviewed successor/correction/invalidation, source-first transient cleanup, explicit user action, or explicitly enabled competitive capacity archival. Capacity archival records a retention choice, without declaring the content invalid.
 - Runtime metrics, models, and scheduled governance cannot silently change thresholds, weaken protection, enable automatic cold rescue, or convert a ranking exclusion into archival or deletion.
 
 See [ADR-0121](./docs/adr/0121-bound-active-agent-memory-per-space.md) for the accepted capacity, protection, and recovery boundary.
+
+Repository-local corpus-retention operations are separately documented in the
+[implementation plan](./docs/design/economical-corpus-retention-implementation-plan.md).
+They provide deterministic previews and exact-preview, explicitly authorized
+capacity archival without declaring knowledge invalid. Portable
+`[corpus_retention].mode` defaults to `off`; `preview` records proposals and
+`apply` enables bounded, resumable execution after explicit activation review.
+Project and aggregate pressure continue to target; protection and fourteen-day
+activity safeguards take precedence over convergence. The CLI supports inspection,
+read-only preview and explicit digest-bound one-batch application. Scheduling uses
+six-hour idle checks, thirty-second continuation and five-minute failure backoff.
+Plan records expire after 180 days except the current pending plan.
+Optional fixed-capacity mode uses `active_limit` and `active_headroom` together.
+It counts every Active entry, including Human-authored and ranking-excluded
+knowledge, across all spaces. The approved trial is 5,000 with 50 slots of
+headroom. At the limit, archival targets 4,950; fixed mode disables per-project
+corpus quotas and the fourteen-day eligibility cutoff. Existing Human, pin,
+retain-forever, startup-always, sensitive, safety-category and open-review
+protections remain. Time is a tie-breaker, not a validity judgment.
+
+When mode is `apply`, canonical create/restore writes reserve slots atomically
+before touching Markdown. Concurrent writers share the same count. Human writes
+and explicit restores also require a free slot, with an actionable error when
+full; existing Active revisions and archival remain available. Capacity-blocked
+Candidates wait durably and reuse matching semantic assessments after slots open.
+Capture continues. A protected over-capacity corpus pauses admission rather than
+weakening protection. External Obsidian edits/catalog rebuilds remain authoritative
+and can create over-capacity pressure; the bound governs managed admissions.
+
+Reservation recovery releases dead writers' unwritten or already-cataloged slots.
+An interrupted write with an unpublished canonical file holds its slot until
+reconciliation; elapsed time alone never releases a live writer's reservation.
+Status exposes pending reservations and capacity-waiting Candidates. Model-based
+successor retirement remains a separate, unactivated policy.
+
+Repository-local retention-value support separates content type from retention
+horizon and competitive priority. Luna Medium supplies a bounded future-use
+scenario and reason during existing extraction/consolidation calls; weekly and
+monthly pages may supplement at most twenty missing Agent assessments without a
+separate model operation. Unknown assessments compete as normal. Task requirements,
+artifact details, run results and non-durable horizons cannot obtain effective
+high priority merely from the model's high label. High priority is never immunity
+from capacity selection or permission to archive, promote or rewrite knowledge.
+
+Migration 0063 stores one derived assessment per Memory, keyed by semantic input
+hash and assessment-policy version. Body, applicability, semantic conditions or
+scope changes invalidate reuse; receipts, ordinary maintenance revisions and
+representation refreshes do not. Rule upgrades refresh lazily through existing
+work. Missing, malformed or old-version values remain unknown; no full-corpus
+model backfill is scheduled. Tombstoning or Human authority removes the cached
+model assessment. Migration 0064 adds durable Active admission reservations and
+capacity waiters. Installation and archival activation require explicit approval.
+See [ADR-0139](./docs/adr/0139-cache-retention-value-in-existing-model-work.md) and
+[ADR-0140](./docs/adr/0140-enforce-aggregate-active-capacity.md).
 
 ## Archive and purge
 
@@ -483,6 +537,14 @@ See [ADR-0007](./docs/adr/0007-expose-core-memory-operations-through-a-thin-skil
 See [ADR-0038](./docs/adr/0038-use-progressive-explicit-recall-with-warnings.md) for the accepted recall surface and budget warning, [ADR-0039](./docs/adr/0039-allow-explicit-cross-project-recall-with-scope-labels.md) for the accepted cross-Project read boundary, [ADR-0076](./docs/adr/0076-page-explicit-search-and-deepen-by-memory-identity.md) for canonical search, pagination, and body-read semantics, and [ADR-0077](./docs/adr/0077-page-provenance-and-one-hop-relationships.md) for progressive evidence, relationship, and irrelevant-result reporting. ADR-0038 supersedes only ADR-0024's 8,192-token hard limit for Explicit Deep Retrieval; ADR-0024's automatic injection budgets remain accepted.
 
 ## Installation and operational CLI
+
+- Exhausted transient Luna queue operations (`timeout`, `unavailable`, or
+  `rate_limited`) receive at most two additional single-attempt recovery probes
+  per manual retry epoch. Each requires a six-hour cooldown, healthy model state,
+  and an independent successful model operation after the last failure. A failed
+  probe never restarts the six fast retries. Other exhausted failures require
+  explicit handling. Doctor distinguishes cooldown/evidence waiting from exhausted
+  recovery; timeout alone never proves an offline condition. See ADR-0138.
 
 - A first macOS installation uses `./install.sh` or `memstore setup`. Setup is
   preview-first and requires `--apply` before it changes Codex configuration,

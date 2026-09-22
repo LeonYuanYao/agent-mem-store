@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import { loadRetentionAssessmentCache, matchRetentionAssessment, recordRetentionAssessment } from "../capacity/retention-cache.js";
+import { retentionSubjectHash, retentionValuePolicyVersion, retentionValueSchema } from "../capacity/retention-value.js";
 import { enforceGovernanceDecisionPolicy, governancePolicyInputSchema } from "./decision-policy.js";
 import { completePageEvidence } from "./page-evidence.js";
 
@@ -522,6 +524,22 @@ async function applyReviewedCheckpoint(request: {
   }
   const parsedReview = governanceOutputSchema.parse(JSON.parse(outputSource));
   const frozenInput = governancePolicyInputSchema.parse(JSON.parse(z.string().parse(request.checkpoint.input_json)));
+  const retentionInput = z.object({
+    retentionPolicyVersion: z.string().optional(),
+    retentionTargets: z.array(z.object({ memoryId: z.string(), subjectHash: z.string() })).max(20).optional()
+  }).parse(JSON.parse(z.string().parse(request.checkpoint.input_json)));
+  if (retentionInput.retentionPolicyVersion === retentionValuePolicyVersion) {
+    for (const assessment of parsedReview.retentionAssessments ?? []) {
+      const target = retentionInput.retentionTargets?.find(item => item.memoryId === assessment.memoryId);
+      if (target === undefined) continue;
+      const current = await readCanonicalMemory({ ...request, memoryId: target.memoryId });
+      if (current === undefined || retentionSubjectHash(current.memory) !== target.subjectHash) continue;
+      const value = retentionValueSchema.parse({ contentKind: assessment.contentKind, horizon: assessment.horizon,
+        priority: assessment.priority, futureUse: assessment.futureUse, reason: assessment.reason });
+      await recordRetentionAssessment({ ...request, memory: current.memory,
+        assessment: { ...value, policyVersion: retentionInput.retentionPolicyVersion }, assessedAt: request.now });
+    }
+  }
   const currentRevisions = new Map<string, string>();
   if (parsedReview.decisionEvidence !== undefined) {
     const evidenceDatabase = await openRuntimeDatabase(request.runtimeRoot);
@@ -839,8 +857,14 @@ export async function runNextGovernanceStep(request: {
         });
       } finally { evidenceDatabase.close(); }
     }
+    const retentionCache = await loadRetentionAssessmentCache(request.runtimeRoot);
+    const retentionTargets = completedPage.memories.filter(memory => memory.authority === "agent_derived" && memory.lifecycle === "active" &&
+      matchRetentionAssessment(retentionCache, memory) === undefined).slice(0, 20)
+      .map(memory => ({ memoryId: memory.memoryId, subjectHash: retentionSubjectHash(memory) }));
     preparedInput = {
       source: JSON.stringify({
+        retentionPolicyVersion: retentionValuePolicyVersion,
+        retentionTargets,
         schemaVersion: 1,
         runId: run.runId,
         runKind: run.runKind,

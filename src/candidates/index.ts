@@ -10,6 +10,9 @@ import {
   reconcileMemoryCapacity
 } from "../capacity/index.js";
 import { readCapturedEvent } from "../capture/index.js";
+import type { RetentionAssessment } from "../capacity/retention-value.js";
+import { recordRetentionAssessment } from "../capacity/retention-cache.js";
+import { ActiveCapacityError } from "../vault/active-capacity.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import type { ImportanceReason, ImportanceTag } from "../luna/index.js";
 import {
@@ -59,6 +62,7 @@ export interface CandidateContent {
   readonly importanceReasons?: readonly ImportanceReason[];
   readonly sensitivity?: "normal" | "private";
   readonly durability?: CandidateDurability;
+  readonly retentionAssessment?: RetentionAssessment;
 }
 
 export interface CandidateEvidence {
@@ -965,7 +969,19 @@ async function loadDurableSemanticAssessment(request: {
   readonly candidateId: string;
   readonly operationId?: string;
 }): Promise<SemanticAssessment | undefined> {
-  if (request.operationId === undefined) return undefined;
+  if (request.operationId === undefined) {
+    const reader = await openRuntimeDatabase(request.runtimeRoot);
+    try {
+      const cached = reader.prepare(`SELECT w.assessment_operation_id FROM active_capacity_waiters w
+        JOIN memory_candidates c USING(candidate_id)
+        JOIN luna_operations o ON o.operation_id=w.assessment_operation_id
+        WHERE w.candidate_id=? AND w.evidence_generation=c.evidence_generation AND o.state='completed'`)
+        .get(request.candidateId);
+      if (typeof cached?.assessment_operation_id !== "string") return undefined;
+      request = { ...request, operationId: cached.assessment_operation_id };
+    } finally { reader.close(); }
+  }
+  const operationId = z.string().parse(request.operationId);
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     const row = database.prepare(
@@ -980,7 +996,7 @@ async function loadDurableSemanticAssessment(request: {
        JOIN memory_candidates AS candidate
          ON candidate.candidate_id = assessment.candidate_id
        WHERE assessment.operation_id = ? AND assessment.candidate_id = ?`
-    ).get(request.operationId, request.candidateId);
+    ).get(operationId, request.candidateId);
     if (
       row === undefined ||
       row.operation_kind !== "semantic_assessment" ||
@@ -1020,7 +1036,7 @@ async function loadDurableSemanticAssessment(request: {
         "legacy_unclassified"
       ]).parse(row.durability_disposition),
       assessedBy: z.literal("gpt-5.6-luna").parse(row.assessed_by),
-      operationId: request.operationId
+      operationId
     };
   } finally {
     database.close();
@@ -1428,12 +1444,31 @@ export async function evaluateCandidate(request: {
     memoryId
   });
   if (existingMemory === undefined) {
+    try {
     await writeCanonicalMemory({
       vaultRoot: request.vaultRoot,
       runtimeRoot: request.runtimeRoot,
       actor: "agent",
       memory
     });
+    } catch (error) {
+      if (!(error instanceof ActiveCapacityError)) throw error;
+      const writer = await openRuntimeDatabase(request.runtimeRoot);
+      try {
+        writer.exec("BEGIN IMMEDIATE");
+        writer.prepare(`UPDATE memory_candidates SET promotion_generation=NULL, successful_evaluation_at=?, updated_at=?
+          WHERE candidate_id=? AND evidence_generation=? AND promotion_generation=?`)
+          .run(evaluatedAt, evaluatedAt, request.candidateId, evaluationGeneration, evaluationGeneration);
+        writer.prepare(`INSERT INTO active_capacity_waiters VALUES (?, ?, ?, ?)
+          ON CONFLICT(candidate_id) DO UPDATE SET evidence_generation=excluded.evidence_generation,
+            assessment_operation_id=excluded.assessment_operation_id`)
+          .run(request.candidateId, evaluationGeneration, semanticAssessment?.operationId ?? null, evaluatedAt);
+        recordDecision(writer, request.candidateId, "wait", "aggregate_active_capacity_limit", evaluatedAt);
+        writer.exec("COMMIT");
+      } catch (cause) { writer.exec("ROLLBACK"); throw cause; }
+      finally { writer.close(); }
+      return { state: "wait", candidateId: request.candidateId, reason: "aggregate_active_capacity_limit" };
+    }
   } else if (
     existingMemory.memory.authority !== "agent_derived" ||
     existingMemory.memory.revisionId !== revisionId ||
@@ -1441,6 +1476,10 @@ export async function evaluateCandidate(request: {
     JSON.stringify(existingMemory.memory.scope) !== JSON.stringify(scope)
   ) {
     throw new Error("Reserved promotion identity belongs to different Canonical content.");
+  }
+  if (candidate.retentionAssessment !== undefined) {
+    await recordRetentionAssessment({ ...request, memory,
+      assessment: candidate.retentionAssessment, assessedAt: evaluatedAt });
   }
   const update = await openRuntimeDatabase(request.runtimeRoot);
   try {
@@ -1463,6 +1502,7 @@ export async function evaluateCandidate(request: {
       throw new Error("Candidate changed before promotion could commit.");
     }
     recordDecision(update, request.candidateId, "promote", "promotion_gate_passed", evaluatedAt);
+    update.prepare("DELETE FROM active_capacity_waiters WHERE candidate_id=?").run(request.candidateId);
     update.exec("COMMIT");
   } catch (error) {
     update.exec("ROLLBACK");
@@ -1526,6 +1566,7 @@ async function commitNonPromotion(
       throw new Error("Candidate changed before governance evaluation could commit.");
     }
     recordDecision(database, candidateId, state === "rejected" ? "reject" : state, reason, now);
+    database.prepare("DELETE FROM active_capacity_waiters WHERE candidate_id=?").run(candidateId);
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");

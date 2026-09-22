@@ -30,6 +30,17 @@ Owns scheduling order and adapter composition, not a second copy of each domain'
 
 Keep idle iterations low-write and protect foreground work. Open long-running turns are not automatically actionable batches. Respect leases, retry times and idempotency; success must follow persisted completion.
 
+Portable `[corpus_retention].mode` defaults to `off`. Its opt-in preview/apply
+scheduler checks every six hours, continues bounded progress after thirty seconds
+and retries failures after five minutes. Pending plans survive interruption and
+yield to foreground work; disabling or changing configuration stops the old plan.
+No model calls occur. `runWorkerOnce.corpusRetentionPreviewPolicy` remains a
+preview-only test adapter. Live activation requires a separate reviewed decision.
+
+Distillation preserves optional retention assessments through Candidate ingestion.
+Existing extraction/consolidation and governance calls produce these soft values;
+the Worker does not create a separate backfill queue or foreground model request.
+
 Consolidation checkpoints the validated model output and structured input hash in `session_consolidations.result_json` before admission. Retries reuse this result and replay idempotent Candidate ingestion in pages of at most 64. Advance the Session cursor only after all pages persist; then replace the checkpoint with the final admitted output. A long Session has no 64-Candidate total ceiling.
 
 ## Verification

@@ -752,7 +752,8 @@ async function ingestDistilledCandidates(request: {
         importanceTags: distilled.importanceTags,
         importanceReasons: distilled.importanceReasons,
         sensitivity: distilled.sensitivity,
-        durability: distilled.durability
+        durability: distilled.durability,
+        ...(distilled.retentionAssessment === undefined ? {} : { retentionAssessment: distilled.retentionAssessment })
       },
       evidence,
       sourceSessionId: request.sessionId,

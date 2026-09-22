@@ -37,6 +37,11 @@ Successful hooks stay silent unless ordinary retrieval display is enabled.
 
 Can start background services and invoke mutating operations. Hook context injection uses worker IPC; model distillation stays in background work.
 
+`capacity corpus status` and `capacity corpus preview` are read-only. One-batch
+archival requires `capacity corpus apply --file PREVIEW.json --gate DIGEST --apply`.
+The supplied preview may be raw JSON or the preview command's JSON envelope; both
+must pass exact-plan validation. This command does not enable automatic scheduling.
+
 ## Invariants and change risks
 
 Keep stdout machine-readable for JSON and hook output. Do not pull expensive model/index initialization into lightweight hooks. Preserve preview/apply semantics, exit codes and documented command parity.

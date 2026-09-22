@@ -18,6 +18,7 @@ import {
   type MemoryCategory
 } from "../memories/categories.js";
 import { enqueueCompactQualityRecord } from "../quality/enqueue.js";
+import { reserveActiveAdmission, finishActiveAdmission } from "./active-capacity.js";
 
 const uuidV4Suffix =
   "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
@@ -863,6 +864,30 @@ async function requireReconciledCatalog(
 }
 
 export async function writeCanonicalMemory(
+  request: WriteCanonicalMemoryRequest
+): Promise<CanonicalWriteResult> {
+  validateCanonicalIdentity(request.memory);
+  const path = canonicalPath(resolve(request.vaultRoot), request.memory);
+  const admission = request.memory.lifecycle === "active"
+    ? await reserveActiveAdmission({ ...request, memoryId: request.memory.memoryId, path }) : undefined;
+  let completed = false;
+  try {
+    const result = await writeCanonicalMemoryWithAdmission(request);
+    completed = true;
+    return result;
+  } finally {
+    if (admission !== undefined) {
+      let safeToRelease = completed || !(await exists(path));
+      if (!safeToRelease) {
+        try { safeToRelease = parseCanonical(await readFile(path, "utf8")).lifecycle !== "active"; }
+        catch { /* Preserve the slot until an incomplete write is reconciled. */ }
+      }
+      await finishActiveAdmission(request.runtimeRoot, admission, safeToRelease);
+    }
+  }
+}
+
+async function writeCanonicalMemoryWithAdmission(
   request: WriteCanonicalMemoryRequest
 ): Promise<CanonicalWriteResult> {
   validateCanonicalIdentity(request.memory);

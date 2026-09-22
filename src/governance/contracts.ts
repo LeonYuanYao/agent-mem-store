@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { retentionValueSchema } from "../capacity/retention-value.js";
 
 import type { CanonicalMemory } from "../vault/index.js";
 
@@ -62,7 +63,8 @@ export const governanceOutputSchema = z.object({
   reviewSuggestions: z.array(reviewSuggestionSchema).max(100),
   futurePurgeObligations: z.array(futurePurgeSchema).max(100),
   decisionEvidence: z.array(governanceDecisionEvidenceSchema).max(200).optional(),
-  summaryItems: z.array(z.string().min(1).max(240)).max(16)
+  summaryItems: z.array(z.string().min(1).max(240)).max(16),
+  retentionAssessments: z.array(retentionValueSchema.extend({ memoryId: z.string().min(1) })).max(20).optional()
 });
 
 export const governanceOutputJsonSchema = {
@@ -70,9 +72,11 @@ export const governanceOutputJsonSchema = {
   additionalProperties: false,
   required: [
     "schemaVersion", "kind", "agentActions", "reviewSuggestions",
-    "futurePurgeObligations", "summaryItems", "decisionEvidence"
+    "futurePurgeObligations", "summaryItems", "decisionEvidence", "retentionAssessments"
   ],
   properties: {
+    retentionAssessments: { type: "array", maxItems: 20,
+      items: z.toJSONSchema(retentionValueSchema.extend({ memoryId: z.string().min(1) })) },
     decisionEvidence: {
       type: "array", maxItems: 200,
       items: z.toJSONSchema(governanceDecisionEvidenceSchema)
@@ -193,6 +197,8 @@ export interface GovernanceAuditSignals {
 }
 
 export interface GovernancePageRequest {
+  readonly retentionPolicyVersion?: string;
+  readonly retentionTargets?: readonly { readonly memoryId: string; readonly subjectHash: string }[];
   readonly schemaVersion: 1;
   readonly runId: string;
   readonly runKind: "weekly" | "monthly";

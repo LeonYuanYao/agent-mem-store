@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { openRuntimeDatabase } from "../runtime/database.js";
+import { connectionRecoveryCandidateSql, connectionRecoveryCooldownMilliseconds } from "./recovery-policy.js";
 import type {
   LunaInvocationError,
   LunaFailureCategory,
@@ -34,7 +35,12 @@ const safeDiagnosticSchema = z.object({
     "local_processing"
   ]),
   code: z.string().regex(/^[a-z0-9_]{1,128}$/u),
-  path: z.string().regex(/^[A-Za-z0-9_.-]{1,256}$/u).optional()
+  path: z.string().regex(/^[A-Za-z0-9_.-]{1,256}$/u).optional(),
+  timeoutMilliseconds: z.number().int().nonnegative().optional(),
+  elapsedMilliseconds: z.number().int().nonnegative().optional(),
+  inputCharacters: z.number().int().nonnegative().optional(),
+  stdoutBytes: z.number().int().nonnegative().optional(),
+  stderrBytes: z.number().int().nonnegative().optional()
 });
 
 function diagnosticSource(diagnostic: LunaSafeDiagnostic | undefined): string | null {
@@ -191,9 +197,15 @@ export async function claimLunaOperation(
       state = 'pending'
       OR (state = 'retrying' AND next_retry_at <= ?)
       OR (state = 'processing' AND lease_until < ?)
+      OR (${connectionRecoveryCandidateSql}
+          AND updated_at <= ?
+          AND EXISTS (SELECT 1 FROM luna_health_state AS health
+            WHERE health.singleton = 1 AND health.state = 'healthy'
+              AND health.last_success_at > luna_operations.updated_at))
     )${kindFilter}
     ORDER BY ${kindOrder}created_at ASC LIMIT 1`;
-  const selectionArguments = [now, now, ...(kinds ?? [])] as const;
+  const recoveryBefore = new Date(Date.parse(now) - connectionRecoveryCooldownMilliseconds).toISOString();
+  const selectionArguments = [now, now, recoveryBefore, ...(kinds ?? [])] as const;
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     if (database.prepare(selectionSql).get(...selectionArguments) === undefined) {
@@ -213,7 +225,8 @@ export async function claimLunaOperation(
       database
         .prepare(
           `UPDATE luna_operations
-           SET state = 'processing', attempt_count = attempt_count + 1,
+           SET connection_recovery_count = connection_recovery_count + CASE WHEN state = 'blocked' THEN 1 ELSE 0 END,
+               state = 'processing', attempt_count = attempt_count + 1,
                epoch_attempt_count = epoch_attempt_count + 1,
                lease_token = ?, leased_by = ?, lease_until = ?, updated_at = ?
            WHERE operation_id = ?`
@@ -491,13 +504,14 @@ export async function failLunaOperation(
     try {
       const row = database
         .prepare(
-          `SELECT epoch_attempt_count FROM luna_operations
+          `SELECT epoch_attempt_count, connection_recovery_count FROM luna_operations
            WHERE operation_id = ? AND state = 'processing' AND lease_token = ?`
         )
         .get(request.operationId, request.leaseToken);
       if (row === undefined) throw new Error("Luna operation lease is not owned.");
       const epochAttemptCount = z.number().int().positive().parse(row.epoch_attempt_count);
-      const blocked = !canAutomaticallyRetry(request.error.retryable, epochAttemptCount);
+      const blocked = z.number().parse(row.connection_recovery_count) > 0 ||
+        !canAutomaticallyRetry(request.error.retryable, epochAttemptCount);
       const nextRetryAt = blocked
         ? null
         : request.retryAfter === undefined
@@ -598,7 +612,7 @@ export async function retryBlockedLunaOperations(request: {
       .prepare(
         `UPDATE luna_operations
          SET state = 'pending', next_retry_at = NULL,
-             retry_epoch = retry_epoch + 1, epoch_attempt_count = 0,
+             retry_epoch = retry_epoch + 1, epoch_attempt_count = 0, connection_recovery_count = 0,
              updated_at = ?
          WHERE state = 'blocked'`
       )

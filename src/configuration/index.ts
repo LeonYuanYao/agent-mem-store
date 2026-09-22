@@ -6,6 +6,7 @@ import { z } from "zod";
 import { writeFileAtomically } from "../contracts/atomic-file.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { adapterDisplaySchema } from "./hook-display.js";
+import { corpusRetentionConfigurationSchema, type CorpusRetentionConfiguration } from "./corpus-retention.js";
 
 const extensibleSectionSchema = z.record(z.string(), z.unknown()).default({});
 const policyOwnedKeys = [
@@ -13,6 +14,7 @@ const policyOwnedKeys = [
   "lifecycle",
   "promotion",
   "capacity",
+  "corpus_retention",
   "injection",
   "governance",
   "review",
@@ -71,6 +73,7 @@ const policySchema = z.object({
   lifecycle: extensibleSectionSchema,
   promotion: extensibleSectionSchema,
   capacity: memoryCapacitySchema,
+  corpus_retention: corpusRetentionConfigurationSchema,
   injection: extensibleSectionSchema,
   governance: z.object({
     timezone: z.string().min(1),
@@ -120,6 +123,7 @@ export interface LoadedConfiguration {
     readonly candidateTombstoneDays: number;
     readonly sensitivityMetadataDays: number;
     readonly injectionReceiptDays: number;
+    readonly corpusRetention: CorpusRetentionConfiguration;
     readonly governanceTimezone: string;
     readonly weeklyGovernance: "EVERY_3_DAYS 19:00";
     readonly monthlyGovernance: "MONDAY 19:00";
@@ -363,6 +367,7 @@ export async function loadConfiguration(
       candidateTombstoneDays: policy.retention.candidate_tombstone_days,
       sensitivityMetadataDays: policy.retention.sensitivity_metadata_days,
       injectionReceiptDays: policy.retention.injection_receipt_days,
+      corpusRetention: policy.corpus_retention,
       governanceTimezone: policy.governance.timezone,
       weeklyGovernance: policy.governance.weekly,
       monthlyGovernance: policy.governance.monthly,

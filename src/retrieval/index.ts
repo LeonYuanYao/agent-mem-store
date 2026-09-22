@@ -7,6 +7,7 @@ import { getEncoding } from "js-tiktoken";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { readCanonicalRevision, type CanonicalMemory } from "../vault/index.js";
 import { acknowledgeUnleasedIndexPublication } from "./index-coordinator.js";
+import { basePriorityTier } from "../memories/priority.js";
 
 const embeddingIdentitySchema = z.object({
   adapterVersion: z.string().min(1),
@@ -58,20 +59,6 @@ function searchableText(memory: CanonicalMemory): string {
     ...memory.semanticContract.exclusions,
     ...memory.semanticContract.preservedNegations
   ].filter((item) => item.length > 0).join("\n");
-}
-
-function basePriorityTier(memory: CanonicalMemory): "critical" | "strong" | "normal" {
-  if (
-    memory.primaryCategory === "safety_data_integrity" ||
-    (memory.authority === "human_authored" &&
-      ["preference_constraint", "architecture_contract"].includes(memory.primaryCategory)) ||
-    memory.importanceTags.some((tag) => ["safety", "architecture", "decision"].includes(tag))
-  ) return "critical";
-  if (
-    ["failure_recovery_hazard", "workflow_environment_toolchain"].includes(memory.primaryCategory) ||
-    memory.importanceTags.includes("constraint")
-  ) return "strong";
-  return "normal";
 }
 
 function sessionOrderKey(memory: CanonicalMemory): string {

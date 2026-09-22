@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { inspectIndexWait } from "../retrieval/index-wait.js";
 import { Temporal } from "@js-temporal/polyfill";
+import { runScheduledCorpusRetention, type CorpusRetentionPolicy } from "../capacity/corpus-retention.js";
 
 import {
   inspectMemoryWorkingSetGeneration,
@@ -127,6 +128,7 @@ export async function runWorkerOnce(request: {
   readonly now: string;
   readonly workerStartedAt: string;
   readonly adapters?: WorkerAdapters;
+  readonly corpusRetentionPreviewPolicy?: CorpusRetentionPolicy;
 }): Promise<{ readonly state: "paused" | "idle" | "worked"; readonly activities?: readonly string[] }> {
   const now = z.iso.datetime().parse(request.now);
   const workerStartedAt = z.iso.datetime().parse(request.workerStartedAt);
@@ -164,6 +166,16 @@ export async function runWorkerOnce(request: {
   if (paused) return { state: "paused" };
 
   const activities: string[] = [];
+  try {
+    const corpus = await runScheduledCorpusRetention({
+      runtimeRoot: request.runtimeRoot, vaultRoot: request.vaultRoot,
+      now,
+      ...(request.corpusRetentionPreviewPolicy === undefined ? {} : { configuration: { mode: "preview", policy: request.corpusRetentionPreviewPolicy } }),
+      ...(request.adapters?.foregroundPressure === undefined ? {} : { foregroundPressure: request.adapters.foregroundPressure })
+    });
+    if (corpus.state !== "waiting" && corpus.state !== "off") activities.push(corpus.state === "deferred"
+      ? "corpus-retention:deferred" : `corpus-retention:${corpus.state}:${String(corpus.count)}`);
+  } catch { activities.push("corpus-retention:deferred"); }
   if (admissionPruningDue) {
     const pruned = await pruneExpiredAdmissionAudit({
       runtimeRoot: request.runtimeRoot,

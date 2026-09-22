@@ -25,6 +25,11 @@ createAgentCandidate records a proposal; evaluateCandidate applies promotion rul
 
 Mutates candidate/evidence/verification rows and can write promoted canonical Markdown. Expiration and tombstone deletion must retain their distinct semantics.
 
+Candidates may carry a versioned retention assessment from extraction. Promotion
+copies it into the semantic-input-bound Runtime cache without another model call.
+It does not alter promotion gates, Human authority or the canonical body. Old-policy
+assessments are ignored and can be supplemented by later governance.
+
 ## Invariants and change risks
 
 An Agent-derived statement cannot become Human-authored through model confidence. Candidate admission, corroboration and recall eligibility are separate decisions. Preserve scope, provenance and global authorization checks.

@@ -12,6 +12,7 @@ import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
 import { inspectForegroundHealth } from "../health/foreground.js";
 import { foregroundRetrievalSocketPath } from "../retrieval/foreground-protocol.js";
 import { inspectIndexHealth } from "../health/index.js";
+import { connectionRecoveryCandidateSql, connectionRecoveryCooldownMilliseconds } from "../luna/recovery-policy.js";
 
 export interface DoctorCheck {
   readonly name: string;
@@ -237,13 +238,10 @@ export async function inspectDoctor(request: {
     const lunaOperations = database.prepare(
       `SELECT COUNT(*) AS active_count,
               SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) AS blocked_count,
-              SUM(CASE WHEN state = 'blocked' AND last_error_category IN
-                ('timeout', 'unavailable', 'rate_limited') THEN 1 ELSE 0 END)
+              SUM(CASE WHEN ${connectionRecoveryCandidateSql} THEN 1 ELSE 0 END)
                 AS offline_blocked_count,
-              SUM(CASE WHEN state = 'blocked' AND (last_error_category IS NULL OR
-                last_error_category NOT IN ('timeout', 'unavailable', 'rate_limited'))
-                THEN 1 ELSE 0 END)
-                AS actionable_blocked_count
+              MIN(CASE WHEN ${connectionRecoveryCandidateSql} THEN updated_at END)
+                AS earliest_recovery_failure_at
        FROM luna_operations
        WHERE state IN ('pending', 'processing', 'retrying', 'blocked')`
     ).get();
@@ -271,16 +269,21 @@ export async function inspectDoctor(request: {
     const offlineBlockedLunaOperationCount = z.number().int().nonnegative().parse(
       lunaOperations?.offline_blocked_count ?? 0
     );
-    const actionableBlockedLunaOperationCount = z.number().int().nonnegative().parse(
-      lunaOperations?.actionable_blocked_count ?? 0
-    );
+    const actionableBlockedLunaOperationCount = blockedLunaOperationCount - offlineBlockedLunaOperationCount;
+    const recoveryAfter = typeof lunaOperations?.earliest_recovery_failure_at === "string"
+      ? new Date(Date.parse(lunaOperations.earliest_recovery_failure_at) + connectionRecoveryCooldownMilliseconds).toISOString()
+      : null;
     checks.push({
       name: "luna_operations",
-      state: actionableBlockedLunaOperationCount > 0 ? "warning" : "ok",
+      state: actionableBlockedLunaOperationCount > 0 ? "warning" : offlineBlockedLunaOperationCount > 0 ? "info" : "ok",
+      ...(offlineBlockedLunaOperationCount > 0 ? {
+        nextEvaluationAt: recoveryAfter !== null && recoveryAfter > now ? recoveryAfter : null,
+        recoveryCondition: "A successful model operation after the failure, healthy model state, and six-hour cooldown; at most two single-attempt recovery probes."
+      } : {}),
       detail: actionableBlockedLunaOperationCount > 0
-        ? `${String(actionableBlockedLunaOperationCount)} blocked actionable of ${String(activeLunaOperationCount)} active Luna operations.`
+        ? `${String(actionableBlockedLunaOperationCount)} blocked actionable of ${String(activeLunaOperationCount)} active Luna operations; automatic retries stopped and explicit handling is required.`
         : offlineBlockedLunaOperationCount > 0
-          ? `${String(offlineBlockedLunaOperationCount)} Luna operations have background work paused by connectivity; local capture and recall remain available.`
+          ? `${String(offlineBlockedLunaOperationCount)} Luna operations await recovery evidence and cooldown (not before ${recoveryAfter ?? "unknown"}); timeout alone does not prove a network outage. Local capture and recall remain available.`
           : blockedLunaOperationCount > 0
             ? `${String(blockedLunaOperationCount)} blocked Luna operations require classification.`
         : `${String(activeLunaOperationCount)} active Luna operations; none blocked.`
@@ -342,7 +345,7 @@ export async function retryOperation(request: {
       `UPDATE luna_operations
        SET state = 'pending', next_retry_at = NULL, lease_token = NULL,
            leased_by = NULL, lease_until = NULL,
-           retry_epoch = retry_epoch + 1, epoch_attempt_count = 0,
+           retry_epoch = retry_epoch + 1, epoch_attempt_count = 0, connection_recovery_count = 0,
            updated_at = ?
        WHERE operation_id = ? AND state IN ('blocked', 'retrying')`
     ).run(requestedAt, operationId);

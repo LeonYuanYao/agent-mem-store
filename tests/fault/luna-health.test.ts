@@ -20,6 +20,66 @@ import { openRuntimeDatabase } from "../../src/runtime/database.js";
 
 const temporaryDirectories: string[] = [];
 
+test.each(["timeout", "unavailable", "rate_limited"] as const)("an exhausted %s resumes only after recovery and cooldown, with two single-attempt probes", async (category) => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-reconnect-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const operation = await enqueueLunaOperation({ runtimeRoot, kind: "consolidate_session",
+    idempotencyKey: "reconnect", payload: { sessionId: "reconnect" },
+    createdAt: "2026-08-07T00:00:00.000Z" });
+  for (let attempt = 1; attempt <= 7; attempt++) {
+    const now = `2026-08-07T00:00:0${String(attempt)}.000Z`;
+    const claimed = await claimLunaOperation({ runtimeRoot, workerId: "worker", now, leaseSeconds: 60 });
+    if (claimed.state !== "claimed") throw new Error("Expected initial retry sequence.");
+    await failLunaOperation({ runtimeRoot, operationId: operation.operationId,
+      leaseToken: claimed.leaseToken, failedAt: now,
+      error: new LunaInvocationError(category, true, "Transient failure."), retryAfter: now });
+  }
+  const claim = (now: string) => claimLunaOperation({ runtimeRoot, workerId: "worker", now, leaseSeconds: 60 });
+  await expect(claim("2026-08-07T07:00:00.000Z")).resolves.toEqual({ state: "empty" });
+  const succeedOtherWork = async (at: string) => {
+    await enqueueLunaOperation({ runtimeRoot, kind: "distill_batch", idempotencyKey: at,
+      payload: {}, createdAt: at });
+    const other = await claimLunaOperation({ runtimeRoot, workerId: "other", now: at,
+      leaseSeconds: 60, kinds: ["distill_batch"] });
+    if (other.state !== "claimed") throw new Error("Expected independent work.");
+    await completeLunaOperation({ runtimeRoot, operationId: other.operation.operationId,
+      leaseToken: other.leaseToken, completedAt: at });
+  };
+  await succeedOtherWork("2026-08-07T07:01:00.000Z");
+  for (const [probe, now] of ["2026-08-07T07:02:00.000Z", "2026-08-07T14:02:00.000Z"].entries()) {
+    const resumed = await claim(now);
+    expect(resumed.state).toBe("claimed");
+    if (resumed.state !== "claimed") throw new Error("Expected a recovery probe.");
+    expect(resumed.operation.operationId).toBe(operation.operationId);
+    expect(resumed.operation.attemptCount).toBe(8 + probe);
+    const failed = await failLunaOperation({ runtimeRoot, operationId: operation.operationId,
+      leaseToken: resumed.leaseToken, failedAt: now,
+      error: new LunaInvocationError(category, true, "Still failing.") });
+    expect(failed.state).toBe("blocked");
+    await succeedOtherWork(probe === 0 ? "2026-08-07T07:03:00.000Z" : "2026-08-07T14:03:00.000Z");
+    await expect(claim(probe === 0 ? "2026-08-07T08:00:00.000Z" : "2026-08-08T00:00:00.000Z"))
+      .resolves.toEqual({ state: "empty" });
+  }
+});
+
+test.each(["schema_invalid", "authentication", "invalid_model", "invalid_configuration", "input_too_large"] as const)(
+  "recovered connectivity never retries a blocked %s operation", async (category) => {
+    const root = await mkdtemp(join(tmpdir(), "memstore-luna-no-reconnect-"));
+    temporaryDirectories.push(root);
+    const runtimeRoot = join(root, "runtime");
+    const operation = await enqueueLunaOperation({ runtimeRoot, kind: "consolidate_session",
+      idempotencyKey: "blocked", payload: {}, createdAt: "2026-08-07T00:00:00.000Z" });
+    const db = await openRuntimeDatabase(runtimeRoot);
+    db.prepare("UPDATE luna_operations SET state='blocked', epoch_attempt_count=7, last_error_category=? WHERE operation_id=?")
+      .run(category, operation.operationId);
+    db.prepare("UPDATE luna_health_state SET state='healthy', last_success_at='2026-08-07T01:00:00.000Z'").run();
+    db.close();
+    await expect(claimLunaOperation({ runtimeRoot, workerId: "worker", now: "2026-08-08T00:00:00.000Z", leaseSeconds: 60 }))
+      .resolves.toEqual({ state: "empty" });
+  }
+);
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>

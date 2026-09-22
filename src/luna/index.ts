@@ -3,6 +3,7 @@ import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
+import { retentionValueSchema, retentionValuePolicyVersion, retentionValueRules } from "../capacity/retention-value.js";
 import { enforceGovernanceDecisionPolicy } from "../governance/decision-policy.js";
 
 import {
@@ -320,6 +321,9 @@ const distilledCandidateSchema = z.object({
     "uncertain"
   ]).optional(),
   durability: candidateDurabilitySchema,
+  retentionAssessment: retentionValueSchema.extend({
+    policyVersion: z.string().default(retentionValuePolicyVersion)
+  }).optional(),
   importanceReasons: z.array(importanceReasonSchema).max(8)
 }).superRefine((candidate, context) => {
   if (new Set(candidate.categoryTags).size !== candidate.categoryTags.length) {
@@ -393,9 +397,11 @@ const distillationOutputJsonSchema = {
           "evidenceIds",
           "retentionDecision",
           "durability",
+          "retentionAssessment",
           "importanceReasons"
         ],
         properties: {
+          retentionAssessment: z.toJSONSchema(retentionValueSchema),
           statement: { type: "string", minLength: 1, maxLength: 16_384 },
           primaryCategory: memoryCategoryJsonSchema,
           categoryTags: {
@@ -829,6 +835,11 @@ export interface LunaSafeDiagnostic {
     | "local_processing";
   readonly code: string;
   readonly path?: string;
+  readonly timeoutMilliseconds?: number;
+  readonly elapsedMilliseconds?: number;
+  readonly inputCharacters?: number;
+  readonly stdoutBytes?: number;
+  readonly stderrBytes?: number;
 }
 
 export class LunaInvocationError extends Error {
@@ -1004,9 +1015,10 @@ export class CodexLunaAdapter {
       distillationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 6,
+        promptVersion: 7,
         task: "distill_memory_candidates",
         rules: [
+          ...retentionValueRules,
           "Use only supplied evidence.",
           "Preserve scope, certainty, conditions, exclusions, and negations.",
           "Split mixed evidence into atomic clauses before classifying retention and never attach a transient observation to a durable rule.",
@@ -1385,9 +1397,10 @@ export class CodexLunaAdapter {
       consolidationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 6,
+        promptVersion: 7,
         task: "consolidate_session_candidates",
         rules: [
+          ...retentionValueRules,
           "Use only structured Batch results and their evidence identities.",
           "Input Candidates have already passed Batch admission; do not reconstruct omitted or rejected clauses.",
           "Keep input clauses atomic and return only long_term or project_phase clauses as Candidates.",
@@ -1570,9 +1583,11 @@ export class CodexLunaAdapter {
       governanceOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 4,
+        promptVersion: 5,
         task: "review_memory_governance_page",
         rules: [
+          ...retentionValueRules,
+          "Return retentionAssessments only for request.retentionTargets, using the already supplied Memory text. Return an empty array when there are no targets. Do not re-evaluate cached or Human memories. Retention priority is independent of governance actions and cannot authorize archival.",
           "Use only the frozen Memory revisions and audit signals supplied in this page.",
           "Never propose an Agent action against Human-authored Memory. A Review Suggestion requires a concrete new contradictory or changed fact; missing repository corroboration does not require human reconfirmation.",
           "Archive Agent-derived Memory when its own body and provenance establish that it is an operational probe, exact-response check, temporary progress or current run state rather than reusable knowledge; cite those supplied fields as evidence.",
@@ -1598,6 +1613,12 @@ export class CodexLunaAdapter {
       },
       governanceOutputSchema
     );
+    const requestedRetentionIds = new Set((request.retentionTargets ?? []).map(target => target.memoryId));
+    const returnedRetentionIds = (review.retentionAssessments ?? []).map(item => item.memoryId);
+    if (new Set(returnedRetentionIds).size !== returnedRetentionIds.length ||
+        returnedRetentionIds.some(id => !requestedRetentionIds.has(id) || !request.memories.some(memory => memory.memoryId === id && memory.authority === "agent_derived"))) {
+      throw new LunaInvocationError("schema_invalid", true, "Retention assessment cites an unavailable target.");
+    }
     return enforceGovernanceDecisionPolicy(request, review);
   }
 
@@ -1633,6 +1654,9 @@ export class CodexLunaAdapter {
       const lunaPath = process.env.PATH === undefined
         ? dirname(process.execPath)
         : `${dirname(process.execPath)}:${process.env.PATH}`;
+      const invocationStartedAt = performance.now();
+      const standardInput = JSON.stringify(prompt);
+      const processTimeoutMilliseconds = this.#options.timeoutMilliseconds ?? timeoutMilliseconds;
       const result = await (this.#options.runProcess ?? runLunaProcess)({
         executable: this.#options.codexExecutable,
         arguments: [
@@ -1691,10 +1715,19 @@ export class CodexLunaAdapter {
           PATH: lunaPath,
           CODEX_HOME: this.#options.codexHome
         },
-        standardInput: JSON.stringify(prompt),
-        timeoutMilliseconds: this.#options.timeoutMilliseconds ?? timeoutMilliseconds
+        standardInput,
+        timeoutMilliseconds: processTimeoutMilliseconds
       });
-      if (result.timedOut === true) throw classifyProcessFailure(result);
+      if (result.timedOut === true) {
+        throw new LunaInvocationError("timeout", true, "Luna invocation timed out.", {
+          stage: "invocation", code: "process_deadline_exceeded",
+          timeoutMilliseconds: processTimeoutMilliseconds,
+          elapsedMilliseconds: Math.max(0, Math.round(performance.now() - invocationStartedAt)),
+          inputCharacters: standardInput.length,
+          stdoutBytes: Buffer.byteLength(result.stdout),
+          stderrBytes: Buffer.byteLength(result.stderr)
+        });
+      }
       if (result.exitCode !== 0) throw classifyProcessFailure(result);
       let decoded: unknown;
       try {

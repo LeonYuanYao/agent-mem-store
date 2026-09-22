@@ -15,6 +15,12 @@ Defines structured model requests/responses and invokes the configured Codex sub
 
 CodexLunaAdapter owns prompt/schema construction, isolated execution and validation. operations.ts owns durable queue claims, leases, retry epochs and health reporting.
 
+`recovery-policy.ts` shares exhausted transient recovery eligibility with Doctor.
+After the fast retry budget, ordinary claims allow two single-attempt probes with
+a six-hour cooldown and independent healthy-model success evidence. Migration
+0061 persists the allowance. Schema/authentication/configuration/local failures
+remain explicit-retry-only. See ADR-0138; do not reopen fast retries for a probe.
+
 - [worker/distillation.ts](../../src/worker/distillation.ts)
 - [quality/pipeline.ts](../../src/quality/pipeline.ts)
 - [governance/contracts.ts](../../src/governance/contracts.ts)
@@ -30,6 +36,12 @@ Keep background calls isolated from workspace instructions, hooks and recursive 
 The exported consolidation output schema also validates the Worker's saved model checkpoint. Its 128-clause model-response bound is distinct from the Worker's final result, which may additionally contain locally restored priority Candidates and is admitted in pages.
 
 ## Verification
+
+Extraction/consolidation prompt v7 include a separate retention-value judgment in
+the same response. Governance prompt v5 evaluates only requested missing targets
+(at most twenty). The shared contract lives in `capacity/retention-value.ts`.
+Legacy saved responses without this field remain usable and unassessed. Reasons
+are derived ranking metadata, never replacement knowledge or injection text.
 
 Run from the repository root:
 

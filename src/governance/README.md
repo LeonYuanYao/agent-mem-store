@@ -29,6 +29,13 @@ Persists obligations, frozen inputs, checkpoints and action ledger; approved Age
 
 ## Invariants and change risks
 
+Each page may request retention-value judgments for up to twenty Active Agent
+memories without a current content/policy-matching cache entry. Targets and hashes
+are frozen in the checkpoint, and returned judgments are cached only while their
+semantic inputs still match canonical knowledge. Existing valid entries are not
+re-evaluated. This adds no standalone model jobs or archive authority; a low value
+cannot satisfy governance's evidence requirements for archival.
+
 Do not advance successful coverage on failure. Preserve Human authority, scope, revision freshness and idempotency. A possibly changing architecture is not retirement evidence. Literal quotes establish provenance, not semantic entailment.
 
 ## Verification

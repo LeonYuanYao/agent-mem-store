@@ -14,6 +14,7 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import {
   CodexLunaAdapter,
+  LunaInvocationError,
   type LunaProcessRequest,
   type LunaProcessResult
 } from "../../src/luna/index.js";
@@ -428,6 +429,11 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
               certainty: "asserted",
               sensitivity: "normal",
               evidenceIds: ["msevent_123"],
+              retentionAssessment: {
+                contentKind: "project_decision", horizon: "durable", priority: "high",
+                futureUse: "Resolve scope consistently across future sessions.",
+                reason: "The same isolation boundary applies across sessions."
+              },
               durability: {
                 disposition: "long_term",
                 futureReuseScenario: "Resolve Project Memory consistently in a future session.",
@@ -467,6 +473,9 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
 
   expect(result.candidates).toHaveLength(1);
   expect(result.candidates[0]?.statement).toContain("stable Project identities");
+  expect(result.candidates[0]?.retentionAssessment).toMatchObject({
+    policyVersion: "retention-value-v1", contentKind: "project_decision", horizon: "durable", priority: "high"
+  });
   expect(result.candidates[0]?.durability).toEqual({
     disposition: "long_term",
     futureReuseScenario: "Resolve Project Memory consistently in a future session.",
@@ -541,11 +550,19 @@ test("a timed-out Luna process is classified as timeout even when it exits with 
     })
   });
 
-  await expect(adapter.distillBatch({
+  const failure = await adapter.distillBatch({
     operationId: "msop-timeout-classification",
     scope: { kind: "global" },
     evidence: []
-  })).rejects.toMatchObject({ category: "timeout", retryable: true });
+  }).catch((error: unknown) => error);
+  if (!(failure instanceof LunaInvocationError)) throw new Error("Expected a classified timeout.");
+  expect(failure).toMatchObject({ category: "timeout", retryable: true,
+    diagnostic: { stage: "invocation", code: "process_deadline_exceeded", timeoutMilliseconds: 120_000 }
+  });
+  expect(failure.diagnostic?.elapsedMilliseconds).toBeTypeOf("number");
+  expect(failure.diagnostic?.inputCharacters).toBeTypeOf("number");
+  expect(failure.diagnostic?.stdoutBytes).toBeTypeOf("number");
+  expect(failure.diagnostic?.stderrBytes).toBeTypeOf("number");
 });
 
 test("schema-invalid Luna output is rejected without a fallback model", async () => {
@@ -706,7 +723,7 @@ test("distillation separates durable candidates from explicitly considered rejec
     }]
   });
 
-  expect(structuredRequest?.promptVersion).toBe(6);
+  expect(structuredRequest?.promptVersion).toBe(7);
   expect(structuredRequest?.rules).toEqual(expect.arrayContaining([
     "Return only long_term or project_phase clauses as Candidates.",
     "Summarize only memory-shaped clauses that you explicitly considered and rejected; do not count unconsidered input or pure tool noise.",
@@ -1553,7 +1570,7 @@ test("consolidation and semantic assessment use distinct versioned structured ta
   });
 
   expect(requests).toHaveLength(3);
-  expect(requests[0]?.standardInput).toContain('"promptVersion":6');
+  expect(requests[0]?.standardInput).toContain('"promptVersion":7');
   expect(requests[0]?.standardInput).toContain('"task":"consolidate_session_candidates"');
   expect(requests[0]?.standardInput).toContain(
     "return only long_term or project_phase clauses as Candidates"

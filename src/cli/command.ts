@@ -21,6 +21,7 @@ import {
   rebalanceMemoryWorkingSet
 } from "../capacity/index.js";
 import { loadConfiguration } from "../configuration/index.js";
+import { previewCorpusRetention, applyCorpusRetention, parseCorpusRetentionPreview, inspectCorpusRetention, loadCorpusRetentionConfiguration } from "../capacity/corpus-retention.js";
 import { readSessionProjectRoute, setSessionProjectRoute } from "../projects/session-route.js";
 import { migrateSessionProject } from "../operations/session-migration.js";
 import { loadArchiveRetentionMonths } from "../lifecycle/archive-retention.js";
@@ -1400,6 +1401,9 @@ Everyday use:
   memstore restore M:123 [--apply]
   memstore purge-memory M:123 --backup PATH [--gate DIGEST --apply]
   memstore review generate --preview
+  memstore capacity corpus status
+  memstore capacity corpus preview --json
+  memstore capacity corpus apply --file PREVIEW.json --gate DIGEST --apply
 
 All operational commands accept --json. Installed commands already know their
 Vault and Runtime roots; repository-local commands require --vault and --runtime.
@@ -1485,6 +1489,29 @@ async function run(arguments_: readonly string[]): Promise<void> {
     const result = await inspectOperation(roots(parsed.values).runtimeRoot, operationId);
     if (parsed.values.json) process.stdout.write(`${JSON.stringify(successEnvelope("operation.status", result))}\n`);
     else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (command === "capacity" && arguments_[1] === "corpus") {
+    const parsed = parseCommon(arguments_);
+    const location = roots(parsed.values);
+    const action = parsed.positionals[2];
+    const now = new Date().toISOString();
+    let result: unknown;
+    if (action === "status") result = await inspectCorpusRetention({ ...location, now });
+    else if (action === "preview") {
+      const configuration = await loadCorpusRetentionConfiguration(location);
+      result = await previewCorpusRetention({ ...location, policy: configuration.policy, observedAt: now });
+    } else if (action === "apply") {
+      if (!parsed.values.apply || parsed.values.preview || parsed.values.gate === undefined) {
+        throw new MemStoreCommandError("corpus_approval_required", "Use --apply --file <reviewed-preview.json> --gate <preview-digest> after reviewing capacity archival.");
+      }
+      const input = await readJsonFile(parsed.values.file);
+      const envelope = z.object({ ok: z.literal(true), command: z.literal("capacity.corpus.preview"), result: z.unknown() }).safeParse(input);
+      const preview = parseCorpusRetentionPreview(envelope.success ? envelope.data.result : input);
+      if (parsed.values.gate !== preview.digest) throw new MemStoreCommandError("corpus_approval_mismatch", "Approval must match the exact preview digest.");
+      result = await applyCorpusRetention({ ...location, preview, changedAt: now, authorizeCapacityArchive: true });
+    } else throw new MemStoreCommandError("corpus_action_required", "Use capacity corpus preview, status, or apply.");
+    process.stdout.write(`${JSON.stringify(parsed.values.json ? successEnvelope(`capacity.corpus.${action}`, result) : result, null, parsed.values.json ? undefined : 2)}\n`);
     return;
   }
   if (command === "capacity" && arguments_[1] === "rebalance") {

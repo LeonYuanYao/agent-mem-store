@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -22,10 +22,17 @@ import {
   recordHumanGlobalAuthorization
 } from "../../../src/candidates/human.js";
 import { captureEvent } from "../../../src/capture/index.js";
+import { readRetentionAssessment } from "../../../src/capacity/retention-cache.js";
+import type { RetentionAssessment } from "../../../src/capacity/retention-value.js";
 import { readCanonicalMemory } from "../../../src/vault/index.js";
+import { applyCorpusRetention, previewCorpusRetention } from "../../../src/capacity/corpus-retention.js";
+import { activateConfigurationDocument } from "../../../src/configuration/index.js";
+import { initializeMemStore } from "../../../src/operations/initialize.js";
+import { inspectCorpusRetention, runScheduledCorpusRetention } from "../../../src/capacity/corpus-retention.js";
 import { resolveProject } from "../../../src/projects/index.js";
 import {
   enqueueCandidateAssessment,
+  prepareNextCandidateEvaluation,
   runNextCandidateAssessment
 } from "../../../src/worker/governance.js";
 import {
@@ -65,6 +72,83 @@ const candidate = {
   certainty: "asserted" as const,
   importanceTags: ["constraint" as const]
 };
+
+test("promotion carries the extraction value judgment into a content-bound cache without another model call", async () => {
+  const paths = await createRoot();
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  const evidence = await captureUserEvidence({ runtimeRoot: paths.runtimeRoot, evidenceId: "retention-promotion",
+    projectId, occurredAt: "2026-08-07T08:00:00.000Z" });
+  const retentionAssessment: RetentionAssessment = { policyVersion: "retention-value-v1", contentKind: "project_decision",
+    horizon: "durable", priority: "high", futureUse: "Run validation before future changes are declared complete.",
+    reason: "This is a standing workflow convention." };
+  const entry = requireCandidate(await createAgentCandidate({ ...paths, scope: { kind: "project", projectId },
+    candidate: { ...candidate, retentionAssessment }, evidence: [evidence], createdAt: "2026-08-07T08:00:01.000Z" }));
+  const promoted = await evaluateCandidate({ ...paths, candidateId: entry.candidateId, evaluatedAt: "2026-08-07T08:00:02.000Z" });
+  if (promoted.state !== "promoted") throw new Error("Expected promotion.");
+  const current = await readCanonicalMemory({ ...paths, memoryId: promoted.memoryId });
+  if (current === undefined) throw new Error("Missing promoted memory.");
+  expect(await readRetentionAssessment({ ...paths, memory: current.memory })).toMatchObject({ assessment: retentionAssessment });
+});
+
+test("global capacity defers concurrent promotions then wakes them after archival without a new model assessment", async () => {
+  const paths = await createRoot();
+  await initializeMemStore({ ...paths, preview: false });
+  const source = await readFile(join(paths.vaultRoot, "_MemStore", "policy.toml"), "utf8");
+  await activateConfigurationDocument({ ...paths, document: "policy", preview: false,
+    source: `${source}\n[corpus_retention]\nmode = "apply"\nactive_limit = 2\nactive_headroom = 1\n` });
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  const entries = [];
+  for (let i = 0; i < 3; i += 1) {
+    const evidence = await captureUserEvidence({ runtimeRoot: paths.runtimeRoot, evidenceId: `fixed-${String(i)}`, projectId,
+      occurredAt: "2026-09-22T00:00:00.000Z" });
+    entries.push(requireCandidate(await createAgentCandidate({ ...paths, scope: { kind: "project", projectId },
+      candidate: { ...candidate, statement: `Workflow ${String(i)}: run typecheck before completion.` }, evidence: [evidence], createdAt: "2026-09-22T00:00:01.000Z" })));
+  }
+  const results = await Promise.all(entries.map((entry) => evaluateCandidate({ ...paths, candidateId: entry.candidateId, evaluatedAt: "2026-09-22T00:00:02.000Z" })));
+  expect(results.filter((result) => result.state === "promoted")).toHaveLength(2);
+  expect(results.filter((result) => result.state === "wait")).toEqual([expect.objectContaining({ reason: "aggregate_active_capacity_limit" })]);
+  expect(await inspectCorpusRetention(paths)).toMatchObject({ activeCount: 2, waitingCandidates: 1, pendingAdmissions: 0 });
+  expect(await runScheduledCorpusRetention({ ...paths, now: "2026-09-22T00:01:00.000Z" })).toMatchObject({ state: "applied", count: 1 });
+  const waiting = results.find((result) => result.state === "wait");
+  if (waiting === undefined) throw new Error("Expected a capacity waiter.");
+  expect(await prepareNextCandidateEvaluation({ ...paths, now: "2026-09-22T00:01:01.000Z" }))
+    .toMatchObject({ state: "evaluated", candidateId: waiting.candidateId, evaluationState: "promoted" });
+  expect(await inspectCorpusRetention(paths)).toMatchObject({ activeCount: 2, waitingCandidates: 0, pendingAdmissions: 0 });
+});
+
+test("replaying old evidence for a capacity-archived promoted Candidate does not recreate Active knowledge", async () => {
+  const paths = await createRoot();
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  const created = [];
+  for (let i = 0; i < 3; i += 1) {
+    const evidence = await captureUserEvidence({
+      runtimeRoot: paths.runtimeRoot, evidenceId: `capacity-replay-${String(i)}`, projectId,
+      occurredAt: "2026-08-07T08:00:00.000Z"
+    });
+    const content = { ...candidate, statement: `Workflow ${String(i)}: run typecheck before completion.` };
+    const entry = requireCandidate(await createAgentCandidate({
+      ...paths, scope: { kind: "project", projectId }, candidate: content, evidence: [evidence], createdAt: "2026-08-07T08:00:01.000Z"
+    }));
+    const promoted = await evaluateCandidate({ ...paths, candidateId: entry.candidateId, evaluatedAt: "2026-08-07T08:00:02.000Z" });
+    if (promoted.state !== "promoted") throw new Error("Expected promoted Candidate.");
+    created.push({ evidence, content, candidateId: entry.candidateId, memoryId: promoted.memoryId });
+  }
+  const observedAt = "2026-09-22T00:00:00.000Z";
+  const preview = await previewCorpusRetention({ ...paths, observedAt, policy: {
+    projectHighWater: 2, projectTarget: 1, aggregateHighWater: 10, aggregateTarget: 9, coldDays: 14, batchSize: 1
+  } });
+  await applyCorpusRetention({ ...paths, preview, changedAt: observedAt, authorizeCapacityArchive: true });
+  const archived = created.find((entry) => entry.memoryId === preview.items[0]?.memoryId);
+  if (archived === undefined) throw new Error("Expected one archived Candidate.");
+  const replayed = requireCandidate(await createAgentCandidate({
+    ...paths, scope: { kind: "project", projectId }, candidate: archived.content, evidence: [archived.evidence], createdAt: "2026-09-22T00:01:00.000Z"
+  }));
+  expect(replayed.candidateId).toBe(archived.candidateId);
+  const evaluated = await evaluateCandidate({ ...paths, candidateId: replayed.candidateId, evaluatedAt: "2026-09-22T00:02:00.000Z" });
+  expect(evaluated).toMatchObject({ memoryId: archived.memoryId });
+  expect((await readCanonicalMemory({ ...paths, memoryId: archived.memoryId }))?.memory.lifecycle).toBe("archived");
+  expect(await listRecallEligibleMemoryIds(paths.runtimeRoot)).not.toContain(archived.memoryId);
+});
 
 async function captureUserEvidence(request: {
   readonly runtimeRoot: string;

@@ -332,6 +332,26 @@ const migrations: readonly Migration[] = [
       "../../migrations/0060-injection-receipt-retention.sql",
       import.meta.url
     )
+  },
+  {
+    version: 61,
+    name: "luna_connection_recovery",
+    path: new URL("../../migrations/0061-luna-connection-recovery.sql", import.meta.url)
+  },
+  {
+    version: 62,
+    name: "corpus_retention_previews",
+    path: new URL("../../migrations/0062-corpus-retention-previews.sql", import.meta.url)
+  },
+  {
+    version: 63,
+    name: "retention_value_cache",
+    path: new URL("../../migrations/0063-retention-value-cache.sql", import.meta.url)
+  },
+  {
+    version: 64,
+    name: "active_capacity_admissions",
+    path: new URL("../../migrations/0064-active-capacity-admissions.sql", import.meta.url)
   }
 ];
 
@@ -356,7 +376,7 @@ export interface OpenRuntimeDatabaseOptions {
 
 export async function openRuntimeDatabaseReadOnly(
   runtimeRoot: string,
-  options: OpenRuntimeDatabaseOptions = {}
+  options: OpenRuntimeDatabaseOptions & { readonly minimumSchemaVersion?: number } = {}
 ): Promise<DatabaseSync> {
   const busyTimeoutMilliseconds = options.busyTimeoutMilliseconds ?? 250;
   if (
@@ -373,6 +393,10 @@ export async function openRuntimeDatabaseReadOnly(
     database.exec("PRAGMA foreign_keys = ON");
     database.exec(`PRAGMA busy_timeout = ${String(busyTimeoutMilliseconds)}`);
     const loadedMigrations = await loadMigrations();
+    const minimumSchemaVersion = options.minimumSchemaVersion ?? loadedMigrations.at(-1)?.version;
+    if (minimumSchemaVersion === undefined || !loadedMigrations.some((migration) => migration.version === minimumSchemaVersion)) {
+      throw new Error("The minimum read-only schema version must be a known migration.");
+    }
     const existingMigrations = new Map(
       database.prepare(
         "SELECT version, source_sha256 FROM schema_migrations ORDER BY version"
@@ -381,6 +405,7 @@ export async function openRuntimeDatabaseReadOnly(
     for (const migration of loadedMigrations) {
       const existingSourceSha256 = existingMigrations.get(migration.version);
       if (existingSourceSha256 === undefined) {
+        if (migration.version > minimumSchemaVersion) continue;
         throw new Error(
           `Migration ${String(migration.version)} has not been applied to this Runtime.`
         );

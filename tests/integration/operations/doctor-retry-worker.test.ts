@@ -122,7 +122,7 @@ test("doctor keeps recovered historical foreground deadlines as information inst
     .toContain("3 lifetime deadlines");
 });
 
-test("doctor reports an offline Luna backlog as paused background work without degrading local recall", async () => {
+test("doctor distinguishes cooldown waiting from exhausted recovery that needs explicit handling", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-doctor-offline-luna-"));
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -139,7 +139,7 @@ test("doctor reports an offline Luna backlog as paused background work without d
   try {
     database.prepare(
       `UPDATE luna_operations
-       SET state = 'blocked', last_error_category = 'timeout', updated_at = ?
+       SET state = 'blocked', last_error_category = 'timeout', epoch_attempt_count = 7, updated_at = ?
        WHERE operation_id = ?`
     ).run("2026-08-20T00:10:00.000Z", operation.operationId);
   } finally {
@@ -152,11 +152,21 @@ test("doctor reports an offline Luna backlog as paused background work without d
     deep: false,
     now: "2026-08-20T01:00:00.000Z"
   });
-  expect(result.state).toBe("healthy");
+  expect(result.state).toBe("observing");
   expect(result.checks.find((check) => check.name === "luna_operations"))
-    .toMatchObject({ state: "ok" });
+    .toMatchObject({ state: "info", nextEvaluationAt: "2026-08-20T06:10:00.000Z" });
   expect(result.checks.find((check) => check.name === "luna_operations")?.detail)
-    .toContain("background work paused");
+    .toContain("await recovery evidence and cooldown");
+  const exhausted = await openRuntimeDatabase(runtimeRoot);
+  exhausted.prepare("UPDATE luna_operations SET connection_recovery_count = 2 WHERE operation_id = ?")
+    .run(operation.operationId);
+  exhausted.close();
+  const stopped = await inspectDoctor({ runtimeRoot, vaultRoot, deep: false,
+    now: "2026-08-21T01:00:00.000Z" });
+  expect(stopped.checks.find((check) => check.name === "luna_operations"))
+    .toMatchObject({ state: "warning" });
+  expect(stopped.checks.find((check) => check.name === "luna_operations")?.detail)
+    .toContain("automatic retries stopped");
 });
 
 test("doctor treats an overdue normal index deadline as expected while recovery coalescing is active", async () => {

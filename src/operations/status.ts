@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { inspectForegroundHealth } from "../health/foreground.js";
 import { inspectIndexHealth } from "../health/index.js";
+import { inspectCorpusRetention } from "../capacity/corpus-retention.js";
 
 import {
   inspectMemoryWorkingSetGeneration,
@@ -83,6 +84,7 @@ export async function inspectOperation(runtimeRoot: string, operationId: string)
       attempt_count: z.number().int().nonnegative().parse(luna.attempt_count),
       retry_epoch: z.number().int().nonnegative().parse(luna.retry_epoch),
       epoch_attempt_count: z.number().int().nonnegative().parse(luna.epoch_attempt_count),
+      connection_recovery_count: z.number().int().nonnegative().parse(luna.connection_recovery_count),
       project_id: typeof luna.project_id === "string" ? luna.project_id : null,
       session_id: typeof luna.session_id === "string" ? luna.session_id : null,
       next_retry_at: typeof luna.next_retry_at === "string" ? luna.next_retry_at : null,
@@ -103,6 +105,7 @@ export async function inspectStatus(request: {
   readonly vaultRoot: string;
 }) {
   const memoryCapacityPolicy = await loadMemoryCapacityPolicy(request);
+  const corpusRetention = await inspectCorpusRetention(request);
   const archiveRetentionMonths = await loadArchiveRetentionMonths(request);
   const sensitivityMetadataDays = await loadSensitivityMetadataDays(request);
   const injectionReceiptDays = await loadInjectionReceiptRetentionDays(request);
@@ -414,6 +417,7 @@ export async function inspectStatus(request: {
           publication_failure_count: workingSetGeneration.publicationFailureCount
         }
       },
+      corpus_retention: corpusRetention,
       pipelines: {
         capture: {
           unbatched_event_count: z.number().int().nonnegative().parse(unbatchedCapture?.count),

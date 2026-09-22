@@ -9,6 +9,7 @@ Owns canonical Memory files, portable project metadata, revision identity, manua
 ## Start here
 
 - [index.ts](index.ts)
+- [active-capacity.ts](active-capacity.ts): aggregate slot reservations and capacity waiter recovery.
 
 ## Flow and collaborators
 
@@ -26,6 +27,12 @@ Writes Markdown, revision history, portable catalogs and runtime catalog/index-d
 ## Invariants and change risks
 
 Human edits retain authority and provenance. Revision writes require predecessor and content-identity checks. Reject secret content and invalidate affected derived representations after changes. The Vault is canonical; SQLite indexes are derived views.
+
+Fixed corpus capacity applies at the writer to new Active entries and restores,
+including Human writes. Reserve before filesystem changes; count pending slots
+without double-counting cataloged entries. Never release a live writer by age.
+Dead unfinished writes with a published file require reconciliation. Candidate
+capacity waiters are resumed through the existing Worker evaluation interface.
 
 ## Verification
 

@@ -13,11 +13,44 @@ import {
   type LunaWorkerAdapter
 } from "../../src/worker/distillation.js";
 import { makeLongTermCandidateDurability } from "../helpers/candidate-durability.js";
+import { initializeMemStore } from "../../src/operations/initialize.js";
+import { runWorkerOnce } from "../../src/worker/main.js";
 
 const roots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+test("the normal Worker resumes an exhausted connection failure after healthy recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-worker-connection-recovery-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime"), vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  await captureEvent({ runtimeRoot, event: {
+    schemaVersion: 1, eventId: "msevent-recovery", deduplicationKey: "recovery:stop", agent: "codex",
+    eventKind: "Stop", occurredAt: "2026-08-07T00:00:00.000Z", sessionId: "recovery",
+    turnId: "recovery-turn", payload: { assistantMessage: "No reusable knowledge in this task." }
+  } });
+  await prepareNextDistillationBatch({ runtimeRoot, maximumEvents: 8, preparedAt: "2026-08-07T01:00:00.000Z" });
+  const db = await openRuntimeDatabase(runtimeRoot);
+  db.prepare("UPDATE luna_operations SET state='blocked', epoch_attempt_count=7, attempt_count=7, last_error_category='timeout', updated_at='2026-08-07T01:00:00.000Z'").run();
+  db.prepare("UPDATE distillation_batches SET state='blocked'").run();
+  db.prepare("UPDATE luna_health_state SET state='healthy', last_success_at='2026-08-07T02:00:00.000Z'").run();
+  db.close();
+  const result = await runWorkerOnce({ runtimeRoot, vaultRoot, workerId: "worker",
+    now: "2026-08-07T08:00:00.000Z", workerStartedAt: "2026-08-07T07:59:00.000Z",
+    adapters: { luna: {
+      distillBatch: () => Promise.resolve({ schemaVersion: 1, kind: "distillation", candidates: [],
+        rejectionSummary: { schemaVersion: 1, coverage: "considered_memory_shaped_rejections_only",
+          counts: { no_memory: 1, session_only: 0, uncertain: 0, source_echo: 0 }, samples: [] } }),
+      consolidateSession: () => Promise.reject(new Error("No consolidation expected.")),
+      assessCandidateSemantics: () => Promise.reject(new Error("No candidate expected.")),
+      assessHumanConflict: () => Promise.reject(new Error("No conflict expected."))
+    } }
+  });
+  expect(result.activities).toContain("luna:completed");
+  await expect(inspectCaptureEventState(runtimeRoot, "msevent-recovery")).resolves.toMatchObject({ state: "completed" });
 });
 
 test("a transient Luna failure leaves evidence retryable and later produces one Candidate", async () => {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { resumeCapacityCandidates } from "../vault/active-capacity.js";
 import {
   evaluateCandidate,
   type CandidateContent,
@@ -181,6 +182,7 @@ export async function prepareNextCandidateEvaluation(request: {
   readonly now: string;
 }): Promise<PrepareCandidateEvaluationResult> {
   const now = z.iso.datetime().parse(request.now);
+  await resumeCapacityCandidates(request);
   const database = await openRuntimeDatabase(request.runtimeRoot);
   let candidateId: string | undefined;
   try {

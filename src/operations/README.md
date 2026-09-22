@@ -32,6 +32,14 @@ Some operations are read-only; others write Vault/runtime/configuration or insta
 
 ## Invariants and change risks
 
+Doctor reports recoverable exhausted Luna work as waiting for evidence/cooldown,
+and exhausted recovery as actionable. It does not infer network loss from timeout
+alone. Explicit retry resets both the fast-retry epoch and recovery allowance.
+
+`status.corpus_retention` reports the opt-in archive policy, schema readiness,
+remaining excess, pending batch, last execution/error and twelve-hour pressure.
+Inspecting it never starts archival or migrates the database.
+
 Keep request validation, preview and authorization consistent across CLI/MCP callers. A status request does not authorize repair. Preserve exact Human assertions, project routing and migration continuity.
 
 ## Verification

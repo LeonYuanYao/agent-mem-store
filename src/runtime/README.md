@@ -26,6 +26,21 @@ Owns connection/migration mechanics, not business state transitions. Transaction
 
 Do not treat the runtime database as disposable cache: it contains pending work and audit state. Avoid long write transactions and accidental schema mutation on read-only paths. Back up a live database through supported operations rather than copying only its main file.
 
+Read-only callers normally require every current migration. A reader with a
+verified older-schema contract may explicitly supply `minimumSchemaVersion`;
+applied migration checksums are still checked, and this never applies migrations.
+Corpus preview/status support schema 61 while their new scheduler remains
+uninstalled. Corpus writes require migration 0062 and separate deployment approval.
+
+Migration 0063 adds one replace-in-place retention assessment per Memory. Foreign
+key deletion and a catalog trigger remove the derived text when its identity is
+removed, tombstoned or becomes Human-authored. It contains no model-call queue and
+is safe to rebuild lazily.
+
+Migration 0064 stores durable Active admission slots and capacity-waiting
+Candidates. Reservations have no age-based expiry. Their short SQLite transactions
+finish before canonical filesystem writes; no database write lock spans file I/O.
+
 ## Verification
 
 Run from the repository root:

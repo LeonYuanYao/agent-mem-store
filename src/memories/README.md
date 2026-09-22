@@ -11,6 +11,7 @@ Defines shared category vocabulary, compact checks and portable numeric referenc
 - [categories.ts](categories.ts)
 - [reference.ts](reference.ts)
 - [representations.ts](representations.ts)
+- [priority.ts](priority.ts): shared canonical importance tier for indexing and corpus retention.
 
 ## Flow and collaborators
 
