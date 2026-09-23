@@ -15,6 +15,7 @@ import { recordRetentionAssessment } from "../capacity/retention-cache.js";
 import { ActiveCapacityError } from "../vault/active-capacity.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import type { ImportanceReason, ImportanceTag } from "../luna/index.js";
+import { lunaAssessmentModelSchema } from "../luna/model.js";
 import {
   memoryCategorySchema,
   selectPrimaryCategory,
@@ -925,14 +926,14 @@ function canonicalFromCandidate(request: {
       compact: {
         text: compact.text,
         validated: compact.validated,
-        generatorIdentity: "gpt-5.6-luna",
+        generatorIdentity: "memstore:exact-candidate-v1",
         sourceRevisionId: revisionId,
         renderedTokenCount: compact.renderedTokenCount
       },
       standard: {
         text: request.candidate.statement,
         validated: true,
-        generatorIdentity: "gpt-5.6-luna",
+        generatorIdentity: "memstore:exact-candidate-v1",
         sourceRevisionId: revisionId,
         renderedTokenCount: tokenEstimate(request.candidate.statement)
       }
@@ -1035,7 +1036,7 @@ async function loadDurableSemanticAssessment(request: {
         "uncertain",
         "legacy_unclassified"
       ]).parse(row.durability_disposition),
-      assessedBy: z.literal("gpt-5.6-luna").parse(row.assessed_by),
+      assessedBy: lunaAssessmentModelSchema.parse(row.assessed_by),
       operationId
     };
   } finally {

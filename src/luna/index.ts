@@ -3,6 +3,7 @@ import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
+import { lunaModelIdentity } from "./model.js";
 import { retentionValueSchema, retentionValuePolicyVersion, retentionValueRules } from "../capacity/retention-value.js";
 import { enforceGovernanceDecisionPolicy } from "../governance/decision-policy.js";
 
@@ -1669,7 +1670,7 @@ export class CodexLunaAdapter {
           "-c",
           'model_reasoning_effort="medium"',
           "--model",
-          "gpt-5.6-luna",
+          lunaModelIdentity,
           "--ephemeral",
           "--sandbox",
           "read-only",

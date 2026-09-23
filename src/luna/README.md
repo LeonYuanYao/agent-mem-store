@@ -10,6 +10,7 @@ Defines structured model requests/responses and invokes the configured Codex sub
 
 - [index.ts](index.ts)
 - [operations.ts](operations.ts)
+- [model.ts](model.ts): current invocation identity and accepted historical assessment identities.
 
 ## Flow and collaborators
 
@@ -32,6 +33,13 @@ Spawns Codex and uses isolated runtime work files; operation records live in SQL
 ## Invariants and change risks
 
 Keep background calls isolated from workspace instructions, hooks and recursive MemStore capture. Do not silently change model, reasoning or service tier. Preserve schema validation and distinguish invocation failure from a valid empty result.
+
+New calls use `gpt-6-luna`, medium reasoning and the default service tier.
+Keep saved `gpt-5.6-luna` assessments readable without rewriting their provenance.
+Compact quality records the persisted generator and current fidelity validator
+separately, including when a queued draft spans the model change. Exact Candidate
+representations identify the local renderer rather than inferring a model from
+the current deployment.
 
 The exported consolidation output schema also validates the Worker's saved model checkpoint. Its 128-clause model-response bound is distinct from the Worker's final result, which may additionally contain locally restored priority Candidates and is admitted in pages.
 

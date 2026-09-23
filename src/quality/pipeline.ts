@@ -8,6 +8,7 @@ import {
   type LunaSafeDiagnostic
 } from "../luna/index.js";
 import { recordLunaWorkFailure, recordLunaWorkSuccess } from "../luna/operations.js";
+import { lunaModelIdentity } from "../luna/model.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import {
   readCanonicalMemory,
@@ -91,6 +92,7 @@ interface QualityItem {
   readonly attemptCount: number;
   readonly epochAttemptCount: number;
   readonly proposedCompact?: string;
+  readonly generatorIdentity?: string;
 }
 
 function generationInput(memory: CanonicalMemory): CompactGenerationMemory {
@@ -423,7 +425,8 @@ function parseQualityItem(row: Record<string, unknown>): QualityItem {
     state: z.enum(["processing_generation", "processing_validation"]).parse(row.state),
     attemptCount: z.number().int().positive().parse(row.attempt_count),
     epochAttemptCount: z.number().int().positive().parse(row.epoch_attempt_count),
-    ...(typeof row.proposed_compact === "string" ? { proposedCompact: row.proposed_compact } : {})
+    ...(typeof row.proposed_compact === "string" ? { proposedCompact: row.proposed_compact } : {}),
+    ...(typeof row.generator_identity === "string" ? { generatorIdentity: row.generator_identity } : {})
   };
 }
 
@@ -585,7 +588,8 @@ function nextRepresentations(
   memory: CanonicalMemory,
   revisionId: string,
   compactText: string,
-  tokenCount: number
+  tokenCount: number,
+  generatorIdentity: string | undefined
 ): CanonicalMemory["representations"] {
   return {
     ...(memory.representations.identity === undefined ? {} : {
@@ -594,7 +598,7 @@ function nextRepresentations(
     compact: {
       text: compactText,
       validated: true,
-      generatorIdentity: "gpt-5.6-luna:compact-generation-v3+fidelity-v2",
+      generatorIdentity: `${generatorIdentity ?? "unknown:compact-generation"}+${lunaModelIdentity}:fidelity-v2`,
       sourceRevisionId: revisionId,
       renderedTokenCount: tokenCount
     },
@@ -669,7 +673,7 @@ export async function runNextMemoryQualityStep(request: {
             local.valid ? "pending_validation" : "rejected",
             compactText || null,
             local.renderedTokenCount,
-            "gpt-5.6-luna:compact-generation-v3",
+            `${lunaModelIdentity}:compact-generation-v3`,
             local.valid ? null : rejectionReason,
             local.valid ? null : now,
             now,
@@ -743,7 +747,7 @@ export async function runNextMemoryQualityStep(request: {
             revisionId,
             predecessorRevisionId: entry.memory.revisionId,
             revisedAt: now,
-            representations: nextRepresentations(entry.memory, revisionId, compactText, local.renderedTokenCount),
+            representations: nextRepresentations(entry.memory, revisionId, compactText, local.renderedTokenCount, entry.item.generatorIdentity),
             provenance: entry.memory.provenance.includes("quality:luna-compact-backfill-v3")
               ? entry.memory.provenance
               : [...entry.memory.provenance, "quality:luna-compact-backfill-v3"]

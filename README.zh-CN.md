@@ -13,7 +13,7 @@ MemStore 是面向 coding agent 的长期记忆系统，采用程序与数据分
 - macOS 13 或更新版本。
 - Node.js `>=22.17.0 <23`，pnpm `>=10.25.0 <11`。
 - Xcode Command Line Tools，包含 Swift 6 和 `codesign`。
-- 已安装并登录 Codex CLI，且账号有权使用 `gpt-5.6-luna` 和 `gpt-5.6-terra`。当前适配器固定使用 Luna `medium` 思考深度和 Terra `low` 思考深度，两者均为 `service_tier="default"`，不使用 Fast 模式。
+- 已安装并登录 Codex CLI，且账号有权使用 `gpt-6-luna` 和 `gpt-5.6-terra`。当前适配器固定使用 Luna `medium` 思考深度和 Terra `low` 思考深度，两者均为 `service_tier="default"`，不使用 Fast 模式。
 - 已在 Obsidian 中至少打开过一次准备使用的 Vault。
 - Codex 已创建 `~/.codex/config.toml`。安装为 Active 模式时，还要求其 `[memories]` 段显式设置布尔值 `generate_memories` 和 `use_memories`，以便回滚时准确恢复原状态。
 

@@ -385,7 +385,7 @@ test("the Luna adapter makes the running Node executable discoverable in a restr
   );
 });
 
-test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only process", async () => {
+test("the Luna adapter invokes only gpt-6-luna in an isolated read-only process", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-adapter-"));
   temporaryDirectories.push(root);
   const codexHome = join(root, "codex-home");
@@ -492,7 +492,7 @@ test("the Luna adapter invokes only gpt-5.6-luna in an isolated read-only proces
     expect.arrayContaining([
       "exec",
       "--model",
-      "gpt-5.6-luna",
+      "gpt-6-luna",
       "--ephemeral",
       "--sandbox",
       "read-only",

@@ -20,6 +20,7 @@ import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
 
 import { writeFileAtomically } from "../contracts/atomic-file.js";
+import { lunaModelIdentity } from "../luna/model.js";
 import { initializeMemStore } from "../operations/initialize.js";
 
 const candidateSchema = z.object({
@@ -46,7 +47,7 @@ const candidateSchema = z.object({
   }),
   luna: z.object({
     provider: z.literal("codex_cli"),
-    model: z.literal("gpt-5.6-luna"),
+    model: z.literal(lunaModelIdentity),
     ephemeral: z.literal(true),
     sandbox: z.literal("read-only"),
     fallbackModel: z.null(),

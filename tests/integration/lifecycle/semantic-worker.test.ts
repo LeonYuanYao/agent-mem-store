@@ -24,7 +24,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-test("a durable semantic-assessment operation feeds the deterministic Promotion Gate", async () => {
+test.each([undefined, "gpt-5.6-luna"])("a durable semantic-assessment operation feeds the Promotion Gate (saved model: %s)", async (savedModel) => {
   const root = await mkdtemp(join(tmpdir(), "memstore-semantic-worker-"));
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -97,13 +97,29 @@ test("a durable semantic-assessment operation feeds the deterministic Promotion 
   });
   if (created.state !== "candidate") throw new Error("Expected Candidate creation.");
 
-  await enqueueCandidateAssessment({
+  const queued = await enqueueCandidateAssessment({
     runtimeRoot,
     candidateId: created.candidateId,
     createdAt: "2026-08-07T13:00:04.000Z"
   });
+  if (savedModel !== undefined) {
+    const database = await openRuntimeDatabase(runtimeRoot);
+    try {
+      database.prepare(`INSERT INTO semantic_assessments (
+        assessment_id, operation_id, candidate_id, state, evidence_ids_json,
+        durability_disposition, evidence_generation, assessed_by, assessed_at
+      ) SELECT ?, ?, candidate_id, 'supported', ?, 'durable', evidence_generation, ?, ?
+        FROM memory_candidates WHERE candidate_id = ?`).run(
+        "msassessment_saved", queued.operationId,
+        JSON.stringify(evidence.map((item) => item.eventId)), savedModel,
+        "2026-08-07T13:00:04.000Z", created.candidateId
+      );
+    } finally { database.close(); }
+  }
+  let modelCalls = 0;
   const adapter: CandidateAssessmentAdapter = {
     assessCandidateSemantics(request) {
+      modelCalls += 1;
       return Promise.resolve({
         schemaVersion: 1,
         kind: "semantic_assessment",
@@ -121,6 +137,12 @@ test("a durable semantic-assessment operation feeds the deterministic Promotion 
     adapter
   })).resolves.toMatchObject({ state: "completed", evaluationState: "promoted" });
   await expect(listRecallEligibleMemoryIds(runtimeRoot)).resolves.toHaveLength(1);
+  expect(modelCalls).toBe(savedModel === undefined ? 1 : 0);
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(database.prepare("SELECT assessed_by FROM semantic_assessments WHERE operation_id = ?")
+      .get(queued.operationId)?.assessed_by).toBe(savedModel ?? "gpt-6-luna");
+  } finally { database.close(); }
 });
 
 test("a supported task-local instruction is rejected by the durability gate", async () => {

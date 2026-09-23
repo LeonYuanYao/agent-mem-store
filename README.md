@@ -19,7 +19,7 @@ separate. Use `memstore status` and `memstore doctor --deep` for live inspection
 - macOS 13 or newer.
 - Node.js `>=22.17.0 <23` and pnpm `>=10.25.0 <11`.
 - Xcode Command Line Tools with Swift 6 and `codesign`.
-- Codex CLI installed, authenticated, and entitled to `gpt-5.6-luna` and
+- Codex CLI installed, authenticated, and entitled to `gpt-6-luna` and
   `gpt-5.6-terra`. The current adapters use Luna with `medium` reasoning and
   Terra with `low` reasoning, both with `service_tier="default"` (not Fast mode).
 - Obsidian with the intended Vault opened at least once.

@@ -618,7 +618,7 @@ See [ADR-0086](./docs/adr/0086-install-and-operate-memstore-through-owned-idempo
 
 ## Distillation model
 
-- The intended model for knowledge distillation is `gpt-5.6-luna` (displayed locally as GPT-5.6-Luna).
+- The model for new background Luna invocations is `gpt-6-luna`. Persisted `gpt-5.6-luna` assessments remain readable with their original identity; changing the model does not rerun or relabel historical results.
 - Every MemStore-managed Luna invocation explicitly uses the default service tier and medium reasoning effort. The first version does not dynamically route Luna work across reasoning levels; an inconclusive result remains retryable, waiting, or review-due under the applicable lifecycle rather than silently escalating model depth.
 - The first version does not silently fall back to another model. Adding a fallback later requires explicit configuration, separate quality validation, and a reviewed ADR.
 - Network failure, model unavailability, authentication or configuration errors, rate limits, timeouts, and invalid responses leave affected operations durably pending or retryable.

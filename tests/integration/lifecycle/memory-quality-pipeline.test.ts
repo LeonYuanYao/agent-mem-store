@@ -5,6 +5,7 @@ import { afterEach, expect, test } from "vitest";
 
 import { captureEvent, inspectCaptureEventState } from "../../../src/capture/index.js";
 import { LunaInvocationError } from "../../../src/luna/index.js";
+import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import {
   enqueueCompactBackfill,
   inspectMemoryQualityPipeline,
@@ -22,7 +23,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-test("compact backfill publishes only after a separate fidelity assessment", async () => {
+test.each(["gpt-6-luna", "gpt-5.6-luna"])("compact backfill preserves its generator across a separate fidelity assessment (%s)", async (generatorModel) => {
   const root = await mkdtemp(join(tmpdir(), "memstore-quality-pipeline-"));
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -90,6 +91,15 @@ test("compact backfill publishes only after a separate fidelity assessment", asy
   })).resolves.toMatchObject({ state: "generated", itemCount: 1 });
   const afterGeneration = await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId });
   expect(afterGeneration?.memory.representations.compact.validated).toBe(false);
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(database.prepare("SELECT generator_identity FROM memory_quality_items WHERE memory_id = ?")
+      .get(memoryId)?.generator_identity).toBe("gpt-6-luna:compact-generation-v3");
+    if (generatorModel === "gpt-5.6-luna") {
+      database.prepare("UPDATE memory_quality_items SET generator_identity = ? WHERE memory_id = ?")
+        .run("gpt-5.6-luna:compact-generation-v3", memoryId);
+    }
+  } finally { database.close(); }
 
   await expect(runNextMemoryQualityStep({
     runtimeRoot,
@@ -104,6 +114,7 @@ test("compact backfill publishes only after a separate fidelity assessment", asy
   expect(published?.memory.representations.compact).toMatchObject({
     text: "Before release, run typecheck and never skip migration verification.",
     validated: true,
+    generatorIdentity: `${generatorModel}:compact-generation-v3+gpt-6-luna:fidelity-v2`,
     sourceRevisionId: published?.memory.revisionId
   });
   await expect(inspectMemoryQualityPipeline({ runtimeRoot })).resolves.toMatchObject({

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { lunaModelIdentity } from "../luna/model.js";
 
 import { resumeCapacityCandidates } from "../vault/active-capacity.js";
 import {
@@ -398,7 +399,7 @@ export async function runNextCandidateAssessment(request: {
              assessment_id, operation_id, candidate_id, state,
              evidence_ids_json, durability_disposition, evidence_generation,
              assessed_by, assessed_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'gpt-5.6-luna', ?)`
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
           `msassessment_${claimed.operation.operationId}`,
           claimed.operation.operationId,
@@ -407,6 +408,7 @@ export async function runNextCandidateAssessment(request: {
           JSON.stringify(assessment.evidenceIds),
           assessment.durabilityDisposition ?? "legacy_unclassified",
           payload.evidenceGeneration,
+          lunaModelIdentity,
           request.now
         );
       } finally {
