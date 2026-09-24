@@ -352,6 +352,11 @@ const migrations: readonly Migration[] = [
     version: 64,
     name: "active_capacity_admissions",
     path: new URL("../../migrations/0064-active-capacity-admissions.sql", import.meta.url)
+  },
+  {
+    version: 65,
+    name: "governance_safe_diagnostics",
+    path: new URL("../../migrations/0065-governance-safe-diagnostics.sql", import.meta.url)
   }
 ];
 

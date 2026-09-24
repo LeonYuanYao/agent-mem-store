@@ -29,6 +29,7 @@ const recoveryConditions: Readonly<Record<string, string>> = {
   sqlite_integrity: "The runtime database opens and SQLite integrity_check returns ok.",
   candidate_pipeline: "No unevaluated waiting Candidate is older than 15 minutes; already evaluated waiting Candidates do not block health.",
   luna_operations: "Actionable blocked operations complete, retry successfully, or receive an explicit resolution; connectivity pauses remain separately visible.",
+  governance: "Resolve the reported failure, explicitly retry the blocked run, and complete a successful page review. Capture and recall remain independently available.",
   vault_catalog: "Every current catalog entry resolves to a valid Canonical Memory with the expected identity and revision."
 };
 
@@ -288,6 +289,23 @@ export async function inspectDoctor(request: {
             ? `${String(blockedLunaOperationCount)} blocked Luna operations require classification.`
         : `${String(activeLunaOperationCount)} active Luna operations; none blocked.`
     });
+    const governance = database.prepare(
+      `SELECT run_id, current_phase, state, last_error_category, next_retry_at
+       FROM governance_runs WHERE state IN ('pending', 'processing', 'retrying', 'blocked')
+       ORDER BY CASE state WHEN 'blocked' THEN 0 WHEN 'retrying' THEN 1 ELSE 2 END, created_at LIMIT 1`
+    ).get();
+    const governanceRecovering = governance !== undefined &&
+      (governance.state === "retrying" || governance.last_error_category !== null);
+    checks.push({
+      name: "governance",
+      state: governance?.state === "blocked" ? "warning" : governanceRecovering ? "info" : "ok",
+      detail: governance === undefined ? "No outstanding governance run."
+        : `Governance ${String(governance.run_id)} (${String(governance.current_phase)}) is ${String(governance.state)}; last failure: ${String(governance.last_error_category ?? "none")}. Capture and recall are checked independently.`,
+      ...(governanceRecovering && governance.state !== "blocked" ? {
+        nextEvaluationAt: z.string().nullable().parse(governance.next_retry_at),
+        recoveryCondition: "The scheduled governance retry must complete a successful page review; requeueing alone does not establish recovery."
+      } : {})
+    });
     if (request.deep) checks.push(await inspectCatalogFiles(database, vaultRoot));
   } catch (error) {
     checks.push({
@@ -318,6 +336,7 @@ export async function retryOperation(request: {
       readonly retryEpoch: number;
       readonly lifetimeAttemptCount: number;
     }
+  | { readonly state: "queued"; readonly kind: "governance"; readonly operationId: string; readonly lifetimeAttemptCount: number }
 > {
   const requestedAt = z.iso.datetime().parse(request.requestedAt);
   const operationId = z.string().min(1).parse(request.operationId);
@@ -329,7 +348,21 @@ export async function retryOperation(request: {
       "SELECT state, retry_epoch, attempt_count FROM luna_operations WHERE operation_id = ?"
     ).get(operationId);
     if (row === undefined) {
-      throw new MemStoreCommandError("operation_not_found", "Operation does not exist.");
+      const run = database.prepare("SELECT state, attempt_count FROM governance_runs WHERE run_id = ?").get(operationId);
+      if (run === undefined) throw new MemStoreCommandError("operation_not_found", "Operation does not exist.");
+      if (run.state !== "blocked" && run.state !== "retrying") {
+        throw new MemStoreCommandError("operation_not_retryable", "Only blocked or retrying governance runs can be manually retried.");
+      }
+      if (request.preview) return { state: "preview", dryRun: true, wouldRetry: true, operationId };
+      const updated = database.prepare(
+        `UPDATE governance_runs SET state = 'pending', consecutive_failure_count = 0,
+           next_retry_at = NULL, updated_at = ?
+         WHERE run_id = ? AND state IN ('blocked', 'retrying')`
+      ).run(requestedAt, operationId);
+      if (updated.changes !== 1) throw new MemStoreCommandError("operation_not_retryable", "Governance state changed before retry.");
+      // Keep frozen inputs, applied pages, coverage and lifetime attempts intact.
+      return { state: "queued", kind: "governance", operationId,
+        lifetimeAttemptCount: z.number().int().nonnegative().parse(run.attempt_count) };
     }
     const state = z.string().parse(row.state);
     if (state !== "blocked" && state !== "retrying") {

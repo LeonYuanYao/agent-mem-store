@@ -7,6 +7,7 @@ import { completePageEvidence } from "./page-evidence.js";
 
 import { LunaInvocationError } from "../luna/index.js";
 import {
+  diagnosticSource,
   recordLunaWorkFailure,
   recordLunaWorkSuccess
 } from "../luna/operations.js";
@@ -306,23 +307,33 @@ async function validateReview(
       const sourceId = action.kind === "add_relationship" ? action.sourceMemoryId : action.targetMemoryId;
       const source = members.get(sourceId);
       if (source?.authority !== "agent_derived") {
-        throw new Error("Governance cannot mutate Human-authored Memory.");
+        throw new LunaInvocationError("schema_invalid", true, "Governance action has an invalid source.", {
+          stage: "evidence_binding", code: "invalid_action_authority"
+        });
       }
       if (action.kind === "add_relationship" && !members.has(action.targetMemoryId)) {
-        throw new Error("Relationship target is outside the frozen governance run.");
+        throw new LunaInvocationError("schema_invalid", true, "Relationship target is outside the frozen governance run.", {
+          stage: "evidence_binding", code: "relationship_target_outside_run"
+        });
       }
       if (action.kind === "supersede" && members.get(action.successorMemoryId)?.authority !== "agent_derived") {
-        throw new Error("Supersession successor must be Agent-derived in this run.");
+        throw new LunaInvocationError("schema_invalid", true, "Supersession successor must be Agent-derived in this run.", {
+          stage: "evidence_binding", code: "invalid_successor_authority"
+        });
       }
     }
     for (const suggestion of review.reviewSuggestions) {
       if (members.get(suggestion.targetMemoryId)?.authority !== "human_authored") {
-        throw new Error("Review Suggestions are reserved for Human-authored Memory.");
+        throw new LunaInvocationError("schema_invalid", true, "Review Suggestions are reserved for Human-authored Memory.", {
+          stage: "evidence_binding", code: "invalid_review_authority"
+        });
       }
     }
     for (const obligation of review.futurePurgeObligations) {
       if (members.get(obligation.memoryId)?.lifecycle !== "archived") {
-        throw new Error("Future purge can only be proposed for archived Memory.");
+        throw new LunaInvocationError("schema_invalid", true, "Future purge can only be proposed for archived Memory.", {
+          stage: "evidence_binding", code: "purge_target_not_archived"
+        });
       }
     }
   } finally {
@@ -938,7 +949,15 @@ export async function runNextGovernanceStep(request: {
   }
   const input = JSON.parse(inputSource) as GovernancePageRequest;
   try {
-    const output = governanceOutputSchema.parse(await request.adapter.reviewPage(input));
+    const parsed = governanceOutputSchema.safeParse(await request.adapter.reviewPage(input));
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new LunaInvocationError("schema_invalid", true, "Governance response failed schema validation.", {
+        stage: "output_schema", code: issue?.code ?? "schema_mismatch",
+        ...(issue === undefined || issue.path.length === 0 ? {} : { path: issue.path.join(".") })
+      });
+    }
+    const output = parsed.data;
     await validateReview(
       request.runtimeRoot,
       run.runId,
@@ -958,7 +977,7 @@ export async function runNextGovernanceStep(request: {
         if (updated.changes !== 1) throw new Error("Governance model lease was lost.");
         resultDatabase.prepare(
           `UPDATE governance_runs
-           SET consecutive_failure_count = 0, last_error_category = NULL, updated_at = ?
+           SET consecutive_failure_count = 0, last_error_category = NULL, last_error_diagnostic_json = NULL, updated_at = ?
            WHERE run_id = ?`
         ).run(now, run.runId);
         resultDatabase.exec("COMMIT");
@@ -977,9 +996,13 @@ export async function runNextGovernanceStep(request: {
       pageOrdinal: input.pageOrdinal
     };
   } catch (error) {
+    const sqliteBusy = typeof error === "object" && error !== null && "errcode" in error &&
+      (error.errcode === 5 || error.errcode === 6);
     const invocationError = error instanceof LunaInvocationError
       ? error
-      : new LunaInvocationError("schema_invalid", true, "Governance output failed local validation.");
+      : new LunaInvocationError("local_processing", sqliteBusy, "Governance failed during local processing.", {
+        stage: "local_processing", code: sqliteBusy ? "sqlite_busy" : "governance_processing_failed"
+      });
     const failureAttemptCount = run.consecutiveFailureCount + 1;
     const failure = await recordLunaWorkFailure({
       runtimeRoot: request.runtimeRoot,
@@ -998,12 +1021,13 @@ export async function runNextGovernanceStep(request: {
       ).run(checkpointId, checkpointLeaseToken);
       failureDatabase.prepare(
         `UPDATE governance_runs SET state = ?, next_retry_at = ?,
-         last_error_category = ?, consecutive_failure_count = ?, updated_at = ?
+         last_error_category = ?, last_error_diagnostic_json = ?, consecutive_failure_count = ?, updated_at = ?
          WHERE run_id = ?`
       ).run(
         failure.state,
         failure.nextRetryAt,
         invocationError.category,
+        diagnosticSource(invocationError.diagnostic),
         failureAttemptCount,
         now,
         run.runId

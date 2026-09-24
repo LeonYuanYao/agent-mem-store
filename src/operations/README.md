@@ -36,6 +36,12 @@ Doctor reports recoverable exhausted Luna work as waiting for evidence/cooldown,
 and exhausted recovery as actionable. It does not infer network loss from timeout
 alone. Explicit retry resets both the fast-retry epoch and recovery allowance.
 
+Doctor also inspects outstanding governance runs: blocked work is a warning and
+scheduled retries are informational. `status.governance` includes the safe failure
+diagnostic, attempt counts and retry time. `operation retry` accepts a blocked or
+retrying governance run ID, supports a zero-write preview, and resumes its frozen
+checkpoint without resetting completed coverage or lifetime attempts.
+
 `status.corpus_retention` reports the opt-in archive policy, schema readiness,
 remaining excess, pending batch, last execution/error and twelve-hour pressure.
 Inspecting it never starts archival or migrates the database.

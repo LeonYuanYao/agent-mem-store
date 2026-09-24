@@ -164,7 +164,7 @@ export async function inspectStatus(request: {
       "SELECT generated_at, item_counts_json, path FROM review_inbox_state WHERE singleton = 1"
     ).get();
     const governance = database.prepare(
-      `SELECT run_id, run_kind, state, current_phase, coverage_through
+      `SELECT *
        FROM governance_runs
        WHERE state IN ('pending', 'processing', 'retrying', 'blocked')
        ORDER BY created_at LIMIT 1`
@@ -317,7 +317,14 @@ export async function inspectStatus(request: {
         kind: governance.run_kind,
         state: governance.state,
         phase: governance.current_phase,
-        coverage_through: governance.coverage_through
+        coverage_through: governance.coverage_through,
+        attempt_count: governance.attempt_count,
+        consecutive_failure_count: governance.consecutive_failure_count,
+        next_retry_at: governance.next_retry_at,
+        last_error_category: governance.last_error_category,
+        last_error_diagnostic: typeof governance.last_error_diagnostic_json === "string"
+          ? JSON.parse(governance.last_error_diagnostic_json) as unknown : null,
+        updated_at: governance.updated_at
       },
       archive_retention: archiveRetention === undefined ? null : {
         archive_months: archiveRetentionMonths,

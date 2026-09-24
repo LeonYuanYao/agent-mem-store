@@ -41,6 +41,10 @@ Migration 0064 stores durable Active admission slots and capacity-waiting
 Candidates. Reservations have no age-based expiry. Their short SQLite transactions
 finish before canonical filesystem writes; no database write lock spans file I/O.
 
+Migration 0065 adds a nullable safe diagnostic to governance runs. It retains only
+bounded error metadata, never model responses or Memory bodies. Existing runs and
+their checkpoints remain unchanged.
+
 ## Verification
 
 Run from the repository root:

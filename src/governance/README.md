@@ -36,6 +36,19 @@ semantic inputs still match canonical knowledge. Existing valid entries are not
 re-evaluated. This adds no standalone model jobs or archive authority; a low value
 cannot satisfy governance's evidence requirements for archival.
 
+The model's output schema supplies one fixed nullable field per requested retention
+target, preventing duplicate array entries. The adapter restores the existing
+array-based public/checkpoint contract and rejects unrequested or non-Agent
+targets. Null assessments remain unknown. Shared schema definitions bound overhead.
+
+Failed runs persist a body-free stage, code and optional field path. Model schema
+and evidence failures are distinct from local runtime failures; local failures do
+not degrade model health. Unknown local failures require explicit handling, while
+SQLite busy/locked failures use the bounded retry budget. Doctor checks this queue
+independently of ordinary Luna work. `operation retry RUN_ID --preview` previews a
+retry; omit `--preview` after fixing the cause to resume the frozen failed page.
+Applied checkpoints, successful coverage and lifetime attempts are preserved.
+
 Do not advance successful coverage on failure. Preserve Human authority, scope, revision freshness and idempotency. A possibly changing architecture is not retirement evidence. Literal quotes establish provenance, not semantic entailment.
 
 ## Verification

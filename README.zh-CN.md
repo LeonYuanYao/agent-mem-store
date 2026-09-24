@@ -196,6 +196,8 @@ pnpm exec tsx src/cli/main.ts recall search "package manager" \
 
 `doctor --deep --json` 检查当前健康状态；`status --json` 同时提供相同的前台检索／索引健康判定和历史统计。
 
+Doctor 会单独检查治理队列。即使其他 Luna 任务成功，治理阻塞仍会显示警告；`status --json` 会给出安全错误诊断和重试次数。修复原因后，先用 `memstore operation retry RUN_ID --preview` 预览，再去掉 `--preview` 恢复失败页面。已完成页面会保留，自动重试仍有次数上限。
+
 - `healthy`：当前检查通过，也已满足所需的恢复验证条件。
 - `observing`：恢复仍待确认，或索引处于有明确时间边界的同步／重试期间。它既不表示已确认的故障，也不表示所有恢复工作已经完成。
 - `degraded`：至少还有一项当前警告，需要查看对应的恢复条件。

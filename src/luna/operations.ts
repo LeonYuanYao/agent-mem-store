@@ -43,7 +43,7 @@ const safeDiagnosticSchema = z.object({
   stderrBytes: z.number().int().nonnegative().optional()
 });
 
-function diagnosticSource(diagnostic: LunaSafeDiagnostic | undefined): string | null {
+export function diagnosticSource(diagnostic: LunaSafeDiagnostic | undefined): string | null {
   if (diagnostic === undefined) return null;
   const parsed = safeDiagnosticSchema.safeParse(diagnostic);
   return JSON.stringify(parsed.success
@@ -443,6 +443,10 @@ export async function recordLunaWorkFailure(request: {
   const nextRetryAt = automaticRetry
     ? calculateRetryAt(z.string().min(1).parse(request.workId), attemptCount, failedAt)
     : null;
+  // Local runtime failures are not evidence that the model is unavailable.
+  if (request.error.category === "local_processing") {
+    return { state: automaticRetry ? "retrying" : "blocked", nextRetryAt };
+  }
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     database.exec("BEGIN IMMEDIATE");

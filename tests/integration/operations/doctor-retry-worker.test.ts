@@ -64,6 +64,7 @@ test("doctor diagnoses an initialized isolated installation without repairing it
     ["sqlite_integrity", "ok"],
     ["candidate_pipeline", "ok"],
     ["luna_operations", "ok"],
+    ["governance", "ok"],
     ["vault_catalog", "ok"]
   ]);
 });

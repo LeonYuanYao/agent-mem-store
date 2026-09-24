@@ -46,8 +46,10 @@ The exported consolidation output schema also validates the Worker's saved model
 ## Verification
 
 Extraction/consolidation prompt v7 include a separate retention-value judgment in
-the same response. Governance prompt v5 evaluates only requested missing targets
-(at most twenty). The shared contract lives in `capacity/retention-value.ts`.
+the same response. Governance prompt v7 evaluates only requested missing targets
+(at most twenty), using one fixed nullable output field per ID. The adapter
+restores the existing array-based review contract before returning to the Worker.
+The shared contract lives in `capacity/retention-value.ts`.
 Legacy saved responses without this field remain usable and unassessed. Reasons
 are derived ranking metadata, never replacement knowledge or injection text.
 

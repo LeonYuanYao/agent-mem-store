@@ -823,6 +823,7 @@ export type LunaFailureCategory =
   | "rate_limited"
   | "timeout"
   | "unavailable"
+  | "local_processing"
   | "schema_invalid";
 
 export interface LunaSafeDiagnostic {
@@ -1579,16 +1580,32 @@ export class CodexLunaAdapter {
   public async reviewPage(
     request: GovernancePageRequest
   ): Promise<GovernancePageReview> {
-    const review = await this.#invokeStructured(
+    const requestedRetentionIds = new Set((request.retentionTargets ?? []).map(target => target.memoryId));
+    // One fixed field per target prevents repeated IDs; null preserves unknowns.
+    const outputJsonSchema = {
+      ...governanceOutputJsonSchema,
+      $defs: { retentionValue: z.toJSONSchema(retentionValueSchema) },
+      properties: {
+        ...governanceOutputJsonSchema.properties,
+        retentionAssessments: {
+          type: "object", additionalProperties: false, required: [...requestedRetentionIds],
+          properties: Object.fromEntries([...requestedRetentionIds].map(id => [id, {
+            anyOf: [{ $ref: "#/$defs/retentionValue" }, { type: "null" }]
+          }]))
+        }
+      }
+    };
+    const wireReview = await this.#invokeStructured(
       "governance-page-output.schema.json",
-      governanceOutputJsonSchema,
+      outputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 5,
+        promptVersion: 7,
         task: "review_memory_governance_page",
         rules: [
           ...retentionValueRules,
-          "Return retentionAssessments only for request.retentionTargets, using the already supplied Memory text. Return an empty array when there are no targets. Do not re-evaluate cached or Human memories. Retention priority is independent of governance actions and cannot authorize archival.",
+          "Return retentionAssessments as an object keyed by exactly the memoryIds in request.retentionTargets, using the already supplied Memory text. Return an empty object when there are no targets. Do not re-evaluate cached or Human memories. Retention priority is independent of governance actions and cannot authorize archival.",
+          "Fill each fixed retention field once with its assessment or null when uncertain. Do not return an array or repeat identities. Null assessments remain unknown and are not evidence of low value.",
           "Use only the frozen Memory revisions and audit signals supplied in this page.",
           "Never propose an Agent action against Human-authored Memory. A Review Suggestion requires a concrete new contradictory or changed fact; missing repository corroboration does not require human reconfirmation.",
           "Archive Agent-derived Memory when its own body and provenance establish that it is an operational probe, exact-response check, temporary progress or current run state rather than reusable knowledge; cite those supplied fields as evidence.",
@@ -1612,13 +1629,26 @@ export class CodexLunaAdapter {
         ],
         request
       },
-      governanceOutputSchema
+      governanceOutputSchema.extend({ retentionAssessments: z.record(z.string(), retentionValueSchema.nullable()).optional() })
     );
-    const requestedRetentionIds = new Set((request.retentionTargets ?? []).map(target => target.memoryId));
-    const returnedRetentionIds = (review.retentionAssessments ?? []).map(item => item.memoryId);
-    if (new Set(returnedRetentionIds).size !== returnedRetentionIds.length ||
-        returnedRetentionIds.some(id => !requestedRetentionIds.has(id) || !request.memories.some(memory => memory.memoryId === id && memory.authority === "agent_derived"))) {
-      throw new LunaInvocationError("schema_invalid", true, "Retention assessment cites an unavailable target.");
+    // Keep the persisted/public review contract compatible with older checkpoints.
+    const review = {
+      ...wireReview,
+      retentionAssessments: Object.entries(wireReview.retentionAssessments ?? {}).flatMap(([memoryId, value]) =>
+        value === null ? [] : [{ ...value, memoryId }])
+    };
+    const seenRetentionIds = new Set<string>();
+    for (const [index, item] of review.retentionAssessments.entries()) {
+      const code = seenRetentionIds.has(item.memoryId) ? "duplicate_retention_target"
+        : !requestedRetentionIds.has(item.memoryId) ? "unrequested_retention_target"
+        : !request.memories.some(memory => memory.memoryId === item.memoryId && memory.authority === "agent_derived")
+          ? "invalid_retention_authority" : undefined;
+      if (code !== undefined) {
+        throw new LunaInvocationError("schema_invalid", true, "Retention assessment cites an unavailable target.", {
+          stage: "retention_validation", code, path: `retentionAssessments.${String(index)}.memoryId`
+        });
+      }
+      seenRetentionIds.add(item.memoryId);
     }
     return enforceGovernanceDecisionPolicy(request, review);
   }

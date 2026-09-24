@@ -310,6 +310,12 @@ pnpm exec tsx src/cli/main.ts recall search "package manager" \
 `doctor --deep --json` checks current health; `status --json` includes the same
 foreground/index health assessments alongside historical counts.
 
+Doctor checks governance separately from ordinary model work. A blocked governance
+run remains a warning even when other Luna jobs succeed. `status --json` shows its
+safe error diagnostic and retry counts. After correcting the cause, preview with
+`memstore operation retry RUN_ID --preview`, then omit `--preview` to resume the
+failed page. Completed pages are preserved; automatic retries remain bounded.
+
 - `healthy`: current checks pass, including any required recovery evidence.
 - `observing`: recovery still needs confirmation, or the index is within a bounded
   synchronization/retry period. This is neither a confirmed outage nor proof that
