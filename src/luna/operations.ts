@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { openRuntimeDatabase } from "../runtime/database.js";
-import { connectionRecoveryCandidateSql, connectionRecoveryCooldownMilliseconds } from "./recovery-policy.js";
+import { connectionRecoveryCandidateSql, connectionRecoveryCooldownMilliseconds, modelRecoveryEvidenceSql, modelRetryDecision } from "./recovery-policy.js";
 import type {
   LunaInvocationError,
   LunaFailureCategory,
@@ -199,9 +199,7 @@ export async function claimLunaOperation(
       OR (state = 'processing' AND lease_until < ?)
       OR (${connectionRecoveryCandidateSql}
           AND updated_at <= ?
-          AND EXISTS (SELECT 1 FROM luna_health_state AS health
-            WHERE health.singleton = 1 AND health.state = 'healthy'
-              AND health.last_success_at > luna_operations.updated_at))
+          AND ${modelRecoveryEvidenceSql})
     )${kindFilter}
     ORDER BY ${kindOrder}created_at ASC LIMIT 1`;
   const recoveryBefore = new Date(Date.parse(now) - connectionRecoveryCooldownMilliseconds).toISOString();
@@ -257,26 +255,6 @@ export async function claimLunaOperation(
   } finally {
     database.close();
   }
-}
-
-const retrySeconds = [30, 60, 120, 240, 480, 900] as const;
-const maximumAutomaticRetryCount = retrySeconds.length;
-
-function canAutomaticallyRetry(retryable: boolean, attemptCount: number): boolean {
-  return retryable && attemptCount <= maximumAutomaticRetryCount;
-}
-
-function calculateRetryAt(
-  operationId: string,
-  attemptCount: number,
-  failedAt: string
-): string {
-  const base = retrySeconds[Math.min(attemptCount - 1, retrySeconds.length - 1)] ?? 1800;
-  const digest = createHash("sha256")
-    .update(`${operationId}:${String(attemptCount)}`)
-    .digest();
-  const jitter = 0.9 + (digest[0] ?? 128) / 2550;
-  return new Date(Date.parse(failedAt) + Math.round(base * jitter) * 1000).toISOString();
 }
 
 function immediateUnavailable(category: LunaFailureCategory): boolean {
@@ -434,18 +412,18 @@ export async function recordLunaWorkFailure(request: {
   readonly runtimeRoot: string;
   readonly workId: string;
   readonly attemptCount: number;
+  readonly recoveryCount?: number;
   readonly failedAt: string;
   readonly error: LunaInvocationError;
 }): Promise<{ readonly state: "retrying" | "blocked"; readonly nextRetryAt: string | null }> {
   const failedAt = z.iso.datetime().parse(request.failedAt);
   const attemptCount = z.number().int().positive().parse(request.attemptCount);
-  const automaticRetry = canAutomaticallyRetry(request.error.retryable, attemptCount);
-  const nextRetryAt = automaticRetry
-    ? calculateRetryAt(z.string().min(1).parse(request.workId), attemptCount, failedAt)
-    : null;
+  const decision = modelRetryDecision({ workId: z.string().min(1).parse(request.workId), attemptCount,
+    failedAt, retryable: request.error.retryable, recoveryCount: request.recoveryCount ?? 0 });
+  const { nextRetryAt } = decision;
   // Local runtime failures are not evidence that the model is unavailable.
   if (request.error.category === "local_processing") {
-    return { state: automaticRetry ? "retrying" : "blocked", nextRetryAt };
+    return decision;
   }
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
@@ -460,7 +438,7 @@ export async function recordLunaWorkFailure(request: {
   } finally {
     database.close();
   }
-  return { state: automaticRetry ? "retrying" : "blocked", nextRetryAt };
+  return decision;
 }
 
 export async function recordLunaWorkSuccess(request: {
@@ -514,12 +492,13 @@ export async function failLunaOperation(
         .get(request.operationId, request.leaseToken);
       if (row === undefined) throw new Error("Luna operation lease is not owned.");
       const epochAttemptCount = z.number().int().positive().parse(row.epoch_attempt_count);
-      const blocked = z.number().parse(row.connection_recovery_count) > 0 ||
-        !canAutomaticallyRetry(request.error.retryable, epochAttemptCount);
+      const decision = modelRetryDecision({ workId: request.operationId, attemptCount: epochAttemptCount,
+        recoveryCount: z.number().parse(row.connection_recovery_count), failedAt, retryable: request.error.retryable });
+      const blocked = decision.state === "blocked";
       const nextRetryAt = blocked
         ? null
         : request.retryAfter === undefined
-          ? calculateRetryAt(request.operationId, epochAttemptCount, failedAt)
+          ? decision.nextRetryAt
           : z.iso.datetime().parse(request.retryAfter);
       database
         .prepare(
@@ -570,15 +549,15 @@ export async function failLunaOperationLocally(request: {
   try {
     database.exec("BEGIN IMMEDIATE");
     const row = database.prepare(
-      `SELECT attempt_count, epoch_attempt_count FROM luna_operations
+      `SELECT attempt_count, epoch_attempt_count, connection_recovery_count FROM luna_operations
        WHERE operation_id = ? AND state = 'processing' AND lease_token = ?`
     ).get(request.operationId, request.leaseToken);
     if (row === undefined) throw new Error("Luna operation lease is not owned.");
     const epochAttemptCount = z.number().int().positive().parse(row.epoch_attempt_count);
-    const automaticRetry = canAutomaticallyRetry(request.retryable, epochAttemptCount);
-    const nextRetryAt = automaticRetry
-      ? calculateRetryAt(request.operationId, epochAttemptCount, failedAt)
-      : null;
+    const decision = modelRetryDecision({ workId: request.operationId, attemptCount: epochAttemptCount,
+      recoveryCount: z.number().parse(row.connection_recovery_count), failedAt, retryable: request.retryable });
+    const automaticRetry = decision.state === "retrying";
+    const { nextRetryAt } = decision;
     database.prepare(
       `UPDATE luna_operations
        SET state = ?, lease_token = NULL, leased_by = NULL, lease_until = NULL,

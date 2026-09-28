@@ -45,6 +45,12 @@ Migration 0065 adds a nullable safe diagnostic to governance runs. It retains on
 bounded error metadata, never model responses or Memory bodies. Existing runs and
 their checkpoints remain unchanged.
 
+Migration 0066 adds bounded connection-recovery counters to governance, Compact
+and duplicate jobs, plus a separate duplicate attempt budget. Legacy duplicate
+jobs blocked at six attempts retain an exhausted budget without rewriting their
+lifetime counts. Already generated Compact drafts begin with a fresh validation
+budget. No checkpoint, memory body or canonical revision is changed.
+
 ## Verification
 
 Run from the repository root:

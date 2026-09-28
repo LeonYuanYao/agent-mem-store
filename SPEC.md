@@ -542,9 +542,24 @@ See [ADR-0038](./docs/adr/0038-use-progressive-explicit-recall-with-warnings.md)
   `rate_limited`) receive at most two additional single-attempt recovery probes
   per manual retry epoch. Each requires a six-hour cooldown, healthy model state,
   and an independent successful model operation after the last failure. A failed
-  probe never restarts the six fast retries. Other exhausted failures require
-  explicit handling. Doctor distinguishes cooldown/evidence waiting from exhausted
-  recovery; timeout alone never proves an offline condition. See ADR-0138.
+  probe never restarts the six fast retries. Authentication failures stop on the
+  first attempt, but may use the same two recovery attempts after subsequent
+  successful model work and healthy model state establish recovery. They do not
+  require seven initial attempts. Changes between authentication and transient
+  errors share the allowance and require fresh recovery evidence after each failure.
+  Other exhausted failures require explicit handling. Doctor retains an authentication
+  warning until recovery evidence exists, then distinguishes cooldown waiting from
+  exhausted recovery. Timeout alone never proves an offline condition. See ADR-0138
+  and ADR-0142.
+- This policy also applies to governance page reviews, Compact generation and
+  validation, and duplicate assessment. Queues retain their own leases and
+  checkpoints while sharing backoff and recovery eligibility. A successful
+  governance page or Compact generation step resets the budget for the next step;
+  lifetime attempt counts remain intact. Batch members retain individual budgets.
+  Valid negative or uncertain model judgments do not trigger connection recovery.
+  Frontend Hook/Jev deadlines and local maintenance retry policies are unchanged.
+  Doctor exposes recovery state for all four queues. See
+  [ADR-0143](./docs/adr/0143-unify-background-model-retry-policy.md).
 
 - A first macOS installation uses `./install.sh` or `memstore setup`. Setup is
   preview-first and requires `--apply` before it changes Codex configuration,

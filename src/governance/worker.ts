@@ -6,6 +6,7 @@ import { enforceGovernanceDecisionPolicy, governancePolicyInputSchema } from "./
 import { completePageEvidence } from "./page-evidence.js";
 
 import { LunaInvocationError } from "../luna/index.js";
+import { dueRecoverySql, recoveryBefore } from "../luna/recovery-policy.js";
 import {
   diagnosticSource,
   recordLunaWorkFailure,
@@ -58,6 +59,7 @@ interface RunRow {
   readonly currentPhase: "weekly" | "monthly" | "finalize";
   readonly attemptCount: number;
   readonly consecutiveFailureCount: number;
+  readonly recoveryCount: number;
 }
 
 function parseRun(row: Record<string, unknown>): RunRow {
@@ -71,7 +73,8 @@ function parseRun(row: Record<string, unknown>): RunRow {
     coverageThrough: z.iso.datetime().parse(row.coverage_through),
     currentPhase: z.enum(["weekly", "monthly", "finalize"]).parse(row.current_phase),
     attemptCount: z.number().int().nonnegative().parse(row.attempt_count),
-    consecutiveFailureCount: z.number().int().nonnegative().parse(row.consecutive_failure_count)
+    consecutiveFailureCount: z.number().int().nonnegative().parse(row.consecutive_failure_count),
+    recoveryCount: z.number().int().nonnegative().parse(row.connection_recovery_count)
   };
 }
 
@@ -722,13 +725,15 @@ export async function runNextGovernanceStep(request: {
     ).get();
     if (row === undefined) return { state: "idle" };
     run = parseRun(row);
-    if (run.state === "blocked") return { state: "blocked" };
+    if (run.state === "blocked" && database.prepare(
+      `SELECT 1 FROM governance_runs WHERE run_id = ? AND ${dueRecoverySql("governance_runs")}`
+    ).get(run.runId, recoveryBefore(now)) === undefined) return { state: "blocked" };
     if (run.state === "retrying" &&
         typeof row.next_retry_at === "string" && row.next_retry_at > now) {
       return { state: "idle" };
     }
-    const overdueRetry = run.state === "retrying" &&
-      typeof row.next_retry_at === "string" && row.next_retry_at <= now;
+    const overdueRetry = run.state === "blocked" || (run.state === "retrying" &&
+      typeof row.next_retry_at === "string" && row.next_retry_at <= now);
     const reviewedCheckpoint = database.prepare(
       `SELECT 1 FROM governance_checkpoints
        WHERE run_id = ? AND phase = ? AND state = 'reviewed'
@@ -750,6 +755,7 @@ export async function runNextGovernanceStep(request: {
   } finally {
     database.close();
   }
+  let claimedRecoveryCount = run.recoveryCount;
   if (run.currentPhase === "finalize") {
     return finalizeRun(request.runtimeRoot, run, now);
   }
@@ -893,6 +899,12 @@ export async function runNextGovernanceStep(request: {
   try {
     setupDatabase.exec("BEGIN IMMEDIATE");
     try {
+      if (run.state === "blocked" && setupDatabase.prepare(
+        `SELECT 1 FROM governance_runs WHERE run_id = ? AND ${dueRecoverySql("governance_runs")}`
+      ).get(run.runId, recoveryBefore(now)) === undefined) {
+        setupDatabase.exec("COMMIT");
+        return { state: "blocked" };
+      }
       if (preparedInput !== undefined) {
         setupDatabase.prepare(
           `INSERT OR IGNORE INTO governance_checkpoints(
@@ -930,8 +942,10 @@ export async function runNextGovernanceStep(request: {
       }
       setupDatabase.prepare(
         `UPDATE governance_runs SET state = 'processing', attempt_count = attempt_count + 1,
+         connection_recovery_count = connection_recovery_count + CASE WHEN state = 'blocked' THEN 1 ELSE 0 END,
          next_retry_at = NULL, updated_at = ? WHERE run_id = ?`
       ).run(now, run.runId);
+      if (run.state === "blocked") claimedRecoveryCount += 1;
       checkpoint = { ...checkpoint, lease_token: leaseToken, state: "model_processing" };
       setupDatabase.exec("COMMIT");
     } catch (error) {
@@ -977,7 +991,7 @@ export async function runNextGovernanceStep(request: {
         if (updated.changes !== 1) throw new Error("Governance model lease was lost.");
         resultDatabase.prepare(
           `UPDATE governance_runs
-           SET consecutive_failure_count = 0, last_error_category = NULL, last_error_diagnostic_json = NULL, updated_at = ?
+           SET consecutive_failure_count = 0, connection_recovery_count = 0, last_error_category = NULL, last_error_diagnostic_json = NULL, updated_at = ?
            WHERE run_id = ?`
         ).run(now, run.runId);
         resultDatabase.exec("COMMIT");
@@ -1008,6 +1022,7 @@ export async function runNextGovernanceStep(request: {
       runtimeRoot: request.runtimeRoot,
       workId: `${run.runId}:${input.phase}:${String(input.pageOrdinal)}`,
       attemptCount: failureAttemptCount,
+      recoveryCount: claimedRecoveryCount,
       failedAt: now,
       error: invocationError
     });

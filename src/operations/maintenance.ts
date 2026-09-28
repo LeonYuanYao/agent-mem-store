@@ -12,7 +12,7 @@ import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
 import { inspectForegroundHealth } from "../health/foreground.js";
 import { foregroundRetrievalSocketPath } from "../retrieval/foreground-protocol.js";
 import { inspectIndexHealth } from "../health/index.js";
-import { connectionRecoveryCandidateSql, connectionRecoveryCooldownMilliseconds } from "../luna/recovery-policy.js";
+import { connectionRecoveryCandidateSql, connectionRecoveryCooldownMilliseconds, modelRecoveryEvidenceSql, recoveryCandidateSql, recoveryEvidenceSql, type ModelWorkTable } from "../luna/recovery-policy.js";
 
 export interface DoctorCheck {
   readonly name: string;
@@ -38,6 +38,33 @@ function doctorState(checks: readonly DoctorCheck[]): "healthy" | "observing" | 
   if (checks.some((check) => check.state === "warning")) return "degraded";
   if (checks.some((check) => check.state === "info")) return "observing";
   return "healthy";
+}
+
+function modelRecoveryCheck(database: DatabaseSync, table: ModelWorkTable, name: string, now: string): DoctorCheck {
+  const recoverable = `${recoveryCandidateSql(table)}
+    AND (last_error_category != 'authentication' OR ${recoveryEvidenceSql(table)})`;
+  const row = database.prepare(`SELECT
+    SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) AS blocked,
+    SUM(CASE WHEN ${recoverable} THEN 1 ELSE 0 END) AS recoverable,
+    MIN(CASE WHEN ${recoverable} THEN updated_at END) AS failure_at,
+    SUM(CASE WHEN state != 'blocked' AND last_error_category IS NOT NULL THEN 1 ELSE 0 END) AS retrying
+    FROM ${table} WHERE state IN ('pending', 'processing', 'retrying', 'blocked',
+      'pending_generation', 'pending_validation', 'processing_generation', 'processing_validation',
+      'retrying_generation', 'retrying_validation')`).get();
+  const blocked = z.number().parse(row?.blocked ?? 0);
+  const waiting = z.number().parse(row?.recoverable ?? 0);
+  const retrying = z.number().parse(row?.retrying ?? 0);
+  const state = blocked > waiting ? "warning" : waiting + retrying > 0 ? "info" : "ok";
+  const after = typeof row?.failure_at === "string"
+    ? new Date(Date.parse(row.failure_at) + connectionRecoveryCooldownMilliseconds).toISOString() : null;
+  return { name, state,
+    detail: state === "warning" ? `${String(blocked - waiting)} blocked tasks require recovery evidence or explicit handling; recovery is limited to two attempts.`
+      : state === "info" ? `${String(waiting)} tasks await recovery evidence and cooldown; ${String(retrying)} tasks are retrying. Successful completion is required.`
+      : "No blocked or failed model work.",
+    ...(state === "ok" ? {} : {
+      nextEvaluationAt: after !== null && after > now ? after : null,
+      recoveryCondition: "Retryable failures use six fast retries. Recovery requires subsequent model success, healthy state, six-hour cooldown and remaining allowance; exhausted or non-recoverable failures require explicit handling."
+    }) };
 }
 
 async function foregroundEndpointAcceptsConnections(runtimeRoot: string): Promise<boolean> {
@@ -236,12 +263,18 @@ export async function inspectDoctor(request: {
        WHERE operation_kind = 'semantic_assessment'
          AND state IN ('pending', 'processing', 'retrying', 'blocked')`
     ).get();
+    // Unresolved authentication remains actionable until the configured model
+    // actually recovers; merely making a task eligible must not hide a bad login.
+    const observableRecoverySql = `${connectionRecoveryCandidateSql}
+      AND (last_error_category != 'authentication' OR ${modelRecoveryEvidenceSql})`;
     const lunaOperations = database.prepare(
       `SELECT COUNT(*) AS active_count,
               SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) AS blocked_count,
-              SUM(CASE WHEN ${connectionRecoveryCandidateSql} THEN 1 ELSE 0 END)
+              SUM(CASE WHEN state = 'processing' AND connection_recovery_count > 0
+                       THEN 1 ELSE 0 END) AS recovering_count,
+              SUM(CASE WHEN ${observableRecoverySql} THEN 1 ELSE 0 END)
                 AS offline_blocked_count,
-              MIN(CASE WHEN ${connectionRecoveryCandidateSql} THEN updated_at END)
+              MIN(CASE WHEN ${observableRecoverySql} THEN updated_at END)
                 AS earliest_recovery_failure_at
        FROM luna_operations
        WHERE state IN ('pending', 'processing', 'retrying', 'blocked')`
@@ -271,20 +304,26 @@ export async function inspectDoctor(request: {
       lunaOperations?.offline_blocked_count ?? 0
     );
     const actionableBlockedLunaOperationCount = blockedLunaOperationCount - offlineBlockedLunaOperationCount;
+    const recoveringLunaOperationCount = z.number().int().nonnegative().parse(
+      lunaOperations?.recovering_count ?? 0
+    );
     const recoveryAfter = typeof lunaOperations?.earliest_recovery_failure_at === "string"
       ? new Date(Date.parse(lunaOperations.earliest_recovery_failure_at) + connectionRecoveryCooldownMilliseconds).toISOString()
       : null;
     checks.push({
       name: "luna_operations",
-      state: actionableBlockedLunaOperationCount > 0 ? "warning" : offlineBlockedLunaOperationCount > 0 ? "info" : "ok",
+      state: actionableBlockedLunaOperationCount > 0 ? "warning"
+        : offlineBlockedLunaOperationCount > 0 || recoveringLunaOperationCount > 0 ? "info" : "ok",
       ...(offlineBlockedLunaOperationCount > 0 ? {
         nextEvaluationAt: recoveryAfter !== null && recoveryAfter > now ? recoveryAfter : null,
         recoveryCondition: "A successful model operation after the failure, healthy model state, and six-hour cooldown; at most two single-attempt recovery probes."
       } : {}),
       detail: actionableBlockedLunaOperationCount > 0
-        ? `${String(actionableBlockedLunaOperationCount)} blocked actionable of ${String(activeLunaOperationCount)} active Luna operations; automatic retries stopped and explicit handling is required.`
+        ? `${String(actionableBlockedLunaOperationCount)} blocked actionable of ${String(activeLunaOperationCount)} active Luna operations; automatic retries stopped. Authentication recovery requires subsequent model success and remaining recovery allowance; otherwise explicit handling is required.`
         : offlineBlockedLunaOperationCount > 0
           ? `${String(offlineBlockedLunaOperationCount)} Luna operations await recovery evidence and cooldown (not before ${recoveryAfter ?? "unknown"}); timeout alone does not prove a network outage. Local capture and recall remain available.`
+          : recoveringLunaOperationCount > 0
+            ? `${String(recoveringLunaOperationCount)} Luna recovery attempts are processing; completion is required to establish operation recovery.`
           : blockedLunaOperationCount > 0
             ? `${String(blockedLunaOperationCount)} blocked Luna operations require classification.`
         : `${String(activeLunaOperationCount)} active Luna operations; none blocked.`
@@ -294,11 +333,11 @@ export async function inspectDoctor(request: {
        FROM governance_runs WHERE state IN ('pending', 'processing', 'retrying', 'blocked')
        ORDER BY CASE state WHEN 'blocked' THEN 0 WHEN 'retrying' THEN 1 ELSE 2 END, created_at LIMIT 1`
     ).get();
+    const governanceRecovery = modelRecoveryCheck(database, "governance_runs", "governance", now);
     const governanceRecovering = governance !== undefined &&
       (governance.state === "retrying" || governance.last_error_category !== null);
     checks.push({
-      name: "governance",
-      state: governance?.state === "blocked" ? "warning" : governanceRecovering ? "info" : "ok",
+      ...governanceRecovery,
       detail: governance === undefined ? "No outstanding governance run."
         : `Governance ${String(governance.run_id)} (${String(governance.current_phase)}) is ${String(governance.state)}; last failure: ${String(governance.last_error_category ?? "none")}. Capture and recall are checked independently.`,
       ...(governanceRecovering && governance.state !== "blocked" ? {
@@ -306,6 +345,8 @@ export async function inspectDoctor(request: {
         recoveryCondition: "The scheduled governance retry must complete a successful page review; requeueing alone does not establish recovery."
       } : {})
     });
+    checks.push(modelRecoveryCheck(database, "memory_quality_items", "memory_quality", now));
+    checks.push(modelRecoveryCheck(database, "memory_duplicate_clusters", "memory_duplicates", now));
     if (request.deep) checks.push(await inspectCatalogFiles(database, vaultRoot));
   } catch (error) {
     checks.push({
@@ -355,7 +396,7 @@ export async function retryOperation(request: {
       }
       if (request.preview) return { state: "preview", dryRun: true, wouldRetry: true, operationId };
       const updated = database.prepare(
-        `UPDATE governance_runs SET state = 'pending', consecutive_failure_count = 0,
+        `UPDATE governance_runs SET state = 'pending', consecutive_failure_count = 0, connection_recovery_count = 0,
            next_retry_at = NULL, updated_at = ?
          WHERE run_id = ? AND state IN ('blocked', 'retrying')`
       ).run(requestedAt, operationId);

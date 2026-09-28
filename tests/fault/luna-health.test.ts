@@ -14,7 +14,8 @@ import {
   retryBlockedLunaOperations
 } from "../../src/luna/operations.js";
 import { LunaInvocationError } from "../../src/luna/index.js";
-import { retryOperation } from "../../src/operations/maintenance.js";
+import { inspectDoctor, retryOperation } from "../../src/operations/maintenance.js";
+import { initializeMemStore } from "../../src/operations/initialize.js";
 import { inspectOperation } from "../../src/operations/status.js";
 import { openRuntimeDatabase } from "../../src/runtime/database.js";
 
@@ -63,7 +64,106 @@ test.each(["timeout", "unavailable", "rate_limited"] as const)("an exhausted %s 
   }
 });
 
-test.each(["schema_invalid", "authentication", "invalid_model", "invalid_configuration", "input_too_large"] as const)(
+test("authentication-blocked work resumes after independent success and cooldown", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-auth-recovery-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  const operation = await enqueueLunaOperation({ runtimeRoot, kind: "consolidate_session",
+    idempotencyKey: "auth-recovery", payload: {}, createdAt: "2026-08-07T00:00:00.000Z" });
+  const claim = (now: string) => claimLunaOperation({ runtimeRoot, workerId: "worker", now, leaseSeconds: 60 });
+  const first = await claim("2026-08-07T00:00:01.000Z");
+  if (first.state !== "claimed") throw new Error("Expected initial claim.");
+  await expect(failLunaOperation({ runtimeRoot, operationId: operation.operationId,
+    leaseToken: first.leaseToken, failedAt: "2026-08-07T00:00:02.000Z",
+    error: new LunaInvocationError("authentication", false, "Authentication failed.")
+  })).resolves.toMatchObject({ state: "blocked", nextRetryAt: null });
+  await expect(claim("2026-08-07T07:00:00.000Z")).resolves.toEqual({ state: "empty" });
+  for (const at of ["2026-08-07T01:00:00.000Z", "2026-08-07T02:00:00.000Z"]) {
+    await enqueueLunaOperation({ runtimeRoot, kind: "distill_batch", idempotencyKey: at,
+      payload: {}, createdAt: at });
+    const other = await claimLunaOperation({ runtimeRoot, workerId: "other", now: at,
+      leaseSeconds: 60, kinds: ["distill_batch"] });
+    if (other.state !== "claimed") throw new Error("Expected independent work.");
+    await completeLunaOperation({ runtimeRoot, operationId: other.operation.operationId,
+      leaseToken: other.leaseToken, completedAt: at });
+  }
+  expect((await inspectLunaHealth({ runtimeRoot, now: "2026-08-07T03:00:00.000Z" })).state).toBe("healthy");
+  await expect(claim("2026-08-07T06:00:01.000Z")).resolves.toEqual({ state: "empty" });
+  const resumed = await claim("2026-08-07T06:00:02.000Z");
+  expect(resumed).toMatchObject({ state: "claimed", operation: {
+    operationId: operation.operationId, attemptCount: 2, retryEpoch: 0
+  } });
+  if (resumed.state !== "claimed") throw new Error("Expected authentication recovery.");
+  const recovering = await inspectDoctor({ runtimeRoot, vaultRoot, deep: false, now: "2026-08-07T06:00:02.000Z" });
+  expect(recovering.checks.find(check => check.name === "luna_operations"))
+    .toMatchObject({ state: "info" });
+  await completeLunaOperation({ runtimeRoot, operationId: operation.operationId,
+    leaseToken: resumed.leaseToken, completedAt: "2026-08-07T06:00:03.000Z" });
+  await expect(inspectOperation(runtimeRoot, operation.operationId))
+    .resolves.toMatchObject({ state: "completed" });
+});
+
+test("authentication recovery stays bounded across later transient failures and manual retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-auth-budget-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  const operation = await enqueueLunaOperation({ runtimeRoot, kind: "consolidate_session",
+    idempotencyKey: "auth-budget", payload: {}, createdAt: "2026-08-07T00:00:00.000Z" });
+  const claim = (now: string) => claimLunaOperation({ runtimeRoot, workerId: "worker", now, leaseSeconds: 60 });
+  const first = await claim("2026-08-07T00:00:01.000Z");
+  if (first.state !== "claimed") throw new Error("Expected initial claim.");
+  await failLunaOperation({ runtimeRoot, operationId: operation.operationId,
+    leaseToken: first.leaseToken, failedAt: "2026-08-07T00:00:02.000Z",
+    error: new LunaInvocationError("authentication", false, "Authentication failed.") });
+  const succeedOtherWork = async (at: string) => {
+    await enqueueLunaOperation({ runtimeRoot, kind: "distill_batch", idempotencyKey: at,
+      payload: {}, createdAt: at });
+    const other = await claimLunaOperation({ runtimeRoot, workerId: "other", now: at,
+      leaseSeconds: 60, kinds: ["distill_batch"] });
+    if (other.state !== "claimed") throw new Error("Expected independent work.");
+    await completeLunaOperation({ runtimeRoot, operationId: other.operation.operationId,
+      leaseToken: other.leaseToken, completedAt: at });
+  };
+  await succeedOtherWork("2026-08-07T01:00:00.000Z");
+  await succeedOtherWork("2026-08-07T02:00:00.000Z");
+  const probe = await claim("2026-08-07T07:00:00.000Z");
+  if (probe.state !== "claimed") throw new Error("Expected first recovery probe.");
+  await expect(failLunaOperation({ runtimeRoot, operationId: operation.operationId,
+    leaseToken: probe.leaseToken, failedAt: "2026-08-07T07:00:01.000Z",
+    error: new LunaInvocationError("unavailable", true, "Temporary provider failure.")
+  })).resolves.toMatchObject({ state: "blocked", nextRetryAt: null });
+  await expect(claim("2026-08-07T13:00:02.000Z")).resolves.toEqual({ state: "empty" });
+  await succeedOtherWork("2026-08-07T08:00:00.000Z");
+  await expect(claim("2026-08-07T13:00:00.000Z")).resolves.toEqual({ state: "empty" });
+  const secondProbe = await claim("2026-08-07T13:00:01.000Z");
+  expect(secondProbe).toMatchObject({ state: "claimed", operation: { attemptCount: 3 } });
+  if (secondProbe.state !== "claimed") throw new Error("Expected second recovery probe.");
+  await failLunaOperation({ runtimeRoot, operationId: operation.operationId,
+    leaseToken: secondProbe.leaseToken, failedAt: "2026-08-07T13:00:02.000Z",
+    error: new LunaInvocationError("authentication", false, "Authentication failed again.") });
+  await succeedOtherWork("2026-08-07T14:00:00.000Z");
+  await succeedOtherWork("2026-08-07T15:00:00.000Z");
+  await expect(claim("2026-08-08T00:00:00.000Z")).resolves.toEqual({ state: "empty" });
+  await expect(inspectOperation(runtimeRoot, operation.operationId)).resolves.toMatchObject({
+    state: "blocked", attempt_count: 3, connection_recovery_count: 2
+  });
+  const doctor = await inspectDoctor({ runtimeRoot, vaultRoot, deep: false, now: "2026-08-08T00:00:00.000Z" });
+  expect(doctor.state).toBe("degraded");
+  expect(doctor.checks.find(check => check.name === "luna_operations"))
+    .toMatchObject({ state: "warning" });
+  await retryOperation({ runtimeRoot, operationId: operation.operationId,
+    requestedAt: "2026-08-08T01:00:00.000Z", preview: false });
+  await expect(claim("2026-08-08T01:00:01.000Z")).resolves.toMatchObject({ state: "claimed",
+    operation: { attemptCount: 4, epochAttemptCount: 1, retryEpoch: 1 } });
+  await expect(inspectOperation(runtimeRoot, operation.operationId))
+    .resolves.toMatchObject({ connection_recovery_count: 0 });
+});
+
+test.each(["schema_invalid", "invalid_model", "invalid_configuration", "input_too_large", "local_processing"] as const)(
   "recovered connectivity never retries a blocked %s operation", async (category) => {
     const root = await mkdtemp(join(tmpdir(), "memstore-luna-no-reconnect-"));
     temporaryDirectories.push(root);

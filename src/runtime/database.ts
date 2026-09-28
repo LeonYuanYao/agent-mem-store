@@ -357,6 +357,11 @@ const migrations: readonly Migration[] = [
     version: 65,
     name: "governance_safe_diagnostics",
     path: new URL("../../migrations/0065-governance-safe-diagnostics.sql", import.meta.url)
+  },
+  {
+    version: 66,
+    name: "unified_model_recovery",
+    path: new URL("../../migrations/0066-unified-model-recovery.sql", import.meta.url)
   }
 ];
 

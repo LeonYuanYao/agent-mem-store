@@ -8,6 +8,7 @@ import {
   type LunaSafeDiagnostic
 } from "../luna/index.js";
 import { recordLunaWorkFailure, recordLunaWorkSuccess } from "../luna/operations.js";
+import { dueRecoverySql, recoveryBefore, modelRetryDecision } from "../luna/recovery-policy.js";
 import { lunaModelIdentity } from "../luna/model.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import {
@@ -20,7 +21,6 @@ import {
 const tokenizer = getEncoding("o200k_base");
 const batchSize = 16;
 const leaseMilliseconds = 10 * 60 * 1_000;
-const maximumEpochAttempts = 7;
 const lunaSafeDiagnosticSchema = z.object({
   stage: z.enum([
     "invocation",
@@ -91,6 +91,7 @@ interface QualityItem {
     | "processing_validation";
   readonly attemptCount: number;
   readonly epochAttemptCount: number;
+  readonly recoveryCount: number;
   readonly proposedCompact?: string;
   readonly generatorIdentity?: string;
 }
@@ -312,7 +313,7 @@ export async function retryRepairableMemoryQuality(request: {
            next_retry_at = NULL, last_error_category = NULL,
            last_error_diagnostic_json = NULL, lease_token = NULL,
            lease_until = NULL, completed_at = NULL,
-           retry_epoch = retry_epoch + 1, epoch_attempt_count = 0,
+           retry_epoch = retry_epoch + 1, epoch_attempt_count = 0, connection_recovery_count = 0,
            updated_at = ?
          WHERE item_id = ?`
       );
@@ -322,7 +323,7 @@ export async function retryRepairableMemoryQuality(request: {
            validation_reason_code = NULL, next_retry_at = NULL,
            last_error_category = NULL, last_error_diagnostic_json = NULL,
            lease_token = NULL, lease_until = NULL, completed_at = NULL,
-           retry_epoch = retry_epoch + 1, epoch_attempt_count = 0,
+           retry_epoch = retry_epoch + 1, epoch_attempt_count = 0, connection_recovery_count = 0,
            updated_at = ?
          WHERE item_id = ?`
       );
@@ -425,6 +426,7 @@ function parseQualityItem(row: Record<string, unknown>): QualityItem {
     state: z.enum(["processing_generation", "processing_validation"]).parse(row.state),
     attemptCount: z.number().int().positive().parse(row.attempt_count),
     epochAttemptCount: z.number().int().positive().parse(row.epoch_attempt_count),
+    recoveryCount: z.number().int().nonnegative().parse(row.connection_recovery_count),
     ...(typeof row.proposed_compact === "string" ? { proposedCompact: row.proposed_compact } : {}),
     ...(typeof row.generator_identity === "string" ? { generatorIdentity: row.generator_identity } : {})
   };
@@ -438,24 +440,27 @@ async function claimBatch(request: {
   const database = await openRuntimeDatabase(request.runtimeRoot);
   const leaseToken = `msqualitylease_${randomUUID()}`;
   const leaseUntil = new Date(Date.parse(request.now) + leaseMilliseconds).toISOString();
-  const firstSelectionSql = `SELECT state, last_error_category, epoch_attempt_count
+  const dueRecovery = dueRecoverySql("memory_quality_items");
+  const cutoff = recoveryBefore(request.now);
+  const firstSelectionSql = `SELECT state, last_error_category, epoch_attempt_count, proposed_compact
     FROM memory_quality_items
     WHERE state IN ('pending_generation', 'pending_validation')
        OR (state IN ('retrying_generation', 'retrying_validation') AND next_retry_at <= ?)
        OR (state IN ('processing_generation', 'processing_validation') AND lease_until < ?)
+       OR ${dueRecovery}
     ORDER BY CASE WHEN state LIKE '%generation' THEN 0 ELSE 1 END,
       epoch_attempt_count DESC, created_at, item_id LIMIT 1`;
   try {
-    if (database.prepare(firstSelectionSql).get(request.now, request.now) === undefined) {
+    if (database.prepare(firstSelectionSql).get(request.now, request.now, cutoff) === undefined) {
       return { leaseToken, items: [] };
     }
     database.exec("BEGIN IMMEDIATE");
-    const first = database.prepare(firstSelectionSql).get(request.now, request.now);
+    const first = database.prepare(firstSelectionSql).get(request.now, request.now, cutoff);
     if (first === undefined) {
       database.exec("COMMIT");
       return { leaseToken, items: [] };
     }
-    const generation = String(first.state).includes("generation");
+    const generation = first.state === "blocked" ? first.proposed_compact === null : String(first.state).includes("generation");
     const pendingState = generation ? "pending_generation" : "pending_validation";
     const retryingState = generation ? "retrying_generation" : "retrying_validation";
     const previousProcessingState = generation ? "processing_generation" : "processing_validation";
@@ -475,6 +480,7 @@ async function claimBatch(request: {
        WHERE state = ?
           OR (state = ? AND next_retry_at <= ?)
           OR (state = ? AND lease_until < ?)
+          OR (${dueRecovery} AND proposed_compact IS ${generation ? "NULL" : "NOT NULL"})
        ORDER BY epoch_attempt_count DESC, created_at, item_id LIMIT ?`
     ).all(
       pendingState,
@@ -482,11 +488,13 @@ async function claimBatch(request: {
       request.now,
       previousProcessingState,
       request.now,
+      cutoff,
       claimLimit
     );
     const update = database.prepare(
       `UPDATE memory_quality_items SET state = ?, attempt_count = attempt_count + 1,
          epoch_attempt_count = epoch_attempt_count + 1,
+         connection_recovery_count = connection_recovery_count + CASE WHEN state = 'blocked' THEN 1 ELSE 0 END,
          lease_token = ?, lease_until = ?, updated_at = ? WHERE item_id = ?`
     );
     for (const row of rows) {
@@ -505,6 +513,7 @@ async function claimBatch(request: {
         ...row,
         state: processingState,
         attempt_count: Number(row.attempt_count) + 1,
+        connection_recovery_count: Number(row.connection_recovery_count) + (row.state === "blocked" ? 1 : 0),
         epoch_attempt_count: Number(row.epoch_attempt_count) + 1
       }))
     };
@@ -542,14 +551,15 @@ async function failBatch(request: {
   readonly error: LunaInvocationError;
 }): Promise<"retrying" | "blocked"> {
   const maximumAttempt = Math.max(...request.items.map((item) => item.epochAttemptCount));
-  const health = await recordLunaWorkFailure({
+  await recordLunaWorkFailure({
     runtimeRoot: request.runtimeRoot,
     workId: request.items[0]?.itemId ?? "memory-quality",
     attemptCount: maximumAttempt,
+    recoveryCount: Math.max(...request.items.map(item => item.recoveryCount)),
     failedAt: request.failedAt,
     error: request.error
   });
-  const blocked = !request.error.retryable || maximumAttempt >= maximumEpochAttempts;
+  let retrying = false;
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     const update = database.prepare(
@@ -560,12 +570,16 @@ async function failBatch(request: {
     );
     database.exec("BEGIN IMMEDIATE");
     for (const item of request.items) {
+      const decision = modelRetryDecision({ workId: item.itemId, attemptCount: item.epochAttemptCount,
+        recoveryCount: item.recoveryCount, failedAt: request.failedAt, retryable: request.error.retryable });
+      const blocked = decision.state === "blocked";
+      retrying ||= !blocked;
       const retryState = item.state === "processing_generation"
         ? "retrying_generation"
         : "retrying_validation";
       update.run(
         blocked ? "blocked" : retryState,
-        blocked ? null : health.nextRetryAt,
+        decision.nextRetryAt,
         request.error.category,
         request.error.diagnostic === undefined
           ? null
@@ -581,7 +595,7 @@ async function failBatch(request: {
   } finally {
     database.close();
   }
-  return blocked ? "blocked" : "retrying";
+  return retrying ? "retrying" : "blocked";
 }
 
 function nextRepresentations(
@@ -653,6 +667,7 @@ export async function runNextMemoryQualityStep(request: {
           `UPDATE memory_quality_items SET state = ?, proposed_compact = ?,
              rendered_token_count = ?, generator_identity = ?, validation_state = NULL,
              validation_reason_code = ?, last_error_category = NULL,
+             epoch_attempt_count = 0, connection_recovery_count = 0,
              last_error_diagnostic_json = NULL, lease_token = NULL,
              lease_until = NULL, completed_at = ?, updated_at = ?
            WHERE item_id = ? AND state = 'processing_generation'`

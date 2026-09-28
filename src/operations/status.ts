@@ -320,6 +320,7 @@ export async function inspectStatus(request: {
         coverage_through: governance.coverage_through,
         attempt_count: governance.attempt_count,
         consecutive_failure_count: governance.consecutive_failure_count,
+        connection_recovery_count: governance.connection_recovery_count,
         next_retry_at: governance.next_retry_at,
         last_error_category: governance.last_error_category,
         last_error_diagnostic: typeof governance.last_error_diagnostic_json === "string"

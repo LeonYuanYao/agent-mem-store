@@ -1401,6 +1401,28 @@ test("importance reasons are the Luna wire source of truth and deterministically
   expect(prompt).toContain("Return at most one importance reason for each tag");
 });
 
+test.each([
+  { stderr: "ERROR: unexpected status 401 Unauthorized; request-secret-placeholder", category: "authentication", code: "http_401", retryable: false },
+  { stderr: 'ERROR: {"status":403,"message":"Forbidden"}', category: "authentication", code: "http_403", retryable: false },
+  { stderr: 'ERROR: {"code":"invalid_api_key"}', category: "authentication", code: "invalid_credentials", retryable: false },
+  { stderr: "ERROR: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.", category: "authentication", code: "login_required", retryable: false },
+  { stderr: "ERROR: authentication failed; request-secret-placeholder", category: "authentication", code: "authentication_failed", retryable: false },
+  { stderr: "ERROR: Connection reset while refreshing authentication credentials", category: "unavailable", code: "connection_failed", retryable: true },
+  { stderr: "ERROR: author service disconnected", category: "unavailable", code: "process_failed", retryable: true }
+])("process failure keeps only safe diagnostic $code", async ({ stderr, category, code, retryable }) => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-luna-auth-diagnostic-"));
+  temporaryDirectories.push(root);
+  const adapter = new CodexLunaAdapter({ codexExecutable: "codex", codexHome: join(root, "codex-home"),
+    temporaryRoot: root, runProcess: () => Promise.resolve({ exitCode: 1, stdout: "", stderr }) });
+  const failure: unknown = await adapter.assessCandidateSemantics({ operationId: "safe-auth-diagnostic",
+    statement: "A claim.", conditions: [], exclusions: [], evidence: [] }).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(LunaInvocationError);
+  if (!(failure instanceof LunaInvocationError)) throw new Error("Expected a model failure.");
+  expect(failure).toMatchObject({ category, retryable, diagnostic: { stage: "invocation", code } });
+  expect(JSON.stringify(failure)).not.toContain("request-secret-placeholder");
+  expect(failure.message).not.toContain(stderr);
+});
+
 test("an API invalid_json_schema response is classified as a visible non-retryable configuration fault", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-luna-api-schema-"));
   temporaryDirectories.push(root);

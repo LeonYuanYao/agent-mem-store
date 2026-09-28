@@ -16,11 +16,25 @@ Defines structured model requests/responses and invokes the configured Codex sub
 
 CodexLunaAdapter owns prompt/schema construction, isolated execution and validation. operations.ts owns durable queue claims, leases, retry epochs and health reporting.
 
-`recovery-policy.ts` shares exhausted transient recovery eligibility with Doctor.
-After the fast retry budget, ordinary claims allow two single-attempt probes with
-a six-hour cooldown and independent healthy-model success evidence. Migration
-0061 persists the allowance. Schema/authentication/configuration/local failures
-remain explicit-retry-only. See ADR-0138; do not reopen fast retries for a probe.
+`recovery-policy.ts` supplies backoff and recovery eligibility to ordinary Luna
+operations, governance pages, Compact generation/validation, duplicate assessment
+and Doctor. Retryable failures allow six retries after the initial attempt, at
+30, 60, 120, 240, 480 and 900 seconds with deterministic 0.9–1.0 jitter.
+After the fast retry budget, claims allow two single-attempt probes with
+a six-hour cooldown and independent healthy-model success evidence. Authentication
+failures stop immediately, then become eligible for the same bounded recovery
+after the configured model succeeds again. They do not need seven failed attempts.
+Migrations 0061 and 0066 persist the allowance, including when a recovery attempt
+changes between authentication and transient failure. Schema/configuration/local
+failures remain explicit-retry-only once blocked. See ADR-0138, ADR-0142 and
+[ADR-0143](../../docs/adr/0143-unify-background-model-retry-policy.md); a failed recovery
+attempt does not reopen fast retries. No health-only model calls are added.
+
+Invocation diagnostics store fixed reason codes for HTTP authentication rejection,
+invalid credentials, login requirements and recognized transport failures. Raw
+provider messages and credentials are excluded. Transport failure during token
+refresh remains retryable, and incidental substrings such as `author` do not
+classify a failure as authentication.
 
 - [worker/distillation.ts](../../src/worker/distillation.ts)
 - [quality/pipeline.ts](../../src/quality/pipeline.ts)

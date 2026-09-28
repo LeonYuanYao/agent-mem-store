@@ -928,11 +928,23 @@ function classifyProcessFailure(result: LunaProcessResult): LunaInvocationError 
       "The Luna response schema is not supported by the configured provider."
     );
   }
-  if (/auth|credential|unauthorized|forbidden/u.test(diagnostic)) {
+  const authStatus = /\b(?:http(?:\/[\d.]+)?\s+|status(?:\s+code)?["']?\s*[:=]?\s*)(401|403)\b/u.exec(diagnostic)?.[1];
+  const explicitAuthCode = authStatus === "401" ? "http_401"
+    : authStatus === "403" ? "http_403"
+    : /\b(?:invalid_api_key|invalid_credentials|invalid_grant)\b/u.test(diagnostic) ? "invalid_credentials"
+    : /\b(?:refresh_token_reused|token_expired)\b|\b(?:log|sign)\s+in\s+again\b|\bnot\s+logged\s+in\b/u.test(diagnostic) ? "login_required"
+    : undefined;
+  // A transport error while refreshing a token does not prove invalid credentials.
+  if (explicitAuthCode === undefined && /\b(?:econnreset|econnrefused|enotfound|eai_again|etimedout)\b|\bconnection (?:reset|refused|timed out)\b|\bdns (?:error|failed|failure)\b/u.test(diagnostic)) {
+    return new LunaInvocationError("unavailable", true, "Luna connection failed.",
+      { stage: "invocation", code: "connection_failed" });
+  }
+  if (explicitAuthCode !== undefined || /\b(?:auth(?:entication|orization)?|credentials?|unauthorized|forbidden)\b|\bauthentication_error\b/u.test(diagnostic)) {
     return new LunaInvocationError(
       "authentication",
       false,
-      "Luna authentication is unavailable."
+      "Luna authentication is unavailable.",
+      { stage: "invocation", code: explicitAuthCode ?? "authentication_failed" }
     );
   }
   if (/model.+(not found|invalid|unavailable)|unknown model/u.test(diagnostic)) {
@@ -959,7 +971,8 @@ function classifyProcessFailure(result: LunaProcessResult): LunaInvocationError 
   return new LunaInvocationError(
     "unavailable",
     true,
-    "Luna invocation failed without a usable response."
+    "Luna invocation failed without a usable response.",
+    { stage: "invocation", code: "process_failed" }
   );
 }
 

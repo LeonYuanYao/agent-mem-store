@@ -65,6 +65,8 @@ test("doctor diagnoses an initialized isolated installation without repairing it
     ["candidate_pipeline", "ok"],
     ["luna_operations", "ok"],
     ["governance", "ok"],
+    ["memory_quality", "ok"],
+    ["memory_duplicates", "ok"],
     ["vault_catalog", "ok"]
   ]);
 });

@@ -49,6 +49,13 @@ independently of ordinary Luna work. `operation retry RUN_ID --preview` previews
 retry; omit `--preview` after fixing the cause to resume the frozen failed page.
 Applied checkpoints, successful coverage and lifetime attempts are preserved.
 
+Governance pages share ordinary Luna backoff and bounded connection recovery.
+Eligible blocked work resumes its frozen failed page after cooldown and independent
+healthy-model evidence; completed pages are not reviewed again. A successful page
+resets the consecutive-failure and recovery budgets for the next page. Schema,
+evidence and local failures do not become recoverable merely because another model
+call succeeds. See [ADR-0143](../../docs/adr/0143-unify-background-model-retry-policy.md).
+
 Do not advance successful coverage on failure. Preserve Human authority, scope, revision freshness and idempotency. A possibly changing architecture is not retirement evidence. Literal quotes establish provenance, not semantic entailment.
 
 ## Verification

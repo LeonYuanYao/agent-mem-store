@@ -35,10 +35,16 @@ Some operations are read-only; others write Vault/runtime/configuration or insta
 Doctor reports recoverable exhausted Luna work as waiting for evidence/cooldown,
 and exhausted recovery as actionable. It does not infer network loss from timeout
 alone. Explicit retry resets both the fast-retry epoch and recovery allowance.
+Authentication-blocked work remains a warning until subsequent successful model
+work establishes healthy authentication. It then shows recovery waiting until
+the ordinary Worker completes the operation. Exhausting the two recovery attempts
+still requires explicit handling; a healthy model alone cannot clear that warning.
 
-Doctor also inspects outstanding governance runs: blocked work is a warning and
-scheduled retries are informational. `status.governance` includes the safe failure
-diagnostic, attempt counts and retry time. `operation retry` accepts a blocked or
+Doctor also checks governance, Compact quality and duplicate assessment using
+the same recovery eligibility as their Workers. Recoverable waiting and scheduled
+retries are informational; exhausted or non-recoverable blocked work is a warning.
+`status.governance` includes the safe failure diagnostic, attempt and recovery
+counts, and retry time. `operation retry` accepts a blocked or
 retrying governance run ID, supports a zero-write preview, and resumes its frozen
 checkpoint without resetting completed coverage or lifetime attempts.
 

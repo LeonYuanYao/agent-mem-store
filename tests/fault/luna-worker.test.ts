@@ -15,6 +15,8 @@ import {
 import { makeLongTermCandidateDurability } from "../helpers/candidate-durability.js";
 import { initializeMemStore } from "../../src/operations/initialize.js";
 import { runWorkerOnce } from "../../src/worker/main.js";
+import { claimLunaOperation, completeLunaOperation, enqueueLunaOperation } from "../../src/luna/operations.js";
+import { inspectDoctor } from "../../src/operations/maintenance.js";
 
 const roots: string[] = [];
 
@@ -51,6 +53,56 @@ test("the normal Worker resumes an exhausted connection failure after healthy re
   });
   expect(result.activities).toContain("luna:completed");
   await expect(inspectCaptureEventState(runtimeRoot, "msevent-recovery")).resolves.toMatchObject({ state: "completed" });
+});
+
+test("the normal Worker clears an authentication-blocked batch after recovery, and Doctor follows actual completion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-worker-auth-recovery-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime"), vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  await captureEvent({ runtimeRoot, event: {
+    schemaVersion: 1, eventId: "msevent-auth-recovery", deduplicationKey: "auth-recovery:stop", agent: "codex",
+    eventKind: "Stop", occurredAt: "2026-08-07T00:00:00.000Z", sessionId: "auth-recovery",
+    turnId: "auth-recovery-turn", payload: { assistantMessage: "No reusable knowledge in this task." }
+  } });
+  await prepareNextDistillationBatch({ runtimeRoot, maximumEvents: 8, preparedAt: "2026-08-07T00:01:00.000Z" });
+  await expect(runNextLunaWork({ runtimeRoot, workerId: "worker", now: "2026-08-07T00:02:00.000Z",
+    currentTime: () => "2026-08-07T00:02:00.000Z",
+    adapter: {
+      distillBatch: () => Promise.reject(new LunaInvocationError("authentication", false, "Authentication failed.")),
+      consolidateSession: () => Promise.reject(new Error("No consolidation expected."))
+    }
+  })).resolves.toMatchObject({ state: "blocked" });
+  const inspect = (now: string) => inspectDoctor({ runtimeRoot, vaultRoot, deep: false, now });
+  expect((await inspect("2026-08-07T00:03:00.000Z")).checks.find(c => c.name === "luna_operations"))
+    .toMatchObject({ state: "warning" });
+  for (const at of ["2026-08-07T01:00:00.000Z", "2026-08-07T02:00:00.000Z"]) {
+    await enqueueLunaOperation({ runtimeRoot, kind: "semantic_assessment", idempotencyKey: at,
+      payload: {}, createdAt: at });
+    const other = await claimLunaOperation({ runtimeRoot, workerId: "other", now: at,
+      leaseSeconds: 60, kinds: ["semantic_assessment"] });
+    if (other.state !== "claimed") throw new Error("Expected independent work.");
+    await completeLunaOperation({ runtimeRoot, operationId: other.operation.operationId,
+      leaseToken: other.leaseToken, completedAt: at });
+  }
+  expect((await inspect("2026-08-07T03:00:00.000Z")).checks.find(c => c.name === "luna_operations"))
+    .toMatchObject({ state: "info", nextEvaluationAt: "2026-08-07T06:02:00.000Z" });
+  const result = await runWorkerOnce({ runtimeRoot, vaultRoot, workerId: "worker",
+    now: "2026-08-07T07:00:00.000Z", workerStartedAt: "2026-08-07T06:59:00.000Z",
+    adapters: { luna: {
+      distillBatch: () => Promise.resolve({ schemaVersion: 1, kind: "distillation", candidates: [],
+        rejectionSummary: { schemaVersion: 1, coverage: "considered_memory_shaped_rejections_only",
+          counts: { no_memory: 1, session_only: 0, uncertain: 0, source_echo: 0 }, samples: [] } }),
+      consolidateSession: () => Promise.reject(new Error("No consolidation expected.")),
+      assessCandidateSemantics: () => Promise.reject(new Error("No candidate expected.")),
+      assessHumanConflict: () => Promise.reject(new Error("No conflict expected."))
+    } }
+  });
+  expect(result.activities).toContain("luna:completed");
+  await expect(inspectCaptureEventState(runtimeRoot, "msevent-auth-recovery"))
+    .resolves.toMatchObject({ state: "completed" });
+  expect((await inspect("2026-08-07T07:01:00.000Z")).checks.find(c => c.name === "luna_operations"))
+    .toMatchObject({ state: "ok" });
 });
 
 test("a transient Luna failure leaves evidence retryable and later produces one Candidate", async () => {

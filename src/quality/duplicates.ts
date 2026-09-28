@@ -4,13 +4,13 @@ import { z } from "zod";
 
 import { LunaInvocationError } from "../luna/index.js";
 import { recordLunaWorkFailure, recordLunaWorkSuccess } from "../luna/operations.js";
+import { dueRecoverySql, recoveryBefore, modelRetryDecision } from "../luna/recovery-policy.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { readCanonicalMemory, type CanonicalMemory } from "../vault/index.js";
 
 const discoveryPageSize = 32;
 const assessmentBatchSize = 8;
 const defaultSimilarityThreshold = 0.92;
-const maximumAttempts = 6;
 
 export interface DuplicateClusterInput {
   readonly clusterId: string;
@@ -275,6 +275,8 @@ interface ClaimedCluster {
   readonly rightRevisionId: string;
   readonly similarity: number;
   readonly attemptCount: number;
+  readonly epochAttemptCount: number;
+  readonly recoveryCount: number;
 }
 
 async function claimClusters(request: {
@@ -289,12 +291,14 @@ async function claimClusters(request: {
        WHERE state = 'pending'
           OR (state = 'retrying' AND next_retry_at <= ?)
           OR (state = 'processing' AND lease_until < ?)
+          OR ${dueRecoverySql("memory_duplicate_clusters")}
        ORDER BY created_at LIMIT ?`;
   try {
     if (
       database.prepare(selectionSql).get(
         request.now,
         request.now,
+        recoveryBefore(request.now),
         assessmentBatchSize
       ) === undefined
     ) {
@@ -304,10 +308,13 @@ async function claimClusters(request: {
     const rows = database.prepare(selectionSql).all(
       request.now,
       request.now,
+      recoveryBefore(request.now),
       assessmentBatchSize
     );
     const update = database.prepare(
       `UPDATE memory_duplicate_clusters SET state = 'processing',
+         epoch_attempt_count = epoch_attempt_count + 1,
+         connection_recovery_count = connection_recovery_count + CASE WHEN state = 'blocked' THEN 1 ELSE 0 END,
          attempt_count = attempt_count + 1, lease_token = ?, lease_until = ?, updated_at = ?
        WHERE cluster_id = ?`
     );
@@ -329,7 +336,9 @@ async function claimClusters(request: {
         rightMemoryId: z.string().parse(row.right_memory_id),
         rightRevisionId: z.string().parse(row.right_revision_id),
         similarity: z.number().parse(row.similarity),
-        attemptCount: z.number().int().positive().parse(Number(row.attempt_count) + 1)
+        attemptCount: z.number().int().positive().parse(Number(row.attempt_count) + 1),
+        epochAttemptCount: z.number().int().positive().parse(Number(row.epoch_attempt_count) + 1),
+        recoveryCount: z.number().int().nonnegative().parse(Number(row.connection_recovery_count) + (row.state === "blocked" ? 1 : 0))
       }))
     };
   } catch (error) {
@@ -441,6 +450,7 @@ export async function runNextDuplicateAssessment(request: {
     try {
       const update = database.prepare(
         `UPDATE memory_duplicate_clusters SET state = ?, decision = ?, reason_code = ?,
+           last_error_category = NULL, next_retry_at = NULL,
            completed_at = ?, updated_at = ?, lease_token = NULL, lease_until = NULL
          WHERE cluster_id = ?`
       );
@@ -468,15 +478,16 @@ export async function runNextDuplicateAssessment(request: {
     return { state: "assessed", clusterCount: current.length };
   } catch (error) {
     if (!(error instanceof LunaInvocationError)) throw error;
-    const attemptCount = Math.max(...current.map((entry) => entry.cluster.attemptCount));
-    const health = await recordLunaWorkFailure({
+    const attemptCount = Math.max(...current.map((entry) => entry.cluster.epochAttemptCount));
+    await recordLunaWorkFailure({
       runtimeRoot: request.runtimeRoot,
       workId: current[0]?.cluster.clusterId ?? "duplicate-assessment",
       attemptCount,
+      recoveryCount: Math.max(...current.map(entry => entry.cluster.recoveryCount)),
       failedAt: now,
       error
     });
-    const blocked = !error.retryable || attemptCount >= maximumAttempts;
+    let retrying = false;
     const database = await openRuntimeDatabase(request.runtimeRoot);
     try {
       const update = database.prepare(
@@ -486,9 +497,13 @@ export async function runNextDuplicateAssessment(request: {
       );
       database.exec("BEGIN IMMEDIATE");
       for (const entry of current) {
+        const decision = modelRetryDecision({ workId: entry.cluster.clusterId,
+          attemptCount: entry.cluster.epochAttemptCount, recoveryCount: entry.cluster.recoveryCount,
+          failedAt: now, retryable: error.retryable });
+        retrying ||= decision.state === "retrying";
         update.run(
-          blocked ? "blocked" : "retrying",
-          blocked ? null : health.nextRetryAt,
+          decision.state,
+          decision.nextRetryAt,
           error.category,
           now,
           entry.cluster.clusterId
@@ -501,7 +516,7 @@ export async function runNextDuplicateAssessment(request: {
     } finally {
       database.close();
     }
-    return { state: blocked ? "blocked" : "retrying", clusterCount: current.length };
+    return { state: retrying ? "retrying" : "blocked", clusterCount: current.length };
   }
 }
 
