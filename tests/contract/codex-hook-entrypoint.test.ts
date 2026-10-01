@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "vitest";
 
 import { foregroundRetrievalSocketPath } from "../../src/retrieval/foreground-client.js";
+import { foregroundRequestSchema } from "../../src/retrieval/foreground-protocol.js";
 import { adapterDisplaySchema, readSessionStartInjection, renderHookDisplay } from "../../src/configuration/hook-display.js";
 import { codexPrimaryInput } from "../helpers/codex-primary-input.js";
 
@@ -37,7 +38,7 @@ afterEach(async () => {
 
 async function runHook(request: {
   readonly runtimeRoot: string;
-  readonly event: "SessionStart" | "UserPromptSubmit";
+  readonly event: "SessionStart" | "UserPromptSubmit" | "PostToolUse" | "Stop" | "SessionEnd";
   readonly input: Record<string, unknown>;
   readonly environment?: Record<string, string>;
 }): Promise<{ readonly status: number | null; readonly stdout: string; readonly stderr: string }> {
@@ -65,8 +66,69 @@ async function runHook(request: {
   return { status, stdout, stderr };
 }
 
+test.each(["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"] as const)(
+  "human-only mode skips new %s capture while retaining foreground injection and reversible capture", async (event) => {
+    const root = await mkdtemp(join(tmpdir(), "memstore-human-only-hook-"));
+    temporaryDirectories.push(root);
+    const runtimeRoot = join(root, "runtime");
+    await mkdir(join(runtimeRoot, "state"), { recursive: true });
+    const configure = (enabled: boolean) => writeFile(join(runtimeRoot, "config.toml"),
+      `schema_version = 1\n[adapters]\nsession_start_injection = true\nhook_display = "off"\nhuman_authored_only_injection = ${String(enabled)}\n`);
+    await configure(true);
+    let calls = 0;
+    const eventIdsPresent: boolean[] = [];
+    const memoryText = "<memstore-candidates>\n[M:1 S:P A:H R:C] Human SQLite guidance\n</memstore-candidates>";
+    const server = createServer(socket => {
+      let source = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        source += chunk;
+        if (!source.includes("\n")) return;
+        const request = foregroundRequestSchema.parse(JSON.parse(source.split("\n", 1)[0] ?? "{}"));
+        calls++;
+        eventIdsPresent.push(request.eventId !== undefined);
+        socket.end(`${JSON.stringify({ schemaVersion: 2, requestId: request.requestId,
+          state: "completed", event, text: memoryText, receiptId: "msreceipt_human_only", renderedTokenCount: 8 })}\n`);
+      });
+    });
+    await new Promise<void>(resolveListen => server.listen(foregroundRetrievalSocketPath(runtimeRoot), resolveListen));
+    const invoke = (prompt = "SQLite WAL") => runHook({ runtimeRoot, event,
+      environment: { MEMSTORE_INJECTION_MODE: "active" },
+      input: { session_id: "human-only-hook", turn_id: `turn-${event}`, cwd: root,
+        source: "startup", reason: "finished", prompt, last_assistant_message: "Existing work completed.",
+        tool_name: "exec_command", tool_use_id: "call-1", tool_input: { cmd: "git status" }, tool_response: { exit_code: 0 } }
+    });
+    try {
+      const result = await invoke();
+      expect(result.status, result.stderr).toBe(0);
+      const automaticInjection = event === "SessionStart" || event === "UserPromptSubmit";
+      expect(calls).toBe(automaticInjection ? 1 : 0);
+      expect(eventIdsPresent).toEqual(automaticInjection ? [false] : []);
+      expect(JSON.parse(result.stdout)).toEqual(automaticInjection
+        ? { continue: true, hookSpecificOutput: { hookEventName: event, additionalContext: memoryText } }
+        : { continue: true });
+      await expect(access(join(runtimeRoot, "spool", "capture"))).rejects.toThrow();
+      if (event === "UserPromptSubmit") {
+        const secret = await invoke(`OPENAI_API_KEY=sk-${"a".repeat(48)}`);
+        expect(JSON.parse(secret.stdout)).toEqual({ continue: true });
+        expect(calls).toBe(1);
+        await expect(access(join(runtimeRoot, "spool", "capture"))).rejects.toThrow();
+      }
+      await configure(false);
+      expect((await invoke()).status).toBe(0);
+      expect((await readdir(join(runtimeRoot, "spool", "capture"))).length).toBeGreaterThan(0);
+      expect(calls).toBe(automaticInjection ? 2 : 0);
+      expect(eventIdsPresent).toEqual(automaticInjection ? [false, true] : []);
+    } finally {
+      await new Promise<void>((resolveClose, rejectClose) => server.close(error => {
+        if (error === undefined) resolveClose(); else rejectClose(error);
+      }));
+    }
+  }
+);
+
 for (const setting of ["missing", "false", "invalid"] as const) {
- test(`startup injection ${setting} stays silent while capturing the event`, async () => {
+ test(`startup injection ${setting} stays silent and honors configuration availability for capture`, async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-startup-switch-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -81,7 +143,11 @@ for (const setting of ["missing", "false", "invalid"] as const) {
   });
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout)).toEqual({ continue: true });
-  expect((await readdir(join(runtimeRoot, "spool", "capture"))).length).toBeGreaterThan(0);
+  if (setting === "missing") {
+    await expect(access(join(runtimeRoot, "spool", "capture"))).rejects.toThrow();
+  } else {
+    expect((await readdir(join(runtimeRoot, "spool", "capture"))).length).toBeGreaterThan(0);
+  }
  });
 }
 
@@ -170,6 +236,8 @@ test("the external Codex Hook entrypoint captures PostToolUse within its one-sec
   const root = await mkdtemp(join(tmpdir(), "memstore-hook-entrypoint-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
+  await mkdir(runtimeRoot);
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n");
   const input = JSON.stringify(await codexPrimaryInput(root, {
     hook_event_name: "PostToolUse",
     session_id: "session-entrypoint",
@@ -201,6 +269,8 @@ test("the external Codex Hook entrypoint captures PostToolUse within its one-sec
 test("the installed legacy CLI Hook route also returns within its one-second host deadline", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-legacy-hook-entrypoint-"));
   temporaryDirectories.push(root);
+  await mkdir(join(root, "runtime"));
+  await writeFile(join(root, "runtime", "config.toml"), "schema_version = 1\n");
   const input = JSON.stringify(await codexPrimaryInput(root, {
     hook_event_name: "PostToolUse",
     session_id: "legacy-session-entrypoint",
@@ -237,6 +307,8 @@ test("the external Stop Hook spools within its host deadline while Runtime SQLit
   const root = await mkdtemp(join(tmpdir(), "memstore-busy-hook-entrypoint-"));
   temporaryDirectories.push(root);
   const runtimeRoot = join(root, "runtime");
+  await mkdir(runtimeRoot);
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n");
   const environment = { ...process.env, CODEX_HOME: join(root, "absent-codex"), MEMSTORE_RUNTIME_ROOT: runtimeRoot };
   const initialInput = JSON.stringify(await codexPrimaryInput(root, {
     session_id: "busy-entrypoint-session",

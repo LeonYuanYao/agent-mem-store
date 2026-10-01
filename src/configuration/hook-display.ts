@@ -9,8 +9,24 @@ export type HookDisplay = z.infer<typeof hookDisplaySchema>;
 export const adapterDisplaySchema = z.object({
   hook_display: hookDisplaySchema.default("summary"),
   session_start_injection: z.boolean().default(false),
-  subagents_enabled: z.boolean().default(false)
-}).loose().default({ hook_display: "summary", session_start_injection: false, subagents_enabled: false });
+  subagents_enabled: z.boolean().default(false),
+  human_authored_only_injection: z.boolean().default(false)
+}).loose().default({ hook_display: "summary", session_start_injection: false, subagents_enabled: false,
+  human_authored_only_injection: false });
+
+export async function readHumanAuthoredOnlyInjection(runtimeRoot: string): Promise<boolean> {
+  try {
+    const config = z.object({
+      schema_version: z.literal(1),
+      adapters: z.object({ human_authored_only_injection: z.boolean().default(false) })
+        .default({ human_authored_only_injection: false })
+    }).parse(parse(await readFile(join(runtimeRoot, "config.toml"), "utf8")));
+    return config.adapters.human_authored_only_injection;
+  } catch {
+    // Unreadable or invalid configuration must not broaden injection authority.
+    return true;
+  }
+}
 
 export async function readSubagentsEnabled(runtimeRoot: string): Promise<boolean> {
   try {

@@ -4,7 +4,7 @@ import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 
 import { openRuntimeDatabase } from "../runtime/database.js";
-import { readSessionStartInjection } from "../configuration/hook-display.js";
+import { readHumanAuthoredOnlyInjection, readSessionStartInjection } from "../configuration/hook-display.js";
 import type { EmbeddingAdapter } from "./index.js";
 import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
 import { jevTelemetrySchema, type JevTelemetry, type AutomaticRelevanceFilter } from "./jev.js";
@@ -149,8 +149,9 @@ export interface ShadowPack {
   readonly semanticStage: "complete" | "lexical_only" | "not_applicable";
 }
 
-function eligibleForAutomaticRecall(memory: IndexedMemory): boolean {
-  return !(memory.authority === "agent_derived" && memory.validityState === "review_due");
+function eligibleForAutomaticRecall(memory: IndexedMemory, humanAuthoredOnly: boolean): boolean {
+  return (!humanAuthoredOnly || memory.authority === "human_authored") &&
+    !(memory.authority === "agent_derived" && memory.validityState === "review_due");
 }
 
 function tierFor(memory: IndexedMemory, projectId: string): PriorityTier {
@@ -186,6 +187,7 @@ async function visitPagedSessionCandidates(request: {
   readonly requestedAt: string;
   readonly deadlineAt: number;
   readonly startup: "always" | "auto";
+  readonly humanAuthoredOnly: boolean;
   readonly visit: (memory: IndexedMemory) => boolean;
   readonly snapshot?: RetrievalSnapshot;
   readonly foregroundControl?: ForegroundExecutionControl;
@@ -200,7 +202,7 @@ async function visitPagedSessionCandidates(request: {
         candidates: bucket.ordinals
           .map((ordinal) => request.snapshot?.documents[ordinal])
           .filter((memory): memory is IndexedMemory => memory !== undefined)
-          .filter((memory) => eligibleForAutomaticRecall(memory) &&
+          .filter((memory) => eligibleForAutomaticRecall(memory, request.humanAuthoredOnly) &&
             (memory.validFrom === undefined || memory.validFrom <= request.requestedAt) &&
             (memory.validUntil === undefined || memory.validUntil >= request.requestedAt)),
         cursor: 0
@@ -246,6 +248,7 @@ async function visitPagedSessionCandidates(request: {
       `SELECT DISTINCT ${tierExpression} AS effective_tier, category
        FROM retrieval_documents
        WHERE index_revision_id = ? AND startup = ?
+         ${request.humanAuthoredOnly ? "AND authority = 'human_authored'" : ""}
          AND (scope_kind = 'global' OR (scope_kind = 'project' AND project_id = ?))
          AND NOT EXISTS (
            SELECT 1 FROM memory_ranking_exclusions AS exclusion
@@ -291,6 +294,7 @@ async function visitPagedSessionCandidates(request: {
             const pageRows = database.prepare(
               `SELECT * FROM retrieval_documents
                WHERE index_revision_id = ? AND startup = ? AND category = ?
+                 ${request.humanAuthoredOnly ? "AND authority = 'human_authored'" : ""}
                  AND (scope_kind = 'global' OR (scope_kind = 'project' AND project_id = ?))
                  AND NOT EXISTS (
                    SELECT 1 FROM memory_ranking_exclusions AS exclusion
@@ -321,7 +325,7 @@ async function visitPagedSessionCandidates(request: {
             rowsExamined += pageRows.length;
             bucket.queue.push(...pageRows.map((row) =>
               rowToIndexedMemory(row)
-            ).filter(eligibleForAutomaticRecall));
+            ).filter((memory) => eligibleForAutomaticRecall(memory, request.humanAuthoredOnly)));
             bucket.exhausted = pageRows.length < SESSION_BUCKET_PAGE_SIZE;
             const last = pageRows.at(-1);
             if (last !== undefined) bucket.cursor = z.string().parse(last.session_order_key);
@@ -433,6 +437,7 @@ async function loadActiveScope(request: {
   readonly active: Record<string, unknown>;
   readonly memories: readonly IndexedMemory[];
 }> {
+  const humanAuthoredOnly = await readHumanAuthoredOnlyInjection(request.runtimeRoot);
   if (request.snapshot !== undefined) {
     return {
       active: {
@@ -447,7 +452,7 @@ async function loadActiveScope(request: {
         snapshot: request.snapshot,
         projectId: request.projectId,
         requestedAt: request.requestedAt
-      })
+      }).filter((memory) => eligibleForAutomaticRecall(memory, humanAuthoredOnly))
     };
   }
   const database = await openRuntimeDatabase(request.runtimeRoot);
@@ -464,6 +469,7 @@ async function loadActiveScope(request: {
       `SELECT document.* FROM retrieval_documents AS document
        WHERE index_revision_id = ? AND
          (scope_kind = 'global' OR (scope_kind = 'project' AND project_id = ?))
+         ${humanAuthoredOnly ? "AND authority = 'human_authored'" : ""}
          AND NOT EXISTS (
            SELECT 1 FROM memory_ranking_exclusions AS exclusion
            WHERE exclusion.memory_id = document.memory_id
@@ -475,7 +481,7 @@ async function loadActiveScope(request: {
        ORDER BY memory_id`
     ).all(indexRevisionId, request.projectId);
     const memories = rows.map((row) => rowToIndexedMemory(row)).filter((memory) =>
-      eligibleForAutomaticRecall(memory) &&
+      eligibleForAutomaticRecall(memory, humanAuthoredOnly) &&
       (memory.validFrom === undefined || memory.validFrom <= request.requestedAt) &&
       (memory.validUntil === undefined || memory.validUntil >= request.requestedAt)
     );
@@ -810,6 +816,7 @@ async function prepareSessionStartShadowPackCore(
   }
   const selected: ShadowPackItem[] = [];
   const examined: IndexedMemory[] = [];
+  const humanAuthoredOnly = await readHumanAuthoredOnlyInjection(request.runtimeRoot);
   let identityCount = 0;
   let alwaysTokens = 0;
   let selectedRenderedTokenCount = 0;
@@ -866,6 +873,7 @@ async function prepareSessionStartShadowPackCore(
     requestedAt,
     deadlineAt: started + 450,
     startup: "always",
+    humanAuthoredOnly,
     visit: (memory) => trySelect(memory, true),
     ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot }),
     ...(request.foregroundControl === undefined
@@ -881,6 +889,7 @@ async function prepareSessionStartShadowPackCore(
         requestedAt,
         deadlineAt: started + 450,
         startup: "auto",
+        humanAuthoredOnly,
         visit: (memory) => trySelect(memory, false),
         ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot }),
         ...(request.foregroundControl === undefined

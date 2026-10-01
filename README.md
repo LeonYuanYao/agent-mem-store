@@ -236,6 +236,25 @@ up to six selected memory representations to TypeSafe. Identity headers are
 removed and detected credential patterns skip transmission; this is not complete
 anonymization. Only enable it for content you may send to that provider.
 
+To restrict automatic injection to Human-authored knowledge, set
+`human_authored_only_injection = true` in the existing `[adapters]` section of
+`<runtime>/config.toml`. SessionStart and UserPromptSubmit filter authority before
+ranking and Jev, including local fallback. Direct Human assertions and memories
+classified as Human-authored after manual edits remain eligible; model extraction
+remains Agent-derived even when explicitly requested. Relevance, scope, validity
+and deduplication still apply. False restores the original candidate range and is
+the default in a valid configuration. After installing this version, the switch
+is read on each request without rebuilding the index or restarting the Worker.
+An unavailable or invalid configuration document restricts injection to humans.
+While true, all Codex Hooks skip new automatic capture. Eligible foreground
+injection remains available without first saving the event. Existing captured
+evidence and queued extraction, consolidation and Candidate work continue under
+their normal policies; newly produced Agent-derived memories stay out of
+automatic injection. Explicit saves/searches and stored knowledge remain
+available. Setting false also resumes new Hook capture. Retrieval receipts still
+support injection accounting and deduplication, without entering distillation.
+Previously injected conversation context cannot be retracted.
+
 The pinned model `jev-1.13.0` keeps scores at least 0.5, preserving local order.
 Missing credentials, offline service, quota limits, invalid responses or timeout
 return the original local candidates. Calls have no immediate retry, a default

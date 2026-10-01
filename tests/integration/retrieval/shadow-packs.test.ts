@@ -11,6 +11,8 @@ import {
 } from "../../../src/retrieval/packs.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { inspectStatus } from "../../../src/operations/status.js";
+import { loadRetrievalSnapshot } from "../../../src/retrieval/snapshot.js";
+import { recallSearch } from "../../../src/retrieval/recall.js";
 import { writeCanonicalMemory } from "../../../src/vault/index.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
 
@@ -95,6 +97,85 @@ async function writeAll(
     builtAt: "2026-08-07T12:00:00.000Z"
   });
 }
+
+test.each(["database", "snapshot"])("human-only injection filters both automatic packs before Jev and can be reversed (%s)", async (mode) => {
+  const location = await createRoot();
+  const humanProject = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174951",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174961",
+    body: "Use SQLite WAL for durable storage.", scope: { kind: "project", projectId }
+  });
+  const humanGlobal = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174952",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174962",
+    body: "Use SQLite WAL for durable storage.", scope: { kind: "global" }
+  });
+  const agentProject = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174953",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174963",
+    body: "Use SQLite WAL for durable storage.", scope: { kind: "project", projectId },
+    authority: "agent_derived", startup: "always"
+  });
+  const agentGlobal = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174954",
+    revisionId: "msrev_123e4567-e89b-42d3-a456-426614174964",
+    body: "Use SQLite WAL for durable storage.", scope: { kind: "global" },
+    authority: "agent_derived", startup: "always"
+  });
+  const memories = [humanProject, humanGlobal, agentProject, agentGlobal];
+  for (const memory of memories) {
+    await writeCanonicalMemory({ ...location, actor: memory.authority === "human_authored" ? "human" : "agent", memory });
+  }
+  await buildRetrievalIndex({ ...location, adapter, builtAt: "2026-08-07T12:00:00.000Z" });
+  const snapshot = mode === "snapshot" ? await loadRetrievalSnapshot(location) : undefined;
+  const common = { ...location, projectId, requestedAt: "2026-08-07T12:01:00.000Z",
+    ...(snapshot === undefined ? {} : { snapshot }) };
+  const configure = (enabled: boolean) => writeFile(join(location.runtimeRoot, "config.toml"),
+    `schema_version = 1\n[adapters]\nsession_start_injection = true\nhuman_authored_only_injection = ${String(enabled)}\n`);
+  const startup = (sessionId: string) => prepareSessionStartShadowPack({ ...common, sessionId });
+  await configure(false);
+  expect((await startup("all-before")).items.map(item => item.memoryId).sort())
+    .toEqual(memories.map(memory => memory.memoryId).sort());
+  await configure(true);
+  const expected = [humanProject.memoryId, humanGlobal.memoryId].sort();
+  expect((await startup("human-only")).items.map(item => item.memoryId).sort()).toEqual(expected);
+  let calls = 0;
+  const prompt = await prepareUserPromptShadowPack({
+    ...common, sessionId: "human-only-prompt", adapter,
+    prompt: `SQLite WAL ${agentProject.memoryId}`,
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    relevanceFilter: { filter: request => {
+      calls++;
+      expect(request.items.map(item => item.memoryId).sort()).toEqual(expected);
+      return Promise.resolve({ telemetry: { state: "fallback", model: "jev-1.13.0",
+        threshold: 0.5, elapsedMs: 1, reason: "timeout" } });
+    } }
+  });
+  expect(calls).toBe(1);
+  expect(prompt.items.map(item => item.memoryId).sort()).toEqual(expected);
+  const receipt = await inspectRetrievalReceipt(location.runtimeRoot, prompt.receiptId);
+  expect(receipt?.selectedMemoryIds.slice().sort()).toEqual(expected);
+  const excludedIdentity = await prepareUserPromptShadowPack({ ...common,
+    sessionId: "excluded-identity", adapter, prompt: "M:3",
+    signals: { files: [], symbols: [], errors: [], commands: [] },
+    relevanceFilter: { filter: () => { throw new Error("Excluded memories must not reach Jev."); } }
+  });
+  expect(excludedIdentity.items).toHaveLength(0);
+  expect(excludedIdentity.renderedTokenCount).toBe(0);
+  const explicit = await recallSearch({ ...location, adapter, query: "SQLite WAL",
+    scope: "current", currentProjectId: projectId, callerIdentity: "human-only-test",
+    requestedAt: common.requestedAt });
+  expect(explicit.items.map(item => item.memoryId)).toEqual(expect.arrayContaining([agentProject.memoryId, agentGlobal.memoryId]));
+  await configure(false);
+  expect((await startup("all-after")).items.map(item => item.memoryId).sort())
+    .toEqual(memories.map(memory => memory.memoryId).sort());
+  const restoredPrompt = await prepareUserPromptShadowPack({ ...common,
+    sessionId: "all-after-prompt", adapter, prompt: "SQLite WAL",
+    signals: { files: [], symbols: [], errors: [], commands: [] }
+  });
+  expect(restoredPrompt.items.map(item => item.memoryId).sort())
+    .toEqual(memories.map(memory => memory.memoryId).sort());
+});
 
 test("SessionStart prepares a bounded authority-labelled Core Memory Pack without injecting it", async () => {
   const roots = await createRoot();

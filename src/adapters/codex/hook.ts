@@ -44,9 +44,16 @@ export interface CodexHookRequest {
   readonly input: unknown;
   readonly receivedAt?: string;
   readonly progress?: CaptureProgress;
+  readonly captureEnabled?: boolean;
 }
 
 export type CodexHookResult =
+  | {
+      readonly continue: true;
+      readonly captured: false;
+      readonly state: "capture_disabled";
+      readonly projectId?: string;
+    }
   | {
       readonly continue: true;
       readonly captured: true;
@@ -185,7 +192,6 @@ export async function handleCodexHook(
 ): Promise<CodexHookResult> {
   let eventKind = "unknown";
   let occurredAt = new Date().toISOString();
-  let emergencyEvent: CaptureEvent | undefined;
   let resolvedProjectId: string | undefined;
   const progress = request.progress ?? new CaptureProgress(
     hookInputSchema.safeParse(request.input).data?.hook_event_name === "Stop" ? 1300 : Infinity
@@ -194,18 +200,11 @@ export async function handleCodexHook(
     const input = hookInputSchema.parse(request.input);
     eventKind = input.hook_event_name;
     occurredAt = z.iso.datetime().parse(request.receivedAt ?? occurredAt);
-    const identity = hookIdentity(input);
-    emergencyEvent = {
-      schemaVersion: 1,
-      eventId: identity.eventId,
-      deduplicationKey: identity.deduplicationKey,
-      agent: "codex",
-      eventKind: input.hook_event_name,
-      occurredAt,
-      sessionId: input.session_id,
-      ...(input.turn_id === undefined ? {} : { turnId: input.turn_id }),
-      payload: hookPayload(input)
-    };
+    if (request.captureEnabled === false &&
+        ((eventKind !== "SessionStart" && eventKind !== "UserPromptSubmit") ||
+         (eventKind === "UserPromptSubmit" && classifyLocalSensitivity(input.prompt ?? "").state !== "normal"))) {
+      return { continue: true, captured: false, state: "capture_disabled" };
+    }
     progress.enter("project_lookup");
     const inspectedProject = await inspectProject({
       sessionId: input.session_id,
@@ -224,14 +223,27 @@ export async function handleCodexHook(
           busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds
         }).catch(() => undefined);
     resolvedProjectId = project?.status === "resolved" ? project.projectId : undefined;
-    emergencyEvent = {
-      ...emergencyEvent,
+    if (request.captureEnabled === false) {
+      return { continue: true, captured: false, state: "capture_disabled",
+        ...(resolvedProjectId === undefined ? {} : { projectId: resolvedProjectId }) };
+    }
+    const identity = hookIdentity(input);
+    const event: CaptureEvent = {
+      schemaVersion: 1,
+      eventId: identity.eventId,
+      deduplicationKey: identity.deduplicationKey,
+      agent: "codex",
+      eventKind: input.hook_event_name,
+      occurredAt,
+      sessionId: input.session_id,
+      ...(input.turn_id === undefined ? {} : { turnId: input.turn_id }),
+      payload: hookPayload(input),
       ...(resolvedProjectId === undefined ? {} : { projectId: resolvedProjectId })
     };
     progress.enter("sanitize");
     const disposition = await prepareCaptureDisposition({
       runtimeRoot: request.runtimeRoot,
-      event: emergencyEvent
+      event
     });
     const captured = await appendCaptureDisposition({
       runtimeRoot: request.runtimeRoot,
@@ -269,7 +281,7 @@ export async function handleCodexHook(
     const errorCode = error instanceof z.ZodError
       ? "invalid_hook_input"
       : captureErrorCode(error);
-    if (progress.remaining() > 80) await recordCaptureHealthIncident({
+    if (request.captureEnabled !== false && progress.remaining() > 80) await recordCaptureHealthIncident({
       runtimeRoot: request.runtimeRoot,
       category: "hook_capture",
       errorCode,

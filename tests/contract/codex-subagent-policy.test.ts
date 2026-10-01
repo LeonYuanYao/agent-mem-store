@@ -25,6 +25,8 @@ test(`a database-identified primary ${source} session still captures with the sw
   db.prepare("INSERT INTO threads VALUES (?, ?)").run("primary", source);
   db.close();
   const runtimeRoot = join(root, "runtime");
+  await mkdir(runtimeRoot);
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n");
   const result = spawnSync(process.execPath, ["--import", "tsx", "src/cli/hook.ts", "codex", "Stop"], {
     env: { ...process.env, CODEX_HOME: codexHome, MEMSTORE_RUNTIME_ROOT: runtimeRoot },
     input: JSON.stringify({ session_id: "primary", cwd: root, last_assistant_message: "Primary fixture." }),
@@ -68,6 +70,8 @@ test("a primary session can capture using matching transcript metadata without a
   const transcript = join(root, "rollout.jsonl");
   await writeFile(transcript, `${JSON.stringify({ type: "session_meta", payload: { id: "primary", source: "cli" } })}\n`);
   const runtimeRoot = join(root, "runtime");
+  await mkdir(runtimeRoot);
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n");
   const result = spawnSync(process.execPath, ["--import", "tsx", "src/cli/hook.ts", "codex", "UserPromptSubmit"], {
     env: { ...process.env, CODEX_HOME: join(root, "absent-codex"), MEMSTORE_RUNTIME_ROOT: runtimeRoot, MEMSTORE_INJECTION_MODE: "active" },
     input: JSON.stringify({ session_id: "primary", cwd: root, transcript_path: transcript, prompt: "Primary fixture." }),

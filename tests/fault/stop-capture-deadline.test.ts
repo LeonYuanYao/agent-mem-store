@@ -21,6 +21,7 @@ test("Stop persists before a slow Git lookup and deferred import honors the exac
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
   (await openRuntimeDatabase(runtimeRoot)).close();
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n");
   const bin = join(root, "bin");
   await mkdir(bin);
   await writeFile(join(bin, "git"), `#!${process.execPath}\nsetTimeout(() => process.exit(1), 5000);\n`, { mode: 0o700 });
@@ -50,6 +51,7 @@ test("Stop reports a body-free lock failure before the host deadline", async () 
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
   (await openRuntimeDatabase(runtimeRoot)).close();
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n");
   await mkdir(join(runtimeRoot, "spool/capture/.capacity-lock"), { recursive: true });
   const result = spawnSync(process.execPath, ["--import", "tsx", "src/cli/hook.ts", "codex", "Stop"], {
     env: { ...process.env, CODEX_HOME: join(root, "absent-codex"), MEMSTORE_RUNTIME_ROOT: runtimeRoot }, encoding: "utf8", timeout: 1800,
@@ -70,6 +72,7 @@ test("Stop recovers a transient Inbox lock within its shared budget", async () =
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
   (await openRuntimeDatabase(runtimeRoot)).close();
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n");
   const lock = join(runtimeRoot, "spool/capture/.capacity-lock");
   await mkdir(lock, { recursive: true });
   const child = spawn(process.execPath, ["--import", "tsx", "src/cli/hook.ts", "codex", "Stop"], {
@@ -94,6 +97,7 @@ test("the Stop watchdog reports stalled persistence without claiming capture suc
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
   (await openRuntimeDatabase(runtimeRoot)).close();
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n");
   const preload = join(root, "stall.mjs");
   await writeFile(preload, `import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';

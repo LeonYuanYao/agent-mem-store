@@ -59,6 +59,18 @@ limit remains two seconds. See [ADR-0144](../../docs/adr/0144-extend-jev-and-for
 
 ## Invariants and change risks
 
+Machine-local `[adapters].human_authored_only_injection = true` excludes
+Agent-derived memories before automatic candidate ranking and Jev. Both
+SessionStart bucket paging and UserPromptSubmit scope loading enforce it for
+SQLite and resident snapshots. Startup priority, direct IDs, relationships and
+Jev fallback cannot bypass this gate. The flag is read on each request; false
+restores the original authority range without changing the index or memories.
+The Hook also uses the flag to stop new capture while still requesting injection
+without a capture event ID. Retrieval receipts remain for accounting and dedup;
+they are not new captured evidence. Explicit recall and background processing of
+existing capture remain available.
+See [ADR-0145](../../docs/adr/0145-control-automatic-injection-authority.md).
+
 Preserve project scope, lifecycle/working-set eligibility and relevance gates. Automatic hook retrieval has a deadline and cannot block on background extraction. Explicit recall and automatic injection have different budgets and model paths.
 
 Automatic exact-term evidence trims trailing periods and colons before matching, preserving

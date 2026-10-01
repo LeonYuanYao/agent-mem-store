@@ -30,6 +30,12 @@ Owns scheduling order and adapter composition, not a second copy of each domain'
 
 Keep idle iterations low-write and protect foreground work. Open long-running turns are not automatically actionable batches. Respect leases, retry times and idempotency; success must follow persisted completion.
 
+Human-only injection mode stops new Hook capture, not existing background work.
+Continue importing the existing Inbox, distilling batches, consolidating sessions
+and evaluating Candidates under the normal retry and capacity policies. Generated
+Agent-derived memories remain stored but cannot enter automatic injection while
+the flag is on. Do not pause or reset these queues when the flag changes.
+
 Portable `[corpus_retention].mode` defaults to `off`. Its opt-in preview/apply
 scheduler checks every six hours, continues bounded progress after thirty seconds
 and retries failures after five minutes. Pending plans survive interruption and

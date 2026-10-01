@@ -23,6 +23,12 @@ matching session ID. Both formats are host implementation details; unknown
 identity skips automatic memory work with a body-free notice. No transcript or
 host metadata is retained.
 
+The CLI passes `captureEnabled: false` in human-only injection mode. The adapter
+returns `capture_disabled` without building or persisting an event. Only safe
+SessionStart/UserPromptSubmit input resolves a Project for foreground retrieval;
+other events and sensitive prompts return immediately. This path creates no
+capture findings or capture-health records. Explicit capture APIs stay independent.
+
 Stop has a shared monotonic capture budget. Read-only Project discovery has at
 most 200 ms and aborts its Git child on expiry; unresolved discovery is deferred
 to Inbox import instead of falling back to synchronous registry creation. Import

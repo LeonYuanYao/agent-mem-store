@@ -43,6 +43,15 @@ configuration. Missing or invalid optional settings and unavailable credentials
 leave local retrieval usable. Do not put credentials in TOML or portable Vault
 policy. The foreground worker re-reads these settings when it has a nonempty pack.
 
+`[adapters].human_authored_only_injection` is a boolean, defaulting false in a
+valid configuration. True restricts automatic injection candidates to
+`human_authored` memories. Automatic pack construction reads it on each request;
+changes need no index rebuild or Worker restart after the feature is installed.
+Missing, unreadable or invalid configuration documents use the restrictive true
+behavior. Each Hook also reads the flag: true disables new automatic capture
+while retaining eligible foreground injection. Previously captured evidence and
+queued background work continue to drain; explicit save/search stay independent.
+
 ## Invariants and change risks
 
 Keep program, Vault and runtime paths distinct. Failures must not silently select a different Vault. Displaying a hook summary and injecting memory context are separate controls.

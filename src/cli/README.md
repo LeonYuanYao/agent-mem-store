@@ -22,6 +22,12 @@ Project resolution and foreground IPC. Excluded subagents return `continue: true
 unknown identity adds a body-free `session_kind_unknown` notice. Neither path
 creates capture, sensitivity, receipt or health state.
 
+`human_authored_only_injection` also disables new Hook capture for every event.
+Eligible SessionStart/UserPromptSubmit requests still resolve their scope and use
+foreground IPC without a capture event ID. Sensitive prompts stay out of retrieval
+without persisting a capture finding. Both CLI routes share this behavior. The
+switch does not stop the Worker from draining previously captured evidence.
+
 Stop shares a 1,300 ms internal capture budget and a 1,450 ms async-stall watchdog
 under its two-second host limit. The watchdog emits one fail-open systemMessage
 and stderr diagnostic, then exits; it cannot guarantee output after a host kill,

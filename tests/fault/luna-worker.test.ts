@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -17,8 +17,45 @@ import { initializeMemStore } from "../../src/operations/initialize.js";
 import { runWorkerOnce } from "../../src/worker/main.js";
 import { claimLunaOperation, completeLunaOperation, enqueueLunaOperation } from "../../src/luna/operations.js";
 import { inspectDoctor } from "../../src/operations/maintenance.js";
+import { readHumanAuthoredOnlyInjection } from "../../src/configuration/hook-display.js";
 
 const roots: string[] = [];
+
+test("human-only mode continues distilling previously queued capture", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-human-only-backlog-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime"), vaultRoot = join(root, "vault");
+  await initializeMemStore({ runtimeRoot, vaultRoot, preview: false });
+  await captureEvent({ runtimeRoot, event: {
+    schemaVersion: 1, eventId: "msevent-existing-backlog", deduplicationKey: "existing-backlog:stop",
+    agent: "codex", eventKind: "Stop", occurredAt: "2026-08-07T00:00:00.000Z",
+    sessionId: "existing-backlog", turnId: "existing-turn", payload: { assistantMessage: "No durable knowledge in this completed task." }
+  } });
+  await prepareNextDistillationBatch({ runtimeRoot, maximumEvents: 8, preparedAt: "2026-08-07T00:01:00.000Z" });
+  const configurationPath = join(runtimeRoot, "config.toml");
+  const configuration = await readFile(configurationPath, "utf8");
+  await writeFile(configurationPath, configuration.replace("[adapters]", "[adapters]\nhuman_authored_only_injection = true"));
+  expect(await readHumanAuthoredOnlyInjection(runtimeRoot)).toBe(true);
+  let calls = 0;
+  const result = await runWorkerOnce({ runtimeRoot, vaultRoot, workerId: "backlog-worker",
+    now: "2026-08-07T00:02:00.000Z", workerStartedAt: "2026-08-07T00:01:00.000Z",
+    adapters: { luna: {
+      distillBatch: () => {
+        calls++;
+        return Promise.resolve({ schemaVersion: 1, kind: "distillation", candidates: [],
+          rejectionSummary: { schemaVersion: 1, coverage: "considered_memory_shaped_rejections_only",
+            counts: { no_memory: 1, session_only: 0, uncertain: 0, source_echo: 0 }, samples: [] } });
+      },
+      consolidateSession: () => Promise.reject(new Error("No consolidation expected.")),
+      assessCandidateSemantics: () => Promise.reject(new Error("No candidate expected.")),
+      assessHumanConflict: () => Promise.reject(new Error("No conflict expected."))
+    } }
+  });
+  expect(calls).toBe(1);
+  expect(result.activities).toContain("luna:completed");
+  await expect(inspectCaptureEventState(runtimeRoot, "msevent-existing-backlog"))
+    .resolves.toMatchObject({ state: "completed" });
+});
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));

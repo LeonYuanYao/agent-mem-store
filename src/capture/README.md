@@ -26,6 +26,8 @@ write begins, not optimistically successful on timeout.
 
 The CLI's `session_policy` stage precedes this module. A disabled subagent or
 unknown session identity never enters capture or creates a health incident.
+Human-only injection mode also bypasses new Hook capture. Existing Inbox entries
+remain importable and existing captured evidence continues through distillation.
 
 - [adapters/codex/hook.ts](../../src/adapters/codex/hook.ts)
 - [worker/evidence.ts](../../src/worker/evidence.ts)

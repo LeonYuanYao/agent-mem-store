@@ -5,7 +5,7 @@ import { z } from "zod";
 import { handleCodexHook } from "../adapters/codex/hook.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { requestForegroundRetrieval } from "../retrieval/foreground-client.js";
-import { readHookDisplay, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
+import { readHookDisplay, readHumanAuthoredOnlyInjection, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
 import { inspectCodexSessionKind } from "../adapters/codex/session-kind.js";
 import { CaptureProgress, captureErrorCode, renderCaptureDiagnostic } from "../capture/deadline.js";
 
@@ -62,6 +62,7 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
     const result = await handleCodexHook({
       runtimeRoot: resolve(runtimeRoot),
       input: { ...input, hook_event_name: event },
+      captureEnabled: !await readHumanAuthoredOnlyInjection(resolve(runtimeRoot)),
       progress
     });
     if (watchdogExpired()) return;
@@ -78,14 +79,14 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
     if (injectionMode === "active" &&
         (event === "SessionStart" || event === "UserPromptSubmit") &&
         (event !== "SessionStart" || await readSessionStartInjection(resolve(runtimeRoot))) &&
-        result.captured && result.projectId !== undefined) {
+        (result.captured || result.state === "capture_disabled") && result.projectId !== undefined) {
       const activeInput = activeHookInputSchema.parse(input);
       const foreground = await requestForegroundRetrieval({
         runtimeRoot: resolve(runtimeRoot),
         event,
         projectId: result.projectId,
         sessionId: activeInput.session_id,
-        eventId: result.eventId,
+        ...(result.captured ? { eventId: result.eventId } : {}),
         ...(event === "UserPromptSubmit" ? { prompt: activeInput.prompt ?? "" } : {}),
         requestedAt: new Date().toISOString()
       });

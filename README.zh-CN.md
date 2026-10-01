@@ -74,6 +74,17 @@ Codex 子代理的自动采集和注入**默认关闭**。如需开启，在 `<r
 
 开关不影响显式 MCP/Skill 操作，不删除已采集数据，也不移除从父会话继承的上下文；子代理返回给父会话的结果仍可能被父会话采集。Codex 原生记忆另有配置：在自定义子代理 TOML 的 `[memories]` 下，将 `use_memories` 和 `generate_memories` 都设为 `false`，分别关闭原生记忆使用和生成。参见官方[记忆配置](https://learn.chatgpt.com/docs/customization/memories)和[自定义子代理配置](https://learn.chatgpt.com/docs/agent-configuration/subagents)。这些配置不控制 MemStore。
 
+若只想注入人工知识，在同一 `[adapters]` 段设置 `human_authored_only_injection = true`。
+此时 SessionStart 和 UserPromptSubmit 只从 `human_authored` 记忆中召回、排序和筛选；
+Jev 超时回退也遵守此限制。人工直接提供正文保存、或经人工编辑确认为人工知识的记忆可参与，
+让模型从对话中提炼的知识仍属于 `agent_derived`。相关性、作用域、有效性和去重检查照常执行。
+改为 `false` 可恢复原候选范围（有效配置中未设置时默认 false）。新版本安装后，开关修改从下一次
+检索生效，无需重建索引或重启 Worker。配置文件缺失、不可读或无效时，仅允许人工知识。
+开启时，各类 Codex Hook 同时停止新增自动采集，人工记忆注入无需先保存事件。
+已有采集内容及已排队的提炼、汇总和候选晋升继续按原规则处理；新沉淀出的模型记忆保留，
+但不参与自动注入。人工保存和显式搜索仍可用。改为 `false` 也会恢复新增采集。
+检索仍保留用于注入计数和去重的 receipt，不把它作为新采集内容送去提炼；已有对话上下文无法撤回。
+
 SessionStart 背景注入**默认关闭**。如需启用，在 `<runtime>/config.toml` 的 `[adapters]` 段设置 `session_start_injection = true`。配置缺失或不可读时保持关闭。Hook 在每次 SessionStart 读取开关；事件采集保留，UserPromptSubmit 检索不变。首次非空的 prompt 注入会按需附带记忆标识说明。关闭开关无法移除对话中已经存在的记忆文本。
 
 启用后，SessionStart 选择项目／全局背景，最多 12 条、1,200 tokens，不针对第一条用户消息排序。UserPromptSubmit 根据当前任务检索，目标预算为 600 tokens，最多 1,024 tokens、6 条。这些数字是上限，不要求填满。检索结果可能不相关或互相重叠，Agent 使用前应结合当前任务和显式指令判断。`<memstore-candidates>` 表示可能相关的检索结果，不表示生命周期中尚未准入的 Candidate。
