@@ -35,6 +35,28 @@ filters before rendering and recording epoch tokens/deduplication, and records
 provider telemetry under receipt `timings.jev`. SessionStart and explicit recall
 do not invoke Jev. See [ADR-0135](../../docs/adr/0135-add-opt-in-jev-automatic-relevance-filter.md).
 
+Jev receipt diagnostics distinguish local deadline pressure from its stage timeout.
+`deadlineRemainingMs` is the nonnegative foreground time remaining at filter entry.
+`budgetMs` is the latest total stage allowance, including time already spent: at
+most 1,300 ms after reserving 200 ms for receipt/delivery, reduced by the configured
+timeout when that setting is applied. Early skips may report only the initial
+allowance; it is not time spent or proof that a request ran. `budgetSource` identifies
+the limiting foreground deadline or stage timeout (ties use `stage_timeout`).
+`httpStarted` means the fetch adapter was invoked, not that the provider received
+the request. `stage` identifies the last stage reached, from admission and local
+preparation through response headers, body decoding, validation and completion.
+The fields are optional when reading historical receipts; absence is unknown,
+not a negative observation. No provider payloads or credentials are recorded.
+These diagnostics require a committed receipt and cannot explain an outer
+foreground failure that ended before receipt creation. They do not change timeout,
+cooldown, filtering or core health policy.
+
+The default foreground client deadline is 1,500 ms, including local retrieval,
+Jev, receipt persistence and delivery. Jev defaults to a 1,300 ms stage timeout;
+local retrieval and the receipt reserve reduce its actual allowance below that
+ceiling under the default foreground deadline. The host Hook
+limit remains two seconds. See [ADR-0144](../../docs/adr/0144-extend-jev-and-foreground-timeouts.md).
+
 ## Invariants and change risks
 
 Preserve project scope, lifecycle/working-set eligibility and relevance gates. Automatic hook retrieval has a deadline and cannot block on background extraction. Explicit recall and automatic injection have different budgets and model paths.

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { readJevApiKey, readJevConfiguration, type JevConfiguration } from "../configuration/jev.js";
+import { maximumJevTimeoutMilliseconds, readJevApiKey, readJevConfiguration, type JevConfiguration } from "../configuration/jev.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 
 export const jevModel = "jev-1.13.0";
@@ -21,6 +21,14 @@ export const jevTelemetrySchema = z.object({
   model: z.literal(jevModel),
   threshold: z.number().min(0).max(1),
   elapsedMs: z.number().nonnegative(),
+  deadlineRemainingMs: z.number().nonnegative().optional(),
+  budgetMs: z.number().min(0).max(maximumJevTimeoutMilliseconds).optional(),
+  budgetSource: z.enum(["foreground_deadline", "stage_timeout"]).optional(),
+  httpStarted: z.boolean().optional(),
+  stage: z.enum([
+    "admission", "configuration", "credentials", "request_preparation",
+    "response_headers", "response_body", "validation", "complete"
+  ]).optional(),
   reason: z.enum([
     "configuration_unavailable", "missing_credentials", "sensitive_input", "input_limit",
     "deadline_budget", "timeout", "cancelled", "network_error", "http_error",
@@ -98,13 +106,21 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
 
   async filter(request: AutomaticRelevanceRequest): Promise<AutomaticRelevanceResult> {
     const started = performance.now();
+    const deadlineRemainingMs = Math.max(0, request.deadlineAt - Date.now());
+    const deadlineBudget = deadlineRemainingMs - receiptReserveMilliseconds;
+    const budget = Math.min(maximumJevTimeoutMilliseconds, deadlineBudget);
+    let budgetMs = Math.max(0, budget);
+    let budgetSource: NonNullable<JevTelemetry["budgetSource"]> = deadlineBudget < maximumJevTimeoutMilliseconds
+      ? "foreground_deadline" : "stage_timeout";
+    let httpStarted = false;
+    let stage: NonNullable<JevTelemetry["stage"]> = "admission";
     let threshold = 0.5;
     const result = (state: JevTelemetry["state"], reason?: JevTelemetry["reason"]): AutomaticRelevanceResult => ({
       telemetry: { state, model: jevModel, threshold, elapsedMs: Math.max(0, performance.now() - started),
+        deadlineRemainingMs, budgetMs, budgetSource, httpStarted, stage,
         ...(reason === undefined ? {} : { reason }) }
     });
     if (request.items.length === 0) return result("empty");
-    const budget = Math.min(600, request.deadlineAt - Date.now() - receiptReserveMilliseconds);
     if (budget < 50) return result("fallback", "deadline_budget");
     if (request.signal?.aborted === true) return result("fallback", "cancelled");
     const controller = new AbortController();
@@ -118,6 +134,7 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
       timer = setTimeout(() => { controller.abort("timeout"); }, budget);
     });
     const execute = async (): Promise<AutomaticRelevanceResult> => {
+      stage = "configuration";
       let config: JevConfiguration;
       try {
         config = await (this.options.readConfiguration?.() ?? readJevConfiguration(this.options.runtimeRoot));
@@ -126,13 +143,17 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
       if (!config.enabled) return result("disabled");
       controller.signal.throwIfAborted();
       if (Date.now() < this.#cooldownUntil) return result("fallback", "cooldown");
-      const remaining = Math.min(budget, config.timeout_ms) - (performance.now() - started);
+      budgetMs = Math.min(budget, config.timeout_ms);
+      budgetSource = deadlineBudget < config.timeout_ms ? "foreground_deadline" : "stage_timeout";
+      const remaining = budgetMs - (performance.now() - started);
       if (remaining < 1) throw new JevFailure("timeout");
       clearTimeout(timer);
       timer = setTimeout(() => { controller.abort("timeout"); }, remaining);
+      stage = "credentials";
       const key = await (this.options.readApiKey?.() ?? readJevApiKey(this.options.runtimeRoot));
       controller.signal.throwIfAborted();
       if (key === undefined) return result("fallback", "missing_credentials");
+      stage = "request_preparation";
       if (request.items.length > 6 || new Set(request.items.map(item => item.memoryId)).size !== request.items.length) {
         return result("fallback", "input_limit");
       }
@@ -151,6 +172,8 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
       }
       let response: Response;
       try {
+        stage = "response_headers";
+        httpStarted = true;
         response = await (this.options.fetch ?? fetch)(endpoint, {
           method: "POST", redirect: "error", signal: controller.signal,
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: payload
@@ -162,16 +185,21 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
           : response.status === 401 || response.status === 403 ? "unauthorized" : "http_error");
       }
       let parsed: z.infer<typeof responseSchema>;
-      try { parsed = responseSchema.parse(await readBoundedResponse(response, controller.signal)); }
+      stage = "response_body";
+      try {
+        const body = await readBoundedResponse(response, controller.signal);
+        stage = "validation";
+        parsed = responseSchema.parse(body);
+      }
       catch { throw new JevFailure("invalid_response"); }
       controller.signal.throwIfAborted();
       if (Object.keys(parsed.answers).length !== aliases.length || aliases.some(({ alias }) => parsed.answers[alias] === undefined)) {
         throw new JevFailure("invalid_response");
       }
       const scores = aliases.map(({ alias, item }) => ({ memoryId: item.memoryId, score: z.number().parse(parsed.answers[alias]?.noul) }));
+      stage = "complete";
       return {
-        telemetry: { state: "filtered", model: jevModel, threshold,
-          elapsedMs: Math.max(0, performance.now() - started),
+        telemetry: { ...result("filtered").telemetry,
           inputTokens: parsed.usage.input_tokens, outputTokens: parsed.usage.output_tokens }, scores
       };
     };

@@ -37,7 +37,7 @@ See the [implementation plan](../../docs/design/economical-corpus-retention-impl
 for defaults, scheduling and activation boundaries.
 
 jev.ts reads the optional machine-local `[jev]` settings (disabled by default,
-threshold 0.5, at most 600 ms) and credentials from `JEV_MODEL_API_KEY` or the
+threshold 0.5, default and maximum timeout 1,300 ms) and credentials from `JEV_MODEL_API_KEY` or the
 owner-only `<runtime>/secrets/jev-api-key` regular file. It never sources shell
 configuration. Missing or invalid optional settings and unavailable credentials
 leave local retrieval usable. Do not put credentials in TOML or portable Vault

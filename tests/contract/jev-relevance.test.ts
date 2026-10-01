@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { readJevApiKey, readJevConfiguration } from "../../src/configuration/jev.js";
-import { JevAutomaticRelevanceFilter, jevModel } from "../../src/retrieval/jev.js";
+import { JevAutomaticRelevanceFilter, jevModel, jevTelemetrySchema } from "../../src/retrieval/jev.js";
 
 const roots: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
@@ -38,13 +39,20 @@ test("Jev is opt-in and does not read credentials or call the network when disab
 test("valid scores preserve original identities without sending identities to the provider", async () => {
   const fetcher = vi.fn<typeof fetch>(() => Promise.resolve(response()));
   const result = await filter(fetcher).filter(input());
-  expect(result).toMatchObject({ telemetry: { state: "filtered", threshold: 0.5, inputTokens: 100, outputTokens: 20 },
+  expect(result).toMatchObject({ telemetry: { state: "filtered", threshold: 0.5, inputTokens: 100, outputTokens: 20,
+    budgetMs: 600, budgetSource: "stage_timeout", httpStarted: true, stage: "complete" },
     scores: [{ memoryId: "memory-a", score: 0.5 }, { memoryId: "memory-b", score: 0.49 }] });
   const call = fetcher.mock.calls[0];
   expect(call?.[0]).toBe("https://api.typesafe.ai/v1/systemone");
   expect(call?.[1]?.redirect).toBe("error");
   expect(call?.[1]?.body).not.toContain("memory-a");
   expect(JSON.stringify(result)).not.toContain("synthetic-test-key");
+  expect(jevTelemetrySchema.parse(result.telemetry)).toEqual(result.telemetry);
+});
+
+test("historical Jev telemetry stays readable without inventing missing diagnostics", () => {
+  const legacy = { state: "fallback", model: jevModel, threshold: 0.5, elapsedMs: 600, reason: "timeout" };
+  expect(jevTelemetrySchema.parse(legacy)).toEqual(legacy);
 });
 
 test("missing credentials and invalid configuration leave the local result available", async () => {
@@ -67,7 +75,9 @@ test.each([402, 429, 401, 403, 500, 529])("HTTP %s falls back without retry and 
   expect(first.telemetry.state).toBe("fallback");
   expect(first.scores).toBeUndefined();
   expect(JSON.stringify(first)).not.toContain("private");
-  expect((await judge.filter(input())).telemetry.reason).toBe("cooldown");
+  expect((await judge.filter(input())).telemetry).toMatchObject({
+    reason: "cooldown", httpStarted: false, stage: "configuration"
+  });
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
 
@@ -91,6 +101,8 @@ test.each(["missing", "extra", "range", "model", "usage", "json", "oversize"])("
     : new Response(kind === "json" ? "not JSON" : "x".repeat(33 * 1024));
   const result = await filter(() => Promise.resolve(bad)).filter(input());
   expect(result.telemetry.reason).toBe("invalid_response");
+  expect(result.telemetry).toMatchObject({ httpStarted: true,
+    stage: kind === "json" || kind === "oversize" ? "response_body" : "validation" });
   expect(result.scores).toBeUndefined();
 });
 
@@ -99,9 +111,76 @@ test("timeout aborts a pending provider and returns before the outer deadline", 
   const fetcher: typeof fetch = (_url, options) => { signal = options?.signal; return new Promise(() => undefined); };
   const started = performance.now();
   const result = await filter(fetcher, { timeout_ms: 50 }).filter(input());
-  expect(result.telemetry.reason).toBe("timeout");
+  expect(result.telemetry).toMatchObject({ reason: "timeout", budgetMs: 50,
+    budgetSource: "stage_timeout", httpStarted: true, stage: "response_headers" });
   expect(performance.now() - started).toBeLessThan(350);
   expect(signal?.aborted).toBe(true);
+});
+
+test("a timeout before configuration loads records deadline pressure without an HTTP attempt", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+  const fetcher = vi.fn<typeof fetch>();
+  const judge = new JevAutomaticRelevanceFilter({ runtimeRoot: "unused", fetch: fetcher,
+    readConfiguration: () => new Promise(() => undefined) });
+  const pending = judge.filter({ ...input(), deadlineAt: Date.now() + 400 });
+  await vi.advanceTimersByTimeAsync(200);
+  expect(await pending).toMatchObject({ telemetry: {
+    state: "fallback", reason: "timeout", elapsedMs: 200,
+    deadlineRemainingMs: 400, budgetMs: 200, budgetSource: "foreground_deadline",
+    httpStarted: false, stage: "configuration"
+  } });
+  expect(fetcher).not.toHaveBeenCalled();
+});
+
+test("configuration time stays inside the configured budget while credentials stall", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+  const fetcher = vi.fn<typeof fetch>();
+  const judge = new JevAutomaticRelevanceFilter({ runtimeRoot: "unused", fetch: fetcher,
+    readConfiguration: () => new Promise(resolve => {
+      setTimeout(() => { resolve({ ...configuration, timeout_ms: 150 }); }, 40);
+    }),
+    readApiKey: () => new Promise(() => undefined) });
+  const pending = judge.filter(input());
+  await vi.advanceTimersByTimeAsync(150);
+  expect(await pending).toMatchObject({ telemetry: {
+    state: "fallback", reason: "timeout", elapsedMs: 150,
+    deadlineRemainingMs: 1000, budgetMs: 150, budgetSource: "stage_timeout",
+    httpStarted: false, stage: "credentials"
+  } });
+  expect(fetcher).not.toHaveBeenCalled();
+});
+
+test("a configured 1.3-second Jev budget permits a response after the former one-second limit", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+  const fetcher: typeof fetch = () => new Promise(resolve => {
+    setTimeout(() => { resolve(response()); }, 1200);
+  });
+  const pending = filter(fetcher, { timeout_ms: 1300 }).filter({ ...input(), deadlineAt: Date.now() + 1800 });
+  await vi.advanceTimersByTimeAsync(1200);
+  expect(await pending).toMatchObject({ telemetry: {
+    state: "filtered", budgetMs: 1300, elapsedMs: 1200, budgetSource: "stage_timeout", httpStarted: true
+  } });
+});
+
+test.each([
+  { remainingMs: 1800, budgetMs: 1300, source: "stage_timeout" },
+  { remainingMs: 950, budgetMs: 750, source: "foreground_deadline" }
+])("a stalled Jev call respects its budget with $remainingMs ms left", async ({ remainingMs, budgetMs, source }) => {
+  vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+  let signal: AbortSignal | null | undefined;
+  const fetcher = vi.fn<typeof fetch>((_url, options) => {
+    signal = options?.signal;
+    return new Promise(() => undefined);
+  });
+  const pending = filter(fetcher, { timeout_ms: 1300 }).filter({ ...input(), deadlineAt: Date.now() + remainingMs });
+  await vi.advanceTimersByTimeAsync(budgetMs);
+  const result = await pending;
+  expect(result.telemetry).toMatchObject({ reason: "timeout", budgetMs, elapsedMs: budgetMs,
+    budgetSource: source, httpStarted: true, stage: "response_headers" });
+  expect(jevTelemetrySchema.parse(result.telemetry)).toEqual(result.telemetry);
+  expect(result.scores).toBeUndefined();
+  expect(signal?.aborted).toBe(true);
+  expect(fetcher).toHaveBeenCalledTimes(1);
 });
 
 test("a stalled response body is also bounded by the timeout", async () => {
@@ -111,7 +190,8 @@ test("a stalled response body is also bounded by the timeout", async () => {
     cancel() { cancelled = true; }
   })));
   const result = await filter(fetcher, { timeout_ms: 50 }).filter(input());
-  expect(result.telemetry.reason).toBe("timeout");
+  expect(result.telemetry).toMatchObject({ reason: "timeout", budgetMs: 50,
+    budgetSource: "stage_timeout", httpStarted: true, stage: "response_body" });
   // The timeout is independent of a custom transport's willingness to abort.
   expect(result.scores).toBeUndefined();
   expect(cancelled).toBe(true);
@@ -125,10 +205,19 @@ test("caller cancellation aborts provider work", async () => {
 });
 
 test("insufficient deadline budget and empty local packs never call Jev", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
   const fetcher = vi.fn<typeof fetch>();
   const judge = filter(fetcher);
-  expect((await judge.filter({ ...input(), deadlineAt: Date.now() + 210 })).telemetry.reason).toBe("deadline_budget");
-  expect((await judge.filter({ ...input(), items: [] })).telemetry.state).toBe("empty");
+  expect((await judge.filter({ ...input(), deadlineAt: Date.now() + 210 })).telemetry).toMatchObject({
+    reason: "deadline_budget", deadlineRemainingMs: 210, budgetMs: 10,
+    budgetSource: "foreground_deadline", httpStarted: false, stage: "admission"
+  });
+  const expired = await judge.filter({ ...input(), deadlineAt: Date.now() - 1 });
+  expect(expired.telemetry).toMatchObject({ reason: "deadline_budget", deadlineRemainingMs: 0, budgetMs: 0 });
+  expect(jevTelemetrySchema.parse(expired.telemetry)).toEqual(expired.telemetry);
+  expect((await judge.filter({ ...input(), items: [] })).telemetry).toMatchObject({
+    state: "empty", httpStarted: false, stage: "admission"
+  });
   expect(fetcher).not.toHaveBeenCalled();
 });
 
@@ -138,7 +227,9 @@ test.each(["prompt", "history", "memory"])("suspected credentials in %s are neve
   const request = { ...input(), ...(location === "prompt" ? { prompt: secret } : {}),
     ...(location === "history" ? { recentPrompts: [secret] } : {}),
     ...(location === "memory" ? { items: [{ memoryId: "a", text: secret }] } : {}) };
-  expect((await filter(fetcher).filter(request)).telemetry.reason).toBe("sensitive_input");
+  expect((await filter(fetcher).filter(request)).telemetry).toMatchObject({
+    reason: "sensitive_input", httpStarted: false, stage: "request_preparation"
+  });
   expect(fetcher).not.toHaveBeenCalled();
 });
 
@@ -151,7 +242,11 @@ test("oversized input is kept local without truncating its meaning", async () =>
 test("configuration defaults off; file credentials require an owner-only regular file", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-jev-config-")); roots.push(root);
   await writeFile(join(root, "config.toml"), "schema_version = 1\n");
-  expect(await readJevConfiguration(root)).toEqual({ enabled: false, threshold: 0.5, timeout_ms: 600 });
+  expect(await readJevConfiguration(root)).toEqual({ enabled: false, threshold: 0.5, timeout_ms: 1300 });
+  await writeFile(join(root, "config.toml"), "schema_version = 1\n[jev]\nenabled = true\ntimeout_ms = 1300\n");
+  expect(await readJevConfiguration(root)).toEqual({ enabled: true, threshold: 0.5, timeout_ms: 1300 });
+  await writeFile(join(root, "config.toml"), "schema_version = 1\n[jev]\ntimeout_ms = 1301\n");
+  await expect(readJevConfiguration(root)).rejects.toThrow();
   vi.stubEnv("JEV_MODEL_API_KEY", undefined);
   expect(await readJevApiKey(root)).toBeUndefined();
   await mkdir(join(root, "secrets"));

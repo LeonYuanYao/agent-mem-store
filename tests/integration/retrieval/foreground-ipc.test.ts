@@ -11,6 +11,7 @@ import {
 } from "../../../src/retrieval/foreground-ipc.js";
 import type { ForegroundAttemptRecord } from "../../../src/retrieval/foreground-attempts.js";
 import { requestForegroundRetrieval } from "../../../src/retrieval/foreground-client.js";
+import { foregroundRequestSchema } from "../../../src/retrieval/foreground-protocol.js";
 import {
   loadRetrievalSnapshot,
   validateRetrievalSnapshot
@@ -91,7 +92,9 @@ test("optional Jev filters before rendering, receipts and epoch deduplication, w
     expect(filteredReceipt.selectedMemoryIds).toEqual(baselineReceipt.selectedMemoryIds.slice(0, 1));
     expect(filteredReceipt.renderedTokenCount).toBeLessThan(baselineReceipt.renderedTokenCount);
     expect(filteredReceipt.automaticEpochTotal).toBe(filteredReceipt.renderedTokenCount);
-    expect(filteredReceipt.timings?.jev).toMatchObject({ state: "filtered", threshold: 0.5, inputTokens: 120 });
+    expect(filteredReceipt.timings?.jev).toMatchObject({ state: "filtered", threshold: 0.5, inputTokens: 120,
+      budgetMs: 100, budgetSource: "stage_timeout", httpStarted: true, stage: "complete" });
+    expect(filteredReceipt.timings?.jev?.deadlineRemainingMs).toBeGreaterThan(300);
     const rejected = filteredReceipt.omittedItems.find(item => item.memoryId === baselineReceipt.selectedMemoryIds[1]);
     expect(rejected?.omissionReason).toBe("jev_below_threshold");
     expect(rejected?.reasons).toContain("jev_score:0.49");
@@ -101,11 +104,15 @@ test("optional Jev filters before rendering, receipts and epoch deduplication, w
     const next = await recall("jev-filtered");
     const nextReceipt = await inspect(next);
     expect(nextReceipt.selectedMemoryIds).toEqual(baselineReceipt.selectedMemoryIds.slice(1));
-    expect(nextReceipt.timings?.jev).toMatchObject({ state: "fallback", reason: "network_error" });
+    expect(nextReceipt.timings?.jev).toMatchObject({ state: "fallback", reason: "network_error",
+      budgetMs: 100, httpStarted: true, stage: "response_headers" });
 
     await start("jev-cooldown");
     const duringCooldown = await recall("jev-cooldown");
-    expect((await inspect(duringCooldown)).selectedMemoryIds).toEqual(baselineReceipt.selectedMemoryIds);
+    const cooldownReceipt = await inspect(duringCooldown);
+    expect(cooldownReceipt.selectedMemoryIds).toEqual(baselineReceipt.selectedMemoryIds);
+    expect(cooldownReceipt.timings?.jev).toMatchObject({ state: "fallback", reason: "cooldown",
+      httpStarted: false, stage: "configuration" });
     expect(fetcher).toHaveBeenCalledTimes(2);
   } finally { await server.close(); }
 });
@@ -676,8 +683,8 @@ test("the foreground client fails open when the Worker socket is unavailable", a
   expect(performance.now() - started).toBeLessThan(250);
 });
 
-test("the default foreground deadline accepts a valid response within one second", async () => {
-  const root = await mkdtemp("/tmp/memstore-foreground-one-second-");
+test("the default foreground deadline accepts a valid response after one second", async () => {
+  const root = await mkdtemp("/tmp/memstore-foreground-extended-deadline-");
   roots.push(root);
   const runtimeRoot = join(root, "runtime");
   const socketPath = join(runtimeRoot, "state", "foreground-retrieval.sock");
@@ -688,18 +695,20 @@ test("the default foreground deadline accepts a valid response within one second
     socket.on("data", (chunk: string) => {
       source += chunk;
       if (!source.includes("\n")) return;
-      const request = JSON.parse(source.split("\n", 1)[0] ?? "{}") as { requestId?: string };
+      const request = foregroundRequestSchema.parse(JSON.parse(source.split("\n", 1)[0] ?? "{}"));
+      expect(Date.parse(request.deadlineAt) - Date.now()).toBeGreaterThan(1_000);
+      expect(Date.parse(request.deadlineAt) - Date.now()).toBeLessThanOrEqual(1_500);
       setTimeout(() => {
         socket.end(`${JSON.stringify({
           schemaVersion: 2,
           requestId: request.requestId,
           state: "completed",
           event: "SessionStart",
-          text: "<memstore-context>response inside one second</memstore-context>",
-          receiptId: "msreceipt_one_second",
+          text: "<memstore-context>response inside the extended deadline</memstore-context>",
+          receiptId: "msreceipt_extended_deadline",
           renderedTokenCount: 8
         })}\n`);
-      }, 600);
+      }, 1100);
     });
   });
   await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
@@ -709,11 +718,11 @@ test("the default foreground deadline accepts a valid response within one second
       runtimeRoot,
       event: "SessionStart",
       projectId,
-      sessionId: "one-second-deadline",
+      sessionId: "extended-deadline",
       requestedAt: "2026-08-26T01:00:00.000Z"
-    })).resolves.toMatchObject({ state: "completed", receiptId: "msreceipt_one_second" });
-    expect(performance.now() - started).toBeGreaterThanOrEqual(500);
-    expect(performance.now() - started).toBeLessThan(1_000);
+    })).resolves.toMatchObject({ state: "completed", receiptId: "msreceipt_extended_deadline" });
+    expect(performance.now() - started).toBeGreaterThanOrEqual(1_000);
+    expect(performance.now() - started).toBeLessThan(1_500);
   } finally {
     await new Promise<void>((resolveClose, rejectClose) => server.close((error) => {
       if (error === undefined) resolveClose();

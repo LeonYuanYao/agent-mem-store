@@ -221,7 +221,7 @@ this section to machine-local `<runtime>/config.toml`:
 [jev]
 enabled = true
 threshold = 0.5
-timeout_ms = 600
+timeout_ms = 1300
 ```
 
 Provide `JEV_MODEL_API_KEY` to the Worker process, or provision the key as a single
@@ -238,11 +238,12 @@ anonymization. Only enable it for content you may send to that provider.
 
 The pinned model `jev-1.13.0` keeps scores at least 0.5, preserving local order.
 Missing credentials, offline service, quota limits, invalid responses or timeout
-return the original local candidates. Calls have no immediate retry, a maximum
-600 ms budget and a reserve inside the existing one-second foreground deadline.
+return the original local candidates. Calls have no immediate retry, a default
+and maximum 1,300 ms budget, and a 200 ms reserve inside the 1,500 ms foreground
+deadline. Local retrieval can reduce the time available to Jev.
 Failure cooldowns expire automatically. A successful response rejecting all items
-produces no injection. SessionStart, explicit search/Terra and background Luna
-are unchanged. Relevance scores do not establish factual correctness or authorize
+produces no injection. SessionStart does not call Jev; explicit search/Terra and
+background Luna retain their independent policies. Relevance scores do not establish factual correctness or authorize
 actions.
 
 Settings are read for each nonempty foreground pack; changing them needs no

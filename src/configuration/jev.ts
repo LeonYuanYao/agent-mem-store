@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { parse } from "smol-toml";
 import { z } from "zod";
 
+export const maximumJevTimeoutMilliseconds = 1_300;
+
 export const jevConfigurationSchema = z.object({
   enabled: z.boolean().default(false),
   threshold: z.number().min(0).max(1).default(0.5),
-  timeout_ms: z.number().int().min(50).max(600).default(600)
+  timeout_ms: z.number().int().min(50).max(maximumJevTimeoutMilliseconds).default(maximumJevTimeoutMilliseconds)
 }).strict();
 
 export type JevConfiguration = z.infer<typeof jevConfigurationSchema>;
