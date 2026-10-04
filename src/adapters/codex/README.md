@@ -48,6 +48,10 @@ Captures events through runtime inbox paths and records bounded diagnostics. Cha
 
 Preserve event deduplication and fail-open session behavior. Do not perform model extraction inside hooks or save arbitrary full tool payloads. Honor the explicit session route and supported event set.
 
+Derive command metadata from the bounded tool input. A truncated input must not
+reintroduce its full command through a second field; ordinary intact commands
+retain their verification metadata. Existing captured evidence remains unchanged.
+
 ## Verification
 
 Run from the repository root:

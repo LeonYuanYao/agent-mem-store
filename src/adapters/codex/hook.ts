@@ -116,7 +116,8 @@ function hookPayload(input: z.infer<typeof hookInputSchema>): unknown {
     }
     const boundedInput = boundedStructuredValue(input.tool_input);
     const boundedResponse = boundedStructuredValue(input.tool_response);
-    const inputRecord = z.record(z.string(), z.unknown()).safeParse(input.tool_input);
+    // Metadata must not reintroduce a full command discarded by the input bound.
+    const inputRecord = z.record(z.string(), z.unknown()).safeParse(boundedInput);
     const responseRecord = z.record(z.string(), z.unknown()).safeParse(input.tool_response);
     const command = inputRecord.success
       ? typeof inputRecord.data.command === "string"

@@ -1503,6 +1503,56 @@ export class CodexLunaAdapter {
   public async assessCandidateSemantics(
     request: SemanticAssessmentRequest
   ): Promise<SemanticAssessmentOutput> {
+    // Leave room for the fixed prompt envelope below the 1 MiB process input limit.
+    const maximumRequestCharacters = 1_000_000;
+    if (JSON.stringify(request).length <= maximumRequestCharacters) {
+      return this.#assessCandidateSemanticsPage(request);
+    }
+    const pages: LunaEvidence[][] = [];
+    let current: LunaEvidence[] = [];
+    for (const evidence of request.evidence) {
+      if (JSON.stringify({ ...request, evidence: [evidence] }).length > maximumRequestCharacters) {
+        throw new LunaInvocationError("input_too_large", false,
+          "One semantic assessment evidence item exceeds the process input limit.",
+          { stage: "invocation", code: "input_too_large" });
+      }
+      const next = [...current, evidence];
+      if (JSON.stringify({ ...request, evidence: next }).length > maximumRequestCharacters) {
+        pages.push(current);
+        current = [evidence];
+      } else {
+        current = next;
+      }
+    }
+    if (current.length > 0) pages.push(current);
+    if (pages.length === 0) {
+      throw new LunaInvocationError("input_too_large", false,
+        "The semantic assessment claim exceeds the process input limit.",
+        { stage: "invocation", code: "input_too_large" });
+    }
+    const outputs: SemanticAssessmentOutput[] = [];
+    const deadline = performance.now() + (this.#options.timeoutMilliseconds ?? 120_000);
+    for (const evidence of pages) {
+      outputs.push(await this.#assessCandidateSemanticsPage({ ...request, evidence }, deadline));
+    }
+    const first = outputs[0];
+    if (first === undefined) throw new Error("Semantic assessment has no pages.");
+    // Partial context cannot establish consensus. Persist a result only after every
+    // complete-evidence page succeeds; disagreement remains unconfirmed.
+    return semanticAssessmentOutputSchema.parse({
+      schemaVersion: 1,
+      kind: "semantic_assessment",
+      state: outputs.every(output => output.state === first.state) ? first.state : "insufficient_evidence",
+      durabilityDisposition: outputs.every(output => output.durabilityDisposition === first.durabilityDisposition)
+        ? first.durabilityDisposition ?? "uncertain" : "uncertain",
+      evidenceIds: [...new Set(outputs.flatMap(output => output.evidenceIds))]
+    });
+  }
+
+  async #assessCandidateSemanticsPage(
+    request: SemanticAssessmentRequest,
+    deadline?: number
+  ): Promise<SemanticAssessmentOutput> {
     const aliasByEvidenceId = new Map(
       request.evidence.map((item, index) => [item.evidenceId, `e${String(index + 1)}`])
     );
@@ -1533,7 +1583,9 @@ export class CodexLunaAdapter {
           }))
         }
       },
-      semanticAssessmentOutputSchema
+      semanticAssessmentOutputSchema,
+      undefined,
+      deadline
     );
     const originalEvidenceIds = new Set(request.evidence.map((item) => item.evidenceId));
     const restore = (value: string): string => {
@@ -1671,7 +1723,8 @@ export class CodexLunaAdapter {
     outputJsonSchema: unknown,
     prompt: unknown,
     outputSchema: z.ZodType<Output>,
-    timeoutMilliseconds = 120_000
+    timeoutMilliseconds = 120_000,
+    deadline?: number
   ): Promise<Output> {
     await mkdir(this.#options.temporaryRoot, { recursive: true, mode: 0o700 });
     const isolatedHome = this.#options.isolatedHome ?? join(
@@ -1700,7 +1753,13 @@ export class CodexLunaAdapter {
         : `${dirname(process.execPath)}:${process.env.PATH}`;
       const invocationStartedAt = performance.now();
       const standardInput = JSON.stringify(prompt);
-      const processTimeoutMilliseconds = this.#options.timeoutMilliseconds ?? timeoutMilliseconds;
+      const configuredTimeoutMilliseconds = this.#options.timeoutMilliseconds ?? timeoutMilliseconds;
+      const processTimeoutMilliseconds = deadline === undefined ? configuredTimeoutMilliseconds
+        : Math.min(configuredTimeoutMilliseconds, Math.floor(deadline - performance.now()));
+      if (processTimeoutMilliseconds <= 0) {
+        throw new LunaInvocationError("timeout", true, "Luna assessment deadline exhausted between pages.",
+          { stage: "invocation", code: "process_deadline_exceeded", timeoutMilliseconds: configuredTimeoutMilliseconds });
+      }
       const result = await (this.#options.runProcess ?? runLunaProcess)({
         executable: this.#options.codexExecutable,
         arguments: [

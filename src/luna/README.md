@@ -57,6 +57,15 @@ the current deployment.
 
 The exported consolidation output schema also validates the Worker's saved model checkpoint. Its 128-clause model-response bound is distinct from the Worker's final result, which may additionally contain locally restored priority Candidates and is admitted in pages.
 
+Oversized semantic assessments page complete evidence items below the process
+input limit, retaining the claim, conditions, exclusions and exact evidence
+identities on every page. No evidence text is truncated or deleted. All pages
+share the existing invocation time budget and must succeed before the Worker
+persists an assessment. Support disagreements
+yield `insufficient_evidence`; durability disagreements yield `uncertain`.
+An individual evidence item or claim that cannot fit still fails explicitly as
+`input_too_large`, before making any model calls. Ordinary inputs use one call.
+
 ## Verification
 
 Extraction/consolidation prompt v7 include a separate retention-value judgment in
@@ -71,6 +80,7 @@ Run from the repository root:
 
 ```sh
 pnpm exec vitest run tests/contract/luna-adapter.test.ts tests/fault/luna-health.test.ts tests/integration/governance/luna-governance-adapter.test.ts
+pnpm exec vitest run tests/contract/semantic-input-budget.test.ts
 ```
 
 Check these test scenarios before changing behavior.

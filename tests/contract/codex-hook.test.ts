@@ -103,6 +103,28 @@ test("an unknown PostToolUse kind is captured through the generic envelope", asy
   });
 });
 
+test("oversized tool input cannot bypass the capture bound through command metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ms-hook-bound-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const result = await handleCodexHook({
+    runtimeRoot, receivedAt: "2026-08-07T04:00:00.000Z",
+    input: {
+      hook_event_name: "PostToolUse", session_id: "session-large-command",
+      turn_id: "turn-large-command", cwd: root, tool_name: "apply_patch", tool_use_id: "large-patch",
+      tool_input: { cmd: `apply_patch ${"x".repeat(200_000)}` },
+      tool_response: { status: "ok", exit_code: 0 }
+    }
+  });
+  if (!result.captured) throw new Error("Expected capture.");
+  await importCaptureInboxBatch({ runtimeRoot, importedAt: "2026-08-07T04:00:00.100Z",
+    maximumEntries: 64, maximumMilliseconds: 25 });
+  const stored = await readCapturedEvent(runtimeRoot, result.eventId);
+  expect(Buffer.byteLength(JSON.stringify(stored?.payload))).toBeLessThan(40_000);
+  expect(stored?.payload).toMatchObject({ input: { memstoreTruncated: true } });
+  expect(stored?.payload).not.toHaveProperty("command");
+});
+
 test("a Hook capture failure fails open with a body-free diagnostic", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-codex-hook-failure-"));
   temporaryDirectories.push(root);
