@@ -29,10 +29,12 @@ SessionStart/UserPromptSubmit input resolves a Project for foreground retrieval;
 other events and sensitive prompts return immediately. This path creates no
 capture findings or capture-health records. Explicit capture APIs stay independent.
 
-Stop has a shared monotonic capture budget. Read-only Project discovery has at
-most 200 ms and aborts its Git child on expiry; unresolved discovery is deferred
-to Inbox import instead of falling back to synchronous registry creation. Import
-must pass the exact Session identity so session-specific routes still win.
+Stop allows 200 ms for Project lookup. Other Hooks share at most 500 ms across
+read-only discovery and registration fallback; expiration aborts the current Git child and cannot be
+reinterpreted as a non-Git project. Stop never attempts registration in the Hook.
+With capture enabled, unresolved scope is deferred to Inbox import with the exact
+Session identity; with capture disabled, that invocation skips scoped injection.
+Stop additionally retains its shared monotonic capture budget.
 Capture failures expose only an allowlisted code, stage, elapsed time and
 persistence state; never forward arbitrary exception messages or input bodies.
 

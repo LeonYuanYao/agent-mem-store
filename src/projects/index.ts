@@ -30,6 +30,7 @@ export interface ProjectResolutionRequest {
   readonly path: string;
   readonly runtimeRoot: string;
   readonly busyTimeoutMilliseconds?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface SubmoduleProjectOverrideNotice {
@@ -452,14 +453,18 @@ export async function inspectProject(
 export async function resolveProject(
   request: ProjectResolutionRequest
 ): Promise<ProjectResolution> {
+  request.signal?.throwIfAborted();
   const routed = await inspectSessionRoute(request);
+  request.signal?.throwIfAborted();
   if (routed !== undefined) return routed;
   const resolvedPath = await realpath(request.path);
+  request.signal?.throwIfAborted();
   let markerSearchPath = resolvedPath;
   const filesystemRoot = parse(markerSearchPath).root;
 
   let searchingForMarker = true;
   while (searchingForMarker) {
+    request.signal?.throwIfAborted();
     const markerPath = join(markerSearchPath, ".memstore-project");
     if (await isFile(markerPath)) {
       try {
@@ -467,12 +472,13 @@ export async function resolveProject(
           await readFile(markerPath, "utf8")
         ) as unknown;
         const marker = markerSchema.parse(markerDocument);
-        const git = await inspectGit(markerSearchPath);
+        const git = await inspectGit(markerSearchPath, request.signal);
         const notices: ProjectNotice[] = [];
         if (git?.inheritedSubmodule === true) {
           const inherited = await resolveProject({
             path: git.repositoryRoot,
             runtimeRoot: request.runtimeRoot,
+            ...(request.signal === undefined ? {} : { signal: request.signal }),
             ...(request.busyTimeoutMilliseconds === undefined
               ? {}
               : { busyTimeoutMilliseconds: request.busyTimeoutMilliseconds })
@@ -496,6 +502,7 @@ export async function resolveProject(
           notices
         };
       } catch {
+        request.signal?.throwIfAborted();
         return {
           status: "unresolved",
           reason: "invalid_marker",
@@ -512,6 +519,7 @@ export async function resolveProject(
     }
   }
 
+  request.signal?.throwIfAborted();
   const database = await openRuntimeDatabase(
     request.runtimeRoot,
     request.busyTimeoutMilliseconds === undefined
@@ -519,7 +527,8 @@ export async function resolveProject(
       : { busyTimeoutMilliseconds: request.busyTimeoutMilliseconds }
   );
   try {
-    const git = await inspectGit(resolvedPath);
+    const git = await inspectGit(resolvedPath, request.signal);
+    request.signal?.throwIfAborted();
     if (git !== undefined) {
       const match = database
         .prepare(

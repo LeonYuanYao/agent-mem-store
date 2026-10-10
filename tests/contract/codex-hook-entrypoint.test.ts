@@ -401,3 +401,79 @@ test("human-only Stop sends bounded ephemeral context, clears sensitive replies,
     await expect(access(join(runtimeRoot, "spool", "capture"))).rejects.toThrow();
   } finally { await new Promise<void>(resolveClose => server.close(() => { resolveClose(); })); }
 });
+
+test.each([
+  { event: "SessionStart" as const, initialized: true },
+  { event: "UserPromptSubmit" as const, initialized: true },
+  { event: "SessionStart" as const, initialized: false },
+  { event: "UserPromptSubmit" as const, initialized: false }
+])(
+  "$event returns before the host deadline when project Git discovery stalls (initialized=$initialized)", async ({ event, initialized }) => {
+    const root = await mkdtemp(join(tmpdir(), "memstore-slow-project-hook-"));
+    temporaryDirectories.push(root);
+    const runtimeRoot = join(root, "runtime");
+    const { openRuntimeDatabase } = await import("../../src/runtime/database.js");
+    await mkdir(runtimeRoot);
+    if (initialized) (await openRuntimeDatabase(runtimeRoot)).close();
+    await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n[adapters]\nhuman_authored_only_injection = true\n");
+    await mkdir(join(root, "bin"));
+    await writeFile(join(root, "bin", "git"), `#!${process.execPath}\nsetTimeout(() => process.exit(1), 3500);\n`, { mode: 0o755 });
+    const input = await codexPrimaryInput(root, { session_id: "slow-project", cwd: root, prompt: "Check SQLite WAL." });
+    const started = performance.now();
+    const result = spawnSync(process.execPath, ["--import", "tsx", hookEntrypoint, "codex", event], {
+      cwd: repositoryRoot, encoding: "utf8", timeout: 2000, killSignal: "SIGKILL", input: JSON.stringify(input),
+      env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
+        CODEX_HOME: join(root, "absent-codex"), MEMSTORE_RUNTIME_ROOT: runtimeRoot, MEMSTORE_INJECTION_MODE: "active" }
+    });
+    expect(result.error?.message).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ continue: true });
+    expect(performance.now() - started).toBeLessThan(1500);
+    const database = await openRuntimeDatabase(runtimeRoot);
+    try { expect(database.prepare("SELECT COUNT(*) AS count FROM projects").get()).toMatchObject({ count: 0 }); }
+    finally { database.close(); }
+  }
+);
+
+test("UserPromptSubmit shares its remaining Hook budget with foreground IPC after delayed input", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-hook-total-budget-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  await mkdir(join(runtimeRoot, "state"), { recursive: true });
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n[adapters]\nhuman_authored_only_injection = true\n");
+  await writeFile(join(root, ".memstore-project"), JSON.stringify({ schema_version: 1, project_id: "msproj_123e4567-e89b-42d3-a456-426614174801" }));
+  let budget: number | undefined;
+  const server = createServer(socket => {
+    let source = "";
+    socket.setEncoding("utf8").on("data", (chunk: string) => {
+      source += chunk;
+      if (!source.includes("\n")) return;
+      const request = foregroundRequestSchema.parse(JSON.parse(source.split("\n", 1)[0] ?? "{}"));
+      budget = Date.parse(request.deadlineAt) - Date.now();
+      // Deliberately leave IPC pending until the client's absolute deadline.
+    });
+  });
+  await new Promise<void>(done => server.listen(foregroundRetrievalSocketPath(runtimeRoot), done));
+  const input = await codexPrimaryInput(root, { session_id: "delayed-input", cwd: root, prompt: "Check SQLite WAL." });
+  const child = spawn(process.execPath, ["--import", "tsx", hookEntrypoint, "codex", "UserPromptSubmit"], {
+    cwd: repositoryRoot, env: { ...process.env, CODEX_HOME: join(root, "absent-codex"), MEMSTORE_RUNTIME_ROOT: runtimeRoot, MEMSTORE_INJECTION_MODE: "active" }, stdio: ["pipe", "pipe", "pipe"]
+  });
+  let hostTimedOut = false;
+  let stdout = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+  const hostTimer = setTimeout(() => { hostTimedOut = true; child.kill("SIGKILL"); }, 2000);
+  const inputTimer = setTimeout(() => { child.stdin.end(JSON.stringify(input)); }, 700);
+  try {
+    const code = await new Promise<number | null>(done => child.once("close", done));
+    expect(hostTimedOut).toBe(false);
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({ continue: true });
+    expect(budget).toBeGreaterThan(100);
+    expect(budget).toBeLessThan(1250);
+  } finally {
+    clearTimeout(hostTimer);
+    clearTimeout(inputTimer);
+    child.kill("SIGKILL");
+    await new Promise<void>(done => server.close(() => { done(); }));
+  }
+});

@@ -33,7 +33,13 @@ under its two-second host limit. The watchdog emits one fail-open systemMessage
 and stderr diagnostic, then exits; it cannot guarantee output after a host kill,
 blocked event loop or OS suspension. Failure output distinguishes `not_saved`,
 `unconfirmed`, `saved` and body-free persistence without raw exception text.
-Successful hooks stay silent unless ordinary retrieval display is enabled.
+All other Hook events have a 1,700 ms asynchronous watchdog, leaving process
+startup/output headroom within the two-second host limit. Foreground IPC receives
+at most 1,500 ms and only the remaining Hook allowance minus 75 ms for output;
+input, policy, project discovery and context updates cannot each restart that
+budget. The watchdog reports the current stage without message bodies and emits
+one fail-open response. It cannot preempt synchronous event-loop blockage or an
+OS scheduling stall. Successful hooks stay silent unless ordinary retrieval display is enabled.
 
 - [operations/README.md](../../src/operations/README.md)
 - [adapters/codex/README.md](../../src/adapters/codex/README.md)

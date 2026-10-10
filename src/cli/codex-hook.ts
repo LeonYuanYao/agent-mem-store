@@ -36,17 +36,22 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
     );
   }
   const progress = new CaptureProgress(event === "Stop" ? 1300 : Infinity);
+  const hookBudgetMs = event === "Stop" ? 1450 : 1700;
+  const hookDeadlineAt = performance.now() + hookBudgetMs;
+  let hookStage = "capture";
   const watchdogState = { expired: false };
   const watchdogExpired = (): boolean => watchdogState.expired;
   // Leave startup/output headroom inside the two-second host limit. A hard
   // host kill cannot print diagnostics; this watchdog handles async stalls first.
-  const watchdog = event === "Stop" ? setTimeout(() => {
+  const watchdog = setTimeout(() => {
     watchdogState.expired = true;
-    const message = renderCaptureDiagnostic(progress.diagnostic(event, "capture_deadline_exceeded"));
+    const message = hookStage === "capture"
+      ? renderCaptureDiagnostic(progress.diagnostic(event, event === "Stop" ? "capture_deadline_exceeded" : "hook_deadline_exceeded"))
+      : `MemStore (${event}): code=hook_deadline_exceeded; stage=${hookStage}; elapsed=${String(Math.round(performance.now() - progress.startedAt))}ms. The session will continue.`;
     process.stderr.write(`${message}\n`);
     process.stdout.write(`${JSON.stringify({ continue: true, systemMessage: message })}\n`, () => process.exit(0));
-  }, 1450) : undefined;
-  watchdog?.unref();
+  }, hookBudgetMs);
+  watchdog.unref();
   try {
     const input = z.record(z.string(), z.unknown()).parse(
       JSON.parse(await consumeText(process.stdin))
@@ -80,6 +85,7 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
         }
       : { continue: true };
     const injectionMode = process.env.MEMSTORE_INJECTION_MODE === "active" ? "active" : "shadow";
+    hookStage = "context_update";
     const contextInput = activeHookInputSchema.safeParse(input);
     if (injectionMode === "active" && contextInput.success) {
       const value = contextInput.data;
@@ -93,11 +99,13 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
       }
     }
 
+    if (watchdogExpired()) return;
     if (injectionMode === "active" &&
         (event === "SessionStart" || event === "UserPromptSubmit") &&
         (event !== "SessionStart" || await readSessionStartInjection(resolve(runtimeRoot))) &&
         (result.captured || result.state === "capture_disabled") && result.projectId !== undefined) {
       const activeInput = activeHookInputSchema.parse(input);
+      hookStage = "foreground_retrieval";
       const foreground = await requestForegroundRetrieval({
         runtimeRoot: resolve(runtimeRoot),
         event,
@@ -106,9 +114,12 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
         ...(activeInput.turn_id === undefined ? {} : { turnId: activeInput.turn_id }),
         ...(result.captured ? { eventId: result.eventId } : {}),
         ...(event === "UserPromptSubmit" ? { prompt: activeInput.prompt ?? "" } : {}),
-        requestedAt: new Date().toISOString()
+        requestedAt: new Date().toISOString(),
+        timeoutMilliseconds: Math.max(1, Math.min(1500, Math.floor(hookDeadlineAt - performance.now() - 75)))
       });
+      if (watchdogExpired()) return;
       if (foreground.state === "completed") {
+        hookStage = "display";
         const systemMessage = renderHookDisplay(
           await readHookDisplay(resolve(runtimeRoot)), event, foreground.text,
           foreground.renderedTokenCount
@@ -123,6 +134,7 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
         };
       }
     }
+    if (watchdogExpired()) return;
     process.stdout.write(`${JSON.stringify(output)}\n`);
   } catch (error) {
     if (watchdogExpired()) return;
@@ -132,6 +144,6 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
     process.stderr.write(`${message}\n`);
     process.stdout.write(`${JSON.stringify({ continue: true, systemMessage: message })}\n`);
   } finally {
-    if (watchdog !== undefined) clearTimeout(watchdog);
+    clearTimeout(watchdog);
   }
 }

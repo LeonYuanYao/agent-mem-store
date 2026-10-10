@@ -79,11 +79,13 @@ These diagnostics require a committed receipt and cannot explain an outer
 foreground failure that ended before receipt creation. They do not change timeout,
 cooldown, filtering or core health policy.
 
-The default foreground client deadline is 1,500 ms, including local retrieval,
+The default foreground client deadline is at most 1,500 ms, including local retrieval,
 Jev, receipt persistence and delivery. Jev defaults to a 1,300 ms stage timeout;
 local retrieval and the receipt reserve reduce its actual allowance below that
 ceiling under the default foreground deadline. The host Hook
-limit remains two seconds. See [ADR-0144](../../docs/adr/0144-extend-jev-and-foreground-timeouts.md).
+limit remains two seconds. Hook callers further reduce the IPC deadline by time
+already spent reading input, resolving scope and updating ephemeral context,
+leaving output headroom within a 1,700 ms asynchronous Hook budget. See [ADR-0144](../../docs/adr/0144-extend-jev-and-foreground-timeouts.md).
 
 ## Invariants and change risks
 

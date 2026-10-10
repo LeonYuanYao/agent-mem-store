@@ -207,21 +207,24 @@ export async function handleCodexHook(
       return { continue: true, captured: false, state: "capture_disabled" };
     }
     progress.enter("project_lookup");
+    const projectBudgetMs = eventKind === "Stop" ? 200 : 500;
+    const projectSignal = AbortSignal.timeout(Math.max(1, Math.floor(Math.min(projectBudgetMs, progress.remaining()))));
     const inspectedProject = await inspectProject({
       sessionId: input.session_id,
       path: input.cwd,
       runtimeRoot: request.runtimeRoot,
       busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds,
-      ...(eventKind === "Stop" ? { signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(200, progress.remaining())))) } : {})
+      signal: projectSignal
     }).catch(() => undefined);
     const project = inspectedProject?.status === "resolved"
       ? inspectedProject
-      : eventKind === "Stop" ? undefined
+      : eventKind === "Stop" || projectSignal.aborted ? undefined
       : await resolveProject({
           sessionId: input.session_id,
           path: input.cwd,
           runtimeRoot: request.runtimeRoot,
-          busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds
+          busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds,
+          signal: projectSignal
         }).catch(() => undefined);
     resolvedProjectId = project?.status === "resolved" ? project.projectId : undefined;
     if (request.captureEnabled === false) {

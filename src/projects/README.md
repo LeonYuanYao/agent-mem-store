@@ -15,10 +15,11 @@ Resolves directories into memory scopes, handles explicit project markers and tr
 
 resolveProject performs discovery; inspectProject reports identity; configureProjectMarker handles explicit configuration. Session routes override routing for a migrated thread.
 
-Read-only `inspectProject` accepts an optional AbortSignal. Cancellation kills
+`inspectProject` and `resolveProject` accept an optional AbortSignal. Cancellation kills
 the current Git child and propagates rather than being interpreted as a non-Git
 directory or invalid marker. A canceled Hook lookup must not register a new
-Project. Background deferred capture resolution receives the original Session ID.
+Project. Registration fallback preserves the same signal, including inherited
+submodule lookups. Background deferred capture resolution receives the original Session ID.
 
 - [adapters/codex/hook.ts](../../src/adapters/codex/hook.ts)
 - [operations/project.ts](../../src/operations/project.ts)
