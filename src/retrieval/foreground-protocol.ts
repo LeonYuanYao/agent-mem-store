@@ -20,6 +20,7 @@ export const foregroundRequestSchema = z.discriminatedUnion("event", [
   commonRequestSchema.extend({
     event: z.literal("UserPromptSubmit"),
     prompt: z.string(),
+    turnId: z.string().min(1).optional(),
     signals: z.object({
       files: z.array(z.string()),
       symbols: z.array(z.string()),
@@ -79,3 +80,22 @@ export type ForegroundRetrievalResult = ForegroundWireResponse | {
 export function foregroundRetrievalSocketPath(runtimeRoot: string): string {
   return resolve(runtimeRoot, "state", "foreground-retrieval.sock");
 }
+
+// Ephemeral Stop context updates share the private socket, not the retrieval lane.
+const contextUpdateBase = z.object({
+  schemaVersion: z.literal(foregroundProtocolVersion),
+  kind: z.literal("context_update"),
+  requestId: z.string().min(1),
+  sessionId: z.string().min(1),
+  deadlineAt: z.iso.datetime()
+});
+export const foregroundContextUpdateSchema = z.discriminatedUnion("action", [
+  contextUpdateBase.extend({ action: z.literal("clear") }),
+  contextUpdateBase.extend({ action: z.literal("assistant"), turnId: z.string().min(1),
+    text: z.string(), truncated: z.boolean() })
+]);
+export const foregroundContextAckSchema = z.object({
+  schemaVersion: z.literal(foregroundProtocolVersion),
+  requestId: z.string().min(1),
+  accepted: z.boolean()
+});

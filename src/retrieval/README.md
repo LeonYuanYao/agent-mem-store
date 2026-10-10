@@ -35,6 +35,34 @@ filters before rendering and recording epoch tokens/deduplication, and records
 provider telemetry under receipt `timings.jev`. SessionStart and explicit recall
 do not invoke Jev. See [ADR-0135](../../docs/adr/0135-add-opt-in-jev-automatic-relevance-filter.md).
 
+[conversation-cache.ts](conversation-cache.ts) keeps at most three prior User/Assistant
+turns per Project and Session (128 session entries, bounded messages). UserPromptSubmit
+starts a turn; a lightweight Stop update attaches the last Assistant reply only when
+its session and latest turn identity match. SessionStart/SessionEnd and sensitive
+input clear the cache; Worker restart loses it. Updates use the private socket outside
+the retrieval lane and do not create capture events, receipts or model work.
+
+[conversation-context.ts](conversation-context.ts) selects role-labeled verbatim
+paragraphs for Jev regardless of the local short-prompt history gate. It prefers the
+latest referred-to proposal and request, then ranks remaining paragraphs by recency,
+query terms, entities and constraints. Unused space is shared rather than reserved
+per message. Whole oversized paragraphs are omitted; this is lossy selection, not a
+semantic summary or a guarantee that all qualifications survive. History is capped
+at 1,024 local `o200k_base` tokens including labels/JSON. Current request, candidates
+and criteria take precedence within a 4,096-token serialized request and 48 KiB cap;
+provider token accounting may differ. No additional model call extracts keywords.
+Local recall still uses its existing User-only history rules. Jev must resolve the
+current action, target and conditions before judging applicability; Assistant text
+is neither factual proof nor authority. Local fallback and Human eligibility remain
+unchanged. See [ADR-0146](../../docs/adr/0146-bound-jev-conversation-context.md).
+
+Optional receipt fields `contextPolicyVersion`, `contextStatus`,
+`contextMessageCount`, `contextTokens`, `contextTruncated` and `requestTokens` report
+selection without storing historical message bodies. `available` means the cached
+turns have paired replies, not complete conversation history or proven facts;
+`contextTruncated` also reports paragraph selection. Cold or unbound history is
+`missing` or `partial` and Jev must not invent missing applicability.
+
 Jev receipt diagnostics distinguish local deadline pressure from its stage timeout.
 `deadlineRemainingMs` is the nonnegative foreground time remaining at filter entry.
 `budgetMs` is the latest total stage allowance, including time already spent: at

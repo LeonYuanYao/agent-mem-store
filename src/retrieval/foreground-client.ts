@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 
 import {
+  foregroundContextAckSchema,
   foregroundProtocolVersion,
   foregroundRequestSchema,
   foregroundResponseSchema,
@@ -24,6 +25,7 @@ export async function requestForegroundRetrieval(request: {
   readonly projectId: string;
   readonly sessionId: string;
   readonly eventId?: string;
+  readonly turnId?: string;
   readonly prompt?: string;
   readonly signals?: {
     readonly files: readonly string[];
@@ -56,6 +58,7 @@ export async function requestForegroundRetrieval(request: {
         sessionId: request.sessionId,
         ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
         prompt: request.prompt ?? "",
+        ...(request.turnId === undefined ? {} : { turnId: request.turnId }),
         signals: {
           files: [...(request.signals?.files ?? emptySignals.files)],
           symbols: [...(request.signals?.symbols ?? emptySignals.symbols)],
@@ -113,5 +116,47 @@ export async function requestForegroundRetrieval(request: {
     socket.once("end", () => {
       if (!settled) finish({ state: "unavailable", requestId, code: "malformed_response" });
     });
+  });
+}
+
+/** Best-effort in-memory update; failure must never block the host session. */
+export async function sendForegroundContextUpdate(request: {
+  readonly runtimeRoot: string;
+  readonly sessionId: string;
+  readonly update: { readonly action: "clear" } | {
+    readonly action: "assistant"; readonly turnId: string; readonly text: string; readonly truncated: boolean;
+  };
+}): Promise<boolean> {
+  const requestId = `mscontext_${randomUUID()}`;
+  const timeoutMs = 100;
+  const source = Buffer.from(`${JSON.stringify({ schemaVersion: foregroundProtocolVersion,
+    kind: "context_update", requestId, sessionId: request.sessionId,
+    deadlineAt: new Date(Date.now() + timeoutMs).toISOString(), ...request.update })}\n`);
+  if (source.byteLength > maximumForegroundRequestBytes) return false;
+  return new Promise<boolean>(resolveResult => {
+    const socket = createConnection(foregroundRetrievalSocketPath(request.runtimeRoot));
+    let response = Buffer.alloc(0);
+    let settled = false;
+    const finish = (accepted: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolveResult(accepted);
+    };
+    const timer = setTimeout(() => { finish(false); }, timeoutMs);
+    socket.once("connect", () => { socket.write(source); });
+    socket.on("data", (chunk: Buffer) => {
+      response = Buffer.concat([response, chunk]);
+      if (response.byteLength > 2048) { finish(false); return; }
+      const newline = response.indexOf(0x0a);
+      if (newline < 0) return;
+      try {
+        const ack = foregroundContextAckSchema.safeParse(JSON.parse(response.subarray(0, newline).toString("utf8")));
+        finish(ack.success && ack.data.requestId === requestId && ack.data.accepted);
+      } catch { finish(false); }
+    });
+    socket.once("error", () => { finish(false); });
+    socket.once("end", () => { finish(false); });
   });
 }

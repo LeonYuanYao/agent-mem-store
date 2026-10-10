@@ -261,3 +261,43 @@ test("configuration defaults off; file credentials require an owner-only regular
   vi.stubEnv("JEV_MODEL_API_KEY", "synthetic-environment-key");
   expect(await readJevApiKey(root)).toBe("synthetic-environment-key");
 });
+
+test("Jev receives role-labeled context for long requests and resolves applicability explicitly", async () => {
+  const fetcher = vi.fn<typeof fetch>(() => Promise.resolve(response()));
+  const result = await filter(fetcher).filter({ ...input(), prompt: `Apply that plan. ${"Verify the result. ".repeat(20)}`,
+    conversation: { status: "available", messages: [
+      { role: "user", text: "Inspect project A only; do not change project B.", truncated: false },
+      { role: "assistant", text: "I propose checking A. The cause remains unconfirmed.", truncated: false }
+    ] } });
+  expect(result.telemetry).toMatchObject({ state: "filtered", contextStatus: "available", contextMessageCount: 2, contextPolicyVersion: 1, contextTruncated: false });
+  const body = fetcher.mock.calls[0]?.[1]?.body;
+  expect(body).toContain("[user; previous_message=2]");
+  expect(body).toContain("[assistant; previous_message=1]");
+  expect(body).toContain("cause remains unconfirmed");
+  expect(body).toContain("not as independent factual proof or new authorization");
+  expect(JSON.stringify(result.telemetry)).not.toContain("project A");
+});
+
+test("serialized request budget reallocates history space and never truncates the current request", async () => {
+  const fetcher = vi.fn<typeof fetch>(() => Promise.resolve(response()));
+  const prompt = "SQLite WAL \"escaped\"\\value ".repeat(350);
+  const result = await filter(fetcher, { timeout_ms: 1300 }).filter({ ...input(), deadlineAt: Date.now() + 1800, prompt,
+    conversation: { status: "available", messages: [
+      { role: "user", text: "Check WAL.", truncated: false },
+      { role: "assistant", text: Array.from({ length: 120 }, (_, i) => `Plan ${String(i)}: inspect SQLite WAL; do not delete the database.`).join("\n\n"), truncated: false }
+    ] } });
+  expect(result.telemetry.state).toBe("filtered");
+  expect(result.telemetry.requestTokens).toBeLessThanOrEqual(4096);
+  expect(result.telemetry.contextTokens).toBeLessThanOrEqual(1024);
+  expect(result.telemetry.contextTruncated).toBe(true);
+  expect(fetcher.mock.calls[0]?.[1]?.body).toContain(JSON.stringify(prompt));
+});
+
+test("context sensitivity is checked before paragraph selection", async () => {
+  const fetcher = vi.fn<typeof fetch>();
+  const result = await filter(fetcher).filter({ ...input(), conversation: { status: "available", messages: [
+    { role: "assistant", text: `Safe plan.\n\n${"noise ".repeat(4000)}\n\napi_key=sk-1234567890abcdefghijklmnopqrstuv`, truncated: false }
+  ] } });
+  expect(result.telemetry).toMatchObject({ state: "fallback", reason: "sensitive_input" });
+  expect(fetcher).not.toHaveBeenCalled();
+});

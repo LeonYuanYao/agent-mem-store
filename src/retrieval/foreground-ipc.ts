@@ -17,6 +17,7 @@ import {
   reserveForegroundEvaluation
 } from "./shadow-worker.js";
 import {
+  foregroundContextUpdateSchema,
   foregroundProtocolVersion,
   foregroundRequestSchema,
   foregroundRetrievalSocketPath,
@@ -27,6 +28,7 @@ import {
 import { loadRetrievalSnapshot, type RetrievalSnapshot } from "./snapshot.js";
 import { validateRetrievalSnapshot } from "./snapshot.js";
 import { JevAutomaticRelevanceFilter, type AutomaticRelevanceFilter } from "./jev.js";
+import { ConversationCache, type ConversationView } from "./conversation-cache.js";
 
 const maximumRecentPromptSessions = 128;
 const maximumStoredPromptCharacters = 16 * 1024;
@@ -57,6 +59,7 @@ async function prepareResponse(request: ForegroundRequest, options: {
   readonly snapshot: RetrievalSnapshot;
   readonly control: ForegroundExecutionControl;
   readonly recentPrompts: readonly string[];
+  readonly conversation: ConversationView;
   readonly relevanceFilter: AutomaticRelevanceFilter;
   readonly onReceiptCommitted: (receiptCommitMs: number) => void;
 }): Promise<ForegroundWireResponse> {
@@ -96,6 +99,7 @@ async function prepareResponse(request: ForegroundRequest, options: {
           sessionId: request.sessionId,
           prompt: request.prompt,
           recentPrompts: options.recentPrompts,
+          conversation: options.conversation,
           relevanceFilter: options.relevanceFilter,
           foregroundDeadlineAt: Date.parse(request.deadlineAt),
           signals: request.signals,
@@ -142,6 +146,7 @@ async function prepareResponse(request: ForegroundRequest, options: {
 }
 
 function serveConnection(socket: Socket, options: {
+  readonly conversations: ConversationCache;
   readonly lane: ReturnType<typeof createForegroundRetrievalLane<
     ForegroundRequest,
     ForegroundWireResponse
@@ -177,6 +182,21 @@ function serveConnection(socket: Socket, options: {
         state: "unavailable",
         code: "malformed_request"
       });
+      return;
+    }
+    const update = foregroundContextUpdateSchema.safeParse(document);
+    if (update.success) {
+      const message = update.data;
+      let accepted = false;
+      if (Date.parse(message.deadlineAt) > Date.now()) {
+        if (message.action === "clear") {
+          options.conversations.clearSession(message.sessionId);
+          accepted = true;
+        } else {
+          accepted = options.conversations.assistant(message.sessionId, message.turnId, message.text, message.truncated);
+        }
+      }
+      socket.end(`${JSON.stringify({ schemaVersion: foregroundProtocolVersion, requestId: message.requestId, accepted })}\n`);
       return;
     }
     const parsed = foregroundRequestSchema.safeParse(document);
@@ -270,6 +290,7 @@ export async function startForegroundRetrievalServer(request: {
   const requestSnapshotIds = new Map<string, string>();
   const requestReceiptCommitMs = new Map<string, number>();
   const relevanceFilter = new JevAutomaticRelevanceFilter({ runtimeRoot: request.runtimeRoot });
+  const conversations = new ConversationCache();
   const recentPromptsBySession = new Map<string, readonly string[]>();
   const lane = createForegroundRetrievalLane<ForegroundRequest, ForegroundWireResponse>({
     execute: (foregroundRequest, control) => {
@@ -278,8 +299,12 @@ export async function startForegroundRetrievalServer(request: {
         requestSnapshotIds.set(foregroundRequest.requestId, snapshot.indexRevisionId);
       }
       const historyKey = `${foregroundRequest.projectId}\0${foregroundRequest.sessionId}`;
+      const conversation = foregroundRequest.event === "UserPromptSubmit"
+        ? conversations.beginUser(foregroundRequest.projectId, foregroundRequest.sessionId, foregroundRequest.turnId, foregroundRequest.prompt)
+        : { messages: [], status: "missing" as const };
       let recentPrompts: readonly string[] = [];
       if (foregroundRequest.event === "SessionStart") {
+        conversations.clearSession(foregroundRequest.sessionId);
         recentPromptsBySession.delete(historyKey);
       } else {
         recentPrompts = recentPromptsBySession.get(historyKey) ?? [];
@@ -311,6 +336,7 @@ export async function startForegroundRetrievalServer(request: {
           snapshot,
           control,
           recentPrompts,
+          conversation,
           relevanceFilter,
           onReceiptCommitted: (receiptCommitMs) => {
             requestReceiptCommitMs.set(foregroundRequest.requestId, receiptCommitMs);
@@ -348,6 +374,7 @@ export async function startForegroundRetrievalServer(request: {
   const server = createServer((socket) => {
     serveConnection(socket, {
       lane,
+      conversations,
       ...(request.onPressure === undefined ? {} : { onPressure: request.onPressure })
     });
   });

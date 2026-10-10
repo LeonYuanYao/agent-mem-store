@@ -10,7 +10,7 @@ import {
   startForegroundRetrievalServer
 } from "../../../src/retrieval/foreground-ipc.js";
 import type { ForegroundAttemptRecord } from "../../../src/retrieval/foreground-attempts.js";
-import { requestForegroundRetrieval } from "../../../src/retrieval/foreground-client.js";
+import { requestForegroundRetrieval, sendForegroundContextUpdate } from "../../../src/retrieval/foreground-client.js";
 import { foregroundRequestSchema } from "../../../src/retrieval/foreground-protocol.js";
 import {
   loadRetrievalSnapshot,
@@ -1132,4 +1132,44 @@ test("an abandoned prompt holds one bounded embedding, rejects queued work, and 
     releaseEmbedding?.();
     await server.close();
   }
+});
+
+
+test("ephemeral assistant updates reach Jev only in their bound session without retrieval work", async () => {
+  const location = await fixture();
+  await writeFile(join(location.runtimeRoot, "config.toml"), "schema_version = 1\n[adapters]\nsession_start_injection = false\n[jev]\nenabled = true\n");
+  vi.stubEnv("JEV_MODEL_API_KEY", "synthetic-test-key");
+  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(Response.json({
+    model: "jev-1.13.0", answers: { c1: { type: "noul", noul: 0 }, c2: { type: "noul", noul: 0 } },
+    usage: { input_tokens: 100, output_tokens: 20 }
+  })));
+  const attempts: ForegroundAttemptRecord[] = [];
+  let pressure = 0;
+  const server = await startForegroundRetrievalServer({ ...location, adapter, onAttempt: value => { attempts.push(value); }, onPressure: () => { pressure++; } });
+  const common = { runtimeRoot: location.runtimeRoot, projectId, sessionId: "context-session", requestedAt: "2026-08-25T12:00:02.000Z" };
+  const update = (turnId: string, sessionId = common.sessionId) => sendForegroundContextUpdate({ runtimeRoot: location.runtimeRoot, sessionId,
+    update: { action: "assistant", turnId, text: "The proposed SQLite WAL plan forbids deleting the database.", truncated: false } });
+  try {
+    await requestForegroundRetrieval({ ...common, event: "UserPromptSubmit", turnId: "turn-1", prompt: "SQLite WAL queue recovery" });
+    const attemptCount = attempts.length;
+    expect(await update("unknown")).toBe(false);
+    expect(await update("turn-1", "another-session")).toBe(false);
+    expect(await update("turn-1")).toBe(true);
+    expect(attempts).toHaveLength(attemptCount);
+    expect(pressure).toBe(attemptCount);
+    await requestForegroundRetrieval({ ...common, event: "UserPromptSubmit", turnId: "turn-2", prompt: "Apply the SQLite WAL plan." });
+    const body = fetcher.mock.calls.at(-1)?.[1]?.body;
+    expect(body).toContain("[assistant; previous_message=1]");
+    expect(body).toContain("forbids deleting the database");
+    expect(body).toContain('"history_status":"available"');
+    expect(await update("turn-1")).toBe(false);
+    expect(await sendForegroundContextUpdate({ runtimeRoot: location.runtimeRoot, sessionId: common.sessionId, update: { action: "clear" } })).toBe(true);
+    await requestForegroundRetrieval({ ...common, event: "UserPromptSubmit", turnId: "turn-3", prompt: "SQLite WAL queue recovery" });
+    const cleared = fetcher.mock.calls.at(-1)?.[1]?.body;
+    expect(cleared).not.toContain("forbids deleting");
+    expect(cleared).toContain('"history_status":"missing"');
+    const database = await openRuntimeDatabase(location.runtimeRoot);
+    try { expect(database.prepare("SELECT COUNT(*) AS count FROM capture_events").get()).toMatchObject({ count: 0 }); }
+    finally { database.close(); }
+  } finally { await server.close(); }
 });

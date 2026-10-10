@@ -39,6 +39,13 @@ Successful hooks stay silent unless ordinary retrieval display is enabled.
 - [adapters/codex/README.md](../../src/adapters/codex/README.md)
 - [configuration/README.md](../../src/configuration/README.md)
 
+Active hooks also send bounded, ephemeral Stop context to the Worker's private
+socket. A matching Session and turn ID is required; unavailable sockets fail open
+within 100 ms. Full replies are screened before clipping. SessionStart/SessionEnd
+and sensitive input send a cache-clear update. This applies while durable capture
+is disabled and never enables capture, distillation or a transcript scan. Role-aware
+selection and tokenization remain in the Worker.
+
 ## State and side effects
 
 Can start background services and invoke mutating operations. Hook context injection uses worker IPC; model distillation stays in background work.

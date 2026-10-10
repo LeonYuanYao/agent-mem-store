@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "vitest";
 
 import { foregroundRetrievalSocketPath } from "../../src/retrieval/foreground-client.js";
-import { foregroundRequestSchema } from "../../src/retrieval/foreground-protocol.js";
+import { foregroundContextUpdateSchema, foregroundRequestSchema } from "../../src/retrieval/foreground-protocol.js";
 import { adapterDisplaySchema, readSessionStartInjection, renderHookDisplay } from "../../src/configuration/hook-display.js";
 import { codexPrimaryInput } from "../helpers/codex-primary-input.js";
 
@@ -84,7 +84,13 @@ test.each(["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEn
       socket.on("data", (chunk: string) => {
         source += chunk;
         if (!source.includes("\n")) return;
-        const request = foregroundRequestSchema.parse(JSON.parse(source.split("\n", 1)[0] ?? "{}"));
+        const document: unknown = JSON.parse(source.split("\n", 1)[0] ?? "{}");
+        const context = foregroundContextUpdateSchema.safeParse(document);
+        if (context.success) {
+          socket.end(`${JSON.stringify({ schemaVersion: 2, requestId: context.data.requestId, accepted: true })}\n`);
+          return;
+        }
+        const request = foregroundRequestSchema.parse(document);
         calls++;
         eventIdsPresent.push(request.eventId !== undefined);
         socket.end(`${JSON.stringify({ schemaVersion: 2, requestId: request.requestId,
@@ -359,4 +365,39 @@ test("the external Stop Hook spools within its host deadline while Runtime SQLit
     database.exec("ROLLBACK");
     database.close();
   }
+});
+
+
+test("human-only Stop sends bounded ephemeral context, clears sensitive replies, and never captures", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-context-hook-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  await mkdir(join(runtimeRoot, "state"), { recursive: true });
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n[adapters]\nhuman_authored_only_injection = true\n");
+  const updates: unknown[] = [];
+  const server = createServer(socket => {
+    let source = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      source += chunk;
+      if (!source.includes("\n")) return;
+      const update = foregroundContextUpdateSchema.parse(JSON.parse(source.split("\n", 1)[0] ?? "{}"));
+      updates.push(update);
+      socket.end(`${JSON.stringify({ schemaVersion: 2, requestId: update.requestId, accepted: true })}\n`);
+    });
+  });
+  await new Promise<void>(resolveListen => server.listen(foregroundRetrievalSocketPath(runtimeRoot), resolveListen));
+  try {
+    const invoke = (text: string, turnId: string | undefined) => runHook({ runtimeRoot, event: "Stop",
+      environment: { MEMSTORE_INJECTION_MODE: "active" },
+      input: { session_id: "context-session", turn_id: turnId, cwd: root, last_assistant_message: text } });
+    expect((await invoke("Propose checking WAL; do not delete it.", "turn-1")).status).toBe(0);
+    expect(updates[0]).toMatchObject({ action: "assistant", sessionId: "context-session", turnId: "turn-1", text: "Propose checking WAL; do not delete it.", truncated: false });
+    await invoke("Unbound reply", undefined);
+    expect(updates).toHaveLength(1);
+    await invoke(`${"Safe text. ".repeat(3000)}OPENAI_API_KEY=sk-${"a".repeat(48)}${" Safe ending.".repeat(3000)}`, "turn-2");
+    expect(updates[1]).toMatchObject({ action: "clear" });
+    expect(JSON.stringify(updates)).not.toContain("OPENAI_API_KEY");
+    await expect(access(join(runtimeRoot, "spool", "capture"))).rejects.toThrow();
+  } finally { await new Promise<void>(resolveClose => server.close(() => { resolveClose(); })); }
 });

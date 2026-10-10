@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 
+import type { ConversationView } from "./conversation-cache.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { readHumanAuthoredOnlyInjection, readSessionStartInjection } from "../configuration/hook-display.js";
 import type { EmbeddingAdapter } from "./index.js";
@@ -1408,6 +1409,7 @@ export interface UserPromptShadowPackRequest {
   readonly sessionId: string;
   readonly prompt: string;
   readonly recentPrompts?: readonly string[];
+  readonly conversation?: ConversationView;
   readonly relevanceFilter?: AutomaticRelevanceFilter;
   readonly foregroundDeadlineAt?: number;
   readonly signals: {
@@ -1765,9 +1767,10 @@ async function prepareUserPromptShadowPackCore(
   if (request.relevanceFilter !== undefined && selected.length > 0) {
     const judgment = await request.relevanceFilter.filter({
       prompt: normalizedPrompt,
-      // The existing context-dependence gate and 256-token history budget also
-      // bound cloud judging; standalone prompts do not send unrelated history.
-      recentPrompts: contextualHistoryAvailable ? [...recentPromptContext].reverse() : [],
+      // Local semantic history keeps its existing gate. Jev independently
+      // budgets role-labeled context, including short continuation requests.
+      recentPrompts: [...recentPromptContext].reverse(),
+      ...(request.conversation === undefined ? {} : { conversation: request.conversation }),
       items: selected.map(item => ({
         memoryId: item.memoryId,
         text: item.text.replace(/^\[M:[^\]]+\]\s*/u, "")

@@ -40,6 +40,12 @@ persistence state; never forward arbitrary exception messages or input bodies.
 - [../../projects/README.md](../../projects/README.md)
 - [../../cli/codex-hook.ts](../../cli/codex-hook.ts)
 
+The CLI separately forwards `last_assistant_message` with `session_id` and `turn_id`
+from active Stop hooks into a bounded Worker memory cache for Jev context. This is
+not durable capture: human-only mode still creates no new capture events. Missing
+turn identity or reply text is ignored, never reconstructed by scanning transcripts.
+See [retrieval context ownership](../../retrieval/README.md).
+
 ## State and side effects
 
 Captures events through runtime inbox paths and records bounded diagnostics. Changes can affect every interactive session, so test failure/timeout paths as well as successful capture.

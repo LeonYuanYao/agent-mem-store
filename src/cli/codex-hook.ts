@@ -4,7 +4,9 @@ import { z } from "zod";
 
 import { handleCodexHook } from "../adapters/codex/hook.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
-import { requestForegroundRetrieval } from "../retrieval/foreground-client.js";
+import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
+import { boundConversationMessage } from "../retrieval/conversation-cache.js";
+import { requestForegroundRetrieval, sendForegroundContextUpdate } from "../retrieval/foreground-client.js";
 import { readHookDisplay, readHumanAuthoredOnlyInjection, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
 import { inspectCodexSessionKind } from "../adapters/codex/session-kind.js";
 import { CaptureProgress, captureErrorCode, renderCaptureDiagnostic } from "../capture/deadline.js";
@@ -19,7 +21,9 @@ const codexHookEventSchema = z.enum([
 
 const activeHookInputSchema = z.object({
   session_id: z.string().min(1),
-  prompt: z.string().optional()
+  prompt: z.string().optional(),
+  turn_id: z.string().min(1).optional(),
+  last_assistant_message: z.string().optional()
 });
 
 export async function runCodexHook(eventSource: unknown): Promise<void> {
@@ -76,6 +80,19 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
         }
       : { continue: true };
     const injectionMode = process.env.MEMSTORE_INJECTION_MODE === "active" ? "active" : "shadow";
+    const contextInput = activeHookInputSchema.safeParse(input);
+    if (injectionMode === "active" && contextInput.success) {
+      const value = contextInput.data;
+      const sensitiveUser = event === "UserPromptSubmit" && classifyLocalSensitivity(value.prompt ?? "").state !== "normal";
+      const sensitiveAssistant = event === "Stop" && classifyLocalSensitivity(value.last_assistant_message ?? "").state !== "normal";
+      if (event === "SessionStart" || event === "SessionEnd" || sensitiveUser || sensitiveAssistant) {
+        await sendForegroundContextUpdate({ runtimeRoot: resolve(runtimeRoot), sessionId: value.session_id, update: { action: "clear" } });
+      } else if (event === "Stop" && value.turn_id !== undefined && value.last_assistant_message !== undefined) {
+        await sendForegroundContextUpdate({ runtimeRoot: resolve(runtimeRoot), sessionId: value.session_id,
+          update: { action: "assistant", turnId: value.turn_id, ...boundConversationMessage(value.last_assistant_message) } });
+      }
+    }
+
     if (injectionMode === "active" &&
         (event === "SessionStart" || event === "UserPromptSubmit") &&
         (event !== "SessionStart" || await readSessionStartInjection(resolve(runtimeRoot))) &&
@@ -86,6 +103,7 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
         event,
         projectId: result.projectId,
         sessionId: activeInput.session_id,
+        ...(activeInput.turn_id === undefined ? {} : { turnId: activeInput.turn_id }),
         ...(result.captured ? { eventId: result.eventId } : {}),
         ...(event === "UserPromptSubmit" ? { prompt: activeInput.prompt ?? "" } : {}),
         requestedAt: new Date().toISOString()
