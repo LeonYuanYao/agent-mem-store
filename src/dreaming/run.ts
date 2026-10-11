@@ -506,7 +506,9 @@ async function stepRun(
         database.prepare("UPDATE dream_items SET tier = ?, tier_reason = ?, scope = ? WHERE item_id = ?").run(tier, reason, scope, String(item.item_id));
         counts[`tier_${tier}`] = (counts[`tier_${tier}`] ?? 0) + 1;
       }
-      advance(database, run, "report", now, { ...run.stats, items: items.length, ...counts });
+      // Re-tiering replaces earlier tier counts instead of accumulating them.
+      const previous = Object.fromEntries(Object.entries(run.stats).filter(([key]) => !key.startsWith("tier_")));
+      advance(database, run, "report", now, { ...previous, items: items.length, ...counts });
       return `tiered ${String(items.length)}`;
     }
     case "report": {
