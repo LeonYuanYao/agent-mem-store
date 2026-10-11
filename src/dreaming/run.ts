@@ -15,7 +15,8 @@ import { presearch, renderPresearch } from "./presearch.js";
 import { buildRepoMap, repoMapSchema, type RepoMap } from "./repo-map.js";
 import { writeDreamReport } from "./report.js";
 import { readSessionStream } from "./stream.js";
-import { tierOf } from "./tier.js";
+import { relevantRepositories, tierOf } from "./tier.js";
+import { routePath } from "./repo-map.js";
 
 const retryBackoffMilliseconds = 5 * 60_000;
 const maximumChunkAttempts = 3;
@@ -454,21 +455,29 @@ async function stepRun(
       return `defended ${String(items.length)}`;
     }
     case "tier": {
+      const map = await loadMap(runtimeRoot, run.runId);
       const items = database.prepare("SELECT * FROM dream_items WHERE run_id = ?").all(run.runId);
       const counts: Record<string, number> = {};
       for (const item of items) {
         const verdict = parseJson<Verdict | undefined>(item.verdict_json, undefined);
         const defense = parseJson<{ final_verdict?: string; branch?: string } | undefined>(item.defense_json, undefined);
         const finalVerdict = defense?.final_verdict ?? verdict?.verdict ?? "inconclusive";
+        const scope = verdict?.scope ?? (item.scope === "global" ? "global" : "project");
         const { tier, reason } = tierOf({
+          scope,
           verdict: finalVerdict,
           durability: verdict?.durability ?? "long_term",
           branch: defense?.branch || verdict?.branch || "",
           explicitUser: item.explicit_user === 1,
           sessionCount: parseJson<string[]>(item.session_ids_json, []).length,
-          sourceBranches: parseJson<SourceBranch[]>(item.source_branches_json, [])
+          sourceBranches: parseJson<SourceBranch[]>(item.source_branches_json, []),
+          relevantRepos: relevantRepositories({
+            evidence: verdict?.evidence ?? [],
+            sourcePathRepos: map === undefined ? [] : parseJson<string[]>(item.source_paths_json, [])
+              .flatMap((path) => { const routed = routePath(map, path); return routed === undefined ? [] : [routed.repo.path]; }),
+            presearch: parseJson(item.presearch_json, [])
+          })
         });
-        const scope = verdict?.scope ?? String(item.scope);
         database.prepare("UPDATE dream_items SET tier = ?, tier_reason = ?, scope = ? WHERE item_id = ?").run(tier, reason, scope, String(item.item_id));
         counts[`tier_${tier}`] = (counts[`tier_${tier}`] ?? 0) + 1;
       }

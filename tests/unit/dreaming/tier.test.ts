@@ -1,7 +1,8 @@
 import { expect, test } from "vitest";
 
-import { tierOf, type TierInput } from "../../../src/dreaming/tier.js";
+import { relevantRepositories, tierOf, type TierInput } from "../../../src/dreaming/tier.js";
 import { identifiersOf } from "../../../src/dreaming/presearch.js";
+import { codexArguments } from "../../../src/dreaming/model.js";
 
 const base: TierInput = {
   verdict: "inconclusive", durability: "long_term", branch: "", explicitUser: false, sessionCount: 1, sourceBranches: []
@@ -36,4 +37,35 @@ test("pre-search identifiers come from code spans and identifier-shaped words", 
   expect(identifiersOf("`eh.preview.setVideo` reloads; use `start_preview_record` not recordStart")).toEqual(
     ["eh.preview.setVideo", "start_preview_record", "setVideo", "recordStart"]);
   expect(identifiersOf("用户偏好先做轻量化尝试")).toEqual([]);
+});
+
+test("verification keeps the command tools Codex needs; extraction disables them", () => {
+  const common = { effort: "high", work: "/w", schemaPath: "/w/s.json", outputPath: "/w/o.json" };
+  const verify = codexArguments({ ...common, shell: true });
+  const extract = codexArguments({ ...common, shell: false });
+  for (const feature of ["shell_tool", "unified_exec", "code_mode_host"]) {
+    expect(verify.join(" ")).not.toContain(`--disable ${feature}`);
+    expect(extract.join(" ")).toContain(`--disable ${feature}`);
+  }
+  expect(verify).toEqual(expect.arrayContaining(["--sandbox", "read-only", "--ephemeral", "--ignore-user-config"]));
+  expect(verify.join(" ")).toContain("--disable plugins");
+});
+
+test("only the branches of repositories the item is about scope it", () => {
+  const sourceBranches = [
+    { repo: ".", branch: "merge/feat-runner", mergedIntoBaseline: false },
+    { repo: "tteh", branch: "develop", mergedIntoBaseline: true }
+  ];
+  const relevantRepos = relevantRepositories({
+    evidence: ["tteh@8b9c210dcd [R1-implementation 2026-09-25] src/preview.ts:3 setVideo", "host-skill [R2-host-skill] ~/x.md:1:y"],
+    sourcePathRepos: [],
+    presearch: [{ baseline: ["tteh/src/OrionSDK:2 files"], ownerBranches: [] }]
+  });
+  expect(relevantRepos).toEqual(["tteh"]);
+  expect(relevantRepositories({ evidence: [], sourcePathRepos: [], presearch: [{ baseline: [".:1 files"], ownerBranches: ["tteh@feat/x"] }] }))
+    .toEqual([".", "tteh"]);
+  expect(tierOf({ ...base, explicitUser: true, scope: "global", sourceBranches }).tier).toBe("inject");
+  expect(tierOf({ ...base, explicitUser: true, sourceBranches, relevantRepos })).toEqual({ tier: "inject", reason: "explicit_user" });
+  expect(tierOf({ ...base, explicitUser: true, sourceBranches }).tier).toBe("branch");
+  expect(tierOf({ ...base, explicitUser: true, sourceBranches, relevantRepos: ["."] }).tier).toBe("branch");
 });

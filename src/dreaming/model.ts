@@ -195,6 +195,22 @@ export interface CodexDreamModelOptions {
   readonly timeoutMilliseconds?: number;
 }
 
+/**
+ * `codex exec` arguments. Shell-enabled calls (verification, defense) keep the
+ * command tools Codex needs to run msverify; every other capability stays off.
+ */
+export function codexArguments(request: {
+  readonly effort: string; readonly shell: boolean; readonly work: string; readonly schemaPath: string; readonly outputPath: string;
+}): string[] {
+  const args = ["exec", "--model", lunaModelIdentity, "-c", `model_reasoning_effort="${request.effort}"`, "-c", 'service_tier="default"',
+    "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--color", "never"];
+  const disabled = ["apps", "plugins", "memories", "multi_agent", "image_generation", "browser_use", "in_app_browser",
+    "browser_use_external", "browser_use_full_cdp_access", ...(request.shell ? [] : ["shell_tool", "unified_exec", "code_mode_host"])];
+  for (const feature of disabled) args.push("--disable", feature);
+  args.push("--cd", request.work, "--output-schema", request.schemaPath, "-o", request.outputPath, "-");
+  return args;
+}
+
 export class DreamModelError extends Error {
   public readonly code: string;
 
@@ -223,13 +239,7 @@ export class CodexDreamModel implements DreamModel {
       const schemaPath = join(work, "schema.json");
       const outputPath = join(work, "out.json");
       await writeFile(schemaPath, JSON.stringify(jsonSchemaOf(schema)), { mode: 0o600 });
-      const args = ["exec", "--model", lunaModelIdentity, "-c", `model_reasoning_effort="${effort}"`, "-c", 'service_tier="default"',
-        "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--color", "never"];
-      for (const feature of ["apps", "plugins", "memories", "multi_agent", "image_generation", "browser_use", "in_app_browser",
-        "browser_use_external", "browser_use_full_cdp_access", "code_mode_host", ...(shell ? [] : ["shell_tool", "unified_exec"])]) {
-        args.push("--disable", feature);
-      }
-      args.push("--cd", work, "--output-schema", schemaPath, "-o", outputPath, "-");
+      const args = codexArguments({ effort, shell, work, schemaPath, outputPath });
       const environment: Record<string, string> = {};
       for (const name of passthroughEnvironment) {
         const value = process.env[name];
