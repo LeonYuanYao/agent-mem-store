@@ -114,7 +114,7 @@ memstore dream run --project-id PROJECT_ID
 memstore dream status
 ```
 
-模型调用通过 Codex：提炼 Luna medium，验证 Luna high（可用 `extract_effort`、`verify_effort` 调整）。其他选项见 [SPEC](SPEC.md) 的 Nightly dreaming 一节和 [ADR-0147](docs/adr/0147-nightly-dreaming.md)。
+模型调用通过 Codex（`codex_home`，默认 `~/.codex`，与旧的 Luna 适配器相互独立，开启 dreaming 不会重新启动旧的治理和质量任务）：提炼 Luna medium，验证 Luna high（可用 `extract_effort`、`verify_effort`、`verify_parallelism` 调整）。其他选项见 [SPEC](SPEC.md) 的 Nightly dreaming 一节和 [ADR-0147](docs/adr/0147-nightly-dreaming.md)。
 
 ### Skills 与 MCP 工具
 

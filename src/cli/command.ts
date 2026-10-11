@@ -499,28 +499,24 @@ async function configuredWorkerAdapters(
     if (!(error instanceof EmbeddingArtifactMismatchError)) throw error;
     throw new MemStoreCommandError("embedding_artifact_mismatch", error.message);
   }
-  const dreamModel = codexHome === undefined
-    ? undefined
-    : (configuration: DreamingConfiguration): DreamModel => new CodexDreamModel({
+  const dreamModel = (configuration: DreamingConfiguration): DreamModel => new CodexDreamModel({
         codexExecutable: process.env.MEMSTORE_CODEX_EXECUTABLE ?? "codex",
-        codexHome: resolve(codexHome),
+        codexHome: resolve(codexHome ?? configuration.codex_home.replace(/^~(?=\/|$)/u, homedir())),
         isolatedHome: resolve(runtimeRoot, "luna-home"),
         temporaryRoot: resolve(runtimeRoot, "tmp"),
         extractEffort: configuration.extract_effort,
         verifyEffort: configuration.verify_effort
       });
-  const adapters = luna === undefined && notifierExecutable === undefined && embedding === undefined
-    ? undefined
-    : {
+  const adapters = {
     ...(luna === undefined ? {} : { luna, governance: luna, quality: luna }),
-    ...(dreamModel === undefined ? {} : { dreamModel }),
+    dreamModel,
     ...(embedding === undefined ? {} : { embedding: embedding.adapter }),
     ...(notifierExecutable === undefined
       ? {}
       : { notifier: new SwiftNotifierAdapter(resolve(notifierExecutable)) })
   };
   return {
-    ...(adapters === undefined ? {} : { adapters }),
+    adapters,
     dispose: async () => embedding?.dispose()
   };
 }
@@ -953,7 +949,7 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
     const configured = await configuredWorkerAdapters(location.runtimeRoot, { includeEmbedding: false });
     try {
       const factory = configured.adapters?.dreamModel;
-      if (factory === undefined) throw new MemStoreCommandError("dream_model_unavailable", "Dreaming requires MEMSTORE_LUNA_CODEX_HOME.");
+      if (factory === undefined) throw new MemStoreCommandError("dream_model_unavailable", "Dreaming model is unavailable.");
       const configuration = await readDreamingConfiguration(location.runtimeRoot);
       const runId = await startDreamRun({ runtimeRoot: location.runtimeRoot, projectId, now });
       const steps: string[] = [];

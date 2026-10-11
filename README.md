@@ -158,7 +158,7 @@ memstore dream run --project-id PROJECT_ID
 memstore dream status
 ```
 
-Model calls go through Codex: Luna medium for extraction, Luna high for verification (`extract_effort`, `verify_effort`). See the Nightly dreaming section of the [SPEC](SPEC.md) and [ADR-0147](docs/adr/0147-nightly-dreaming.md).
+Model calls go through Codex (`codex_home`, default `~/.codex`; independent of the legacy Luna adapter): Luna medium for extraction, Luna high for verification (`extract_effort`, `verify_effort`, `verify_parallelism`). See the Nightly dreaming section of the [SPEC](SPEC.md) and [ADR-0147](docs/adr/0147-nightly-dreaming.md).
 
 ### Skills and MCP tools
 
