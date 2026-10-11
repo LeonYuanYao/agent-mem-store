@@ -31,6 +31,10 @@ Owns scheduling order and adapter composition, not a second copy of each domain'
 Keep idle iterations low-write and protect foreground work. Open long-running turns are not automatically actionable batches. Respect leases, retry times and idempotency; success must follow persisted completion.
 
 Human-only injection mode stops new Hook capture, not existing background work.
+With `[dreaming].enabled`, captured events are handed to the nightly run: the Worker
+marks unclaimed pending events completed and skips per-turn distillation and Session
+consolidation, then schedules and advances one dream step per iteration without other
+model work. See [dreaming/README.md](../../src/dreaming/README.md).
 Continue importing the existing Inbox, distilling batches, consolidating sessions
 and evaluating Candidates under the normal retry and capacity policies. Generated
 Agent-derived memories remain stored but cannot enter automatic injection while

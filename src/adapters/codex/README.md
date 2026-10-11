@@ -23,7 +23,8 @@ matching session ID. Both formats are host implementation details; unknown
 identity skips automatic memory work with a body-free notice. No transcript or
 host metadata is retained.
 
-The CLI passes `captureEnabled: false` in human-only injection mode. The adapter
+The CLI passes `captureEnabled: false` in human-only injection mode unless
+`[dreaming].enabled` is true, because dreaming needs captured Sessions. The adapter
 returns `capture_disabled` without building or persisting an event. Only safe
 SessionStart/UserPromptSubmit input resolves a Project for foreground retrieval;
 other events and sensitive prompts return immediately. This path creates no

@@ -135,6 +135,31 @@ Automatic injection and explicit retrieval have different budgets. Use the
 managed `memstore-recall` Skill to search and read full memories when the injected
 context is insufficient; the automatic limits above are not explicit-search limits.
 
+### Nightly dreaming (shadow mode)
+
+Dreaming replaces per-turn distillation with a nightly run that extracts per Session, verifies against the repositories and tiers the result. It is off by default; enable it in machine-local `<runtime>/config.toml`:
+
+```toml
+[dreaming]
+enabled = true
+host_skill_roots = ["~/.agents/skills", "~/.codex/skills", "~/.claude/skills"]
+```
+
+When enabled:
+
+- New captured events go to dreaming instead of per-turn distillation and Session consolidation; queued Luna work still completes. Capture resumes even with `human_authored_only_injection`; injection authority is unchanged.
+- Each Project runs once a day after 03:00 (Asia/Shanghai) over Sessions that ended in the last 7 days: chunked extraction with tool output → merge per claim type → verification with `msverify`, which reads every repository at its baseline commit → a defense pass for negative verdicts → inject, branch, pool, review and drop tiers.
+- Shadow mode writes only reports under `<vault>/_MemStore/Dreams/` and runtime tables. **It never writes canonical Memory or changes injection.**
+
+Run once by hand and inspect runs:
+
+```sh
+memstore dream run --project-id PROJECT_ID
+memstore dream status
+```
+
+Model calls go through Codex: Luna medium for extraction, Luna high for verification (`extract_effort`, `verify_effort`). See the Nightly dreaming section of the [SPEC](SPEC.md) and [ADR-0147](docs/adr/0147-nightly-dreaming.md).
+
 ### Skills and MCP tools
 
 Setup manages three Skills:

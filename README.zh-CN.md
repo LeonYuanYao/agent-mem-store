@@ -91,6 +91,31 @@ SessionStart 背景注入**默认关闭**。如需启用，在 `<runtime>/config
 
 自动注入和显式检索使用不同预算。如果注入内容不足，可以使用受管的 `memstore-recall` Skill 搜索并阅读完整记忆；上述自动注入上限不适用于显式搜索。
 
+### 夜间 dreaming（影子模式）
+
+dreaming 用「每晚按会话提炼、对照仓库验证、分层」替代逐轮提炼。它默认关闭，在机器本地 `<runtime>/config.toml` 中开启：
+
+```toml
+[dreaming]
+enabled = true
+host_skill_roots = ["~/.agents/skills", "~/.codex/skills", "~/.claude/skills"]
+```
+
+开启后：
+
+- 新采集的事件交给 dreaming，不再进入逐轮提炼和 Session 汇总；已排队的 Luna 工作照常完成。即使开着 `human_authored_only_injection`，采集也会恢复，注入权限不变。
+- 每个项目每天 03:00（Asia/Shanghai）后跑一次，处理最近 7 天内已结束的会话：带工具输出分段提炼 → 按类型合并 → 用 `msverify` 只读对照各仓库的基准 commit 验证 → 对「推翻」类结论做辩护复核 → 分为注入、分支、可搜索池、复核、丢弃五层。
+- 影子模式只写 `<vault>/_MemStore/Dreams/` 下的报告和 Runtime 中的表，**不写正式记忆，也不改变注入**。
+
+手动试跑和查看状态：
+
+```sh
+memstore dream run --project-id PROJECT_ID
+memstore dream status
+```
+
+模型调用通过 Codex：提炼 Luna medium，验证 Luna high（可用 `extract_effort`、`verify_effort` 调整）。其他选项见 [SPEC](SPEC.md) 的 Nightly dreaming 一节和 [ADR-0147](docs/adr/0147-nightly-dreaming.md)。
+
 ### Skills 与 MCP 工具
 
 安装器管理三个 Skill：

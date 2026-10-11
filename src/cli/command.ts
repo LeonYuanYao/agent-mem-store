@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { readDreamingConfiguration, type DreamingConfiguration } from "../dreaming/config.js";
+import { CodexDreamModel, type DreamModel } from "../dreaming/model.js";
+import { inspectDreams, runNextDreamStep, startDreamRun } from "../dreaming/run.js";
 import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -496,10 +499,21 @@ async function configuredWorkerAdapters(
     if (!(error instanceof EmbeddingArtifactMismatchError)) throw error;
     throw new MemStoreCommandError("embedding_artifact_mismatch", error.message);
   }
+  const dreamModel = codexHome === undefined
+    ? undefined
+    : (configuration: DreamingConfiguration): DreamModel => new CodexDreamModel({
+        codexExecutable: process.env.MEMSTORE_CODEX_EXECUTABLE ?? "codex",
+        codexHome: resolve(codexHome),
+        isolatedHome: resolve(runtimeRoot, "luna-home"),
+        temporaryRoot: resolve(runtimeRoot, "tmp"),
+        extractEffort: configuration.extract_effort,
+        verifyEffort: configuration.verify_effort
+      });
   const adapters = luna === undefined && notifierExecutable === undefined && embedding === undefined
     ? undefined
     : {
     ...(luna === undefined ? {} : { luna, governance: luna, quality: luna }),
+    ...(dreamModel === undefined ? {} : { dreamModel }),
     ...(embedding === undefined ? {} : { embedding: embedding.adapter }),
     ...(notifierExecutable === undefined
       ? {}
@@ -926,6 +940,37 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       }),
       json: parsed.values.json
     };
+  }
+  if (command === "dream" && parsed.positionals[1] === "status") {
+    return { command: "dream.status", result: { runs: await inspectDreams(location.runtimeRoot) }, json: parsed.values.json };
+  }
+  if (command === "dream" && parsed.positionals[1] === "run") {
+    const projectId = parsed.values["project-id"];
+    if (projectId === undefined) throw new MemStoreCommandError("invalid_arguments", "dream run requires --project-id.");
+    if (parsed.values.preview) {
+      return { command: "dream.run", result: previewResult(["dream_run", "vault_dreams_report"], { project_id: projectId }), json: parsed.values.json };
+    }
+    const configured = await configuredWorkerAdapters(location.runtimeRoot, { includeEmbedding: false });
+    try {
+      const factory = configured.adapters?.dreamModel;
+      if (factory === undefined) throw new MemStoreCommandError("dream_model_unavailable", "Dreaming requires MEMSTORE_LUNA_CODEX_HOME.");
+      const configuration = await readDreamingConfiguration(location.runtimeRoot);
+      const runId = await startDreamRun({ runtimeRoot: location.runtimeRoot, projectId, now });
+      const steps: string[] = [];
+      for (let iteration = 0; iteration < 2_000; iteration += 1) {
+        const step = await runNextDreamStep({
+          runtimeRoot: location.runtimeRoot, vaultRoot: location.vaultRoot, now: new Date().toISOString(),
+          configuration: { ...configuration, enabled: true }, model: factory(configuration)
+        });
+        if (step.state === "idle") break;
+        steps.push(`${step.stage ?? "?"}:${step.state}:${step.detail ?? ""}`);
+        if (!parsed.values.json) process.stderr.write(`${steps.at(-1) ?? ""}\n`);
+        if (step.state === "failed" && step.runId === runId) break;
+      }
+      return { command: "dream.run", result: { run_id: runId, steps, runs: await inspectDreams(location.runtimeRoot, 1) }, json: parsed.values.json };
+    } finally {
+      await configured.dispose();
+    }
   }
   if (command === "worker" && parsed.positionals[1] === "once") {
     if (!parsed.values.preview) {
@@ -1613,7 +1658,7 @@ async function run(arguments_: readonly string[]): Promise<void> {
     }
     return;
   }
-  if (["archive", "restore", "purge-memory", "doctor", "vault", "worker", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
+  if (["archive", "restore", "purge-memory", "doctor", "vault", "worker", "dream", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
       (command === "operation" && arguments_[1] === "retry")) {
     const output = await runOperations(arguments_);
     writeResult(output.command, output.result, output.json);

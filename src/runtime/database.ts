@@ -362,6 +362,11 @@ const migrations: readonly Migration[] = [
     version: 66,
     name: "unified_model_recovery",
     path: new URL("../../migrations/0066-unified-model-recovery.sql", import.meta.url)
+  },
+  {
+    version: 67,
+    name: "dreaming",
+    path: new URL("../../migrations/0067-dreaming.sql", import.meta.url)
   }
 ];
 

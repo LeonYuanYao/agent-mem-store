@@ -30,7 +30,8 @@ const machineOwnedKeys = [
   "jev",
   "luna",
   "notifier",
-  "launch_agent"
+  "launch_agent",
+  "dreaming"
 ] as const;
 
 const memorySpaceCapacitySchema = z.object({
@@ -98,7 +99,8 @@ const machineSchema = z.object({
   jev: extensibleSectionSchema,
   luna: extensibleSectionSchema,
   notifier: extensibleSectionSchema,
-  launch_agent: extensibleSectionSchema
+  launch_agent: extensibleSectionSchema,
+  dreaming: extensibleSectionSchema
 });
 
 const retrievalIndexPolicySchema = z.object({

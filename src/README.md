@@ -41,6 +41,7 @@ The CLI and MCP delegate to application operations. SQLite stores durable work a
 | [memories](memories/README.md) | Defines shared category vocabulary, compact checks and portable numeric reference resolution. |
 | [vault](vault/README.md) | Owns canonical Memory files, portable project metadata, revision identity, manual-edit reconciliation and catalog synchronization. |
 | [worker](worker/README.md) | Drives capture import, distillation, candidate processing, quality, governance, retention, indexing and reminders. |
+| [dreaming](dreaming/README.md) | Nightly session-level extraction, repository verification and tiering; shadow mode reports only. |
 | [governance](governance/README.md) | Runs restartable scans that propose and apply evidence-supported changes to durable knowledge. |
 | [retrieval](retrieval/README.md) | Builds derived search snapshots, selects relevant memories and serves both explicit recall and automatic hook injection. |
 | [adapters](adapters/README.md) | Contains host-specific translations at the edge of MemStore; domain rules remain in shared modules. |

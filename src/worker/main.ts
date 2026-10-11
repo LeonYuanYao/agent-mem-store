@@ -76,6 +76,10 @@ import {
   type DuplicateAssessmentAdapter
 } from "../quality/duplicates.js";
 import { inspectBackgroundRecovery } from "./recovery-policy.js";
+import { readDreamingConfiguration, type DreamingConfiguration } from "../dreaming/config.js";
+import { handOffCaptureToDreaming } from "../dreaming/handoff.js";
+import type { DreamModel } from "../dreaming/model.js";
+import { runNextDreamStep, scheduleDueDreams } from "../dreaming/run.js";
 
 export interface WorkerAdapters {
   readonly luna?: LunaWorkerAdapter & CandidateAssessmentAdapter & HumanConflictAssessmentAdapter;
@@ -85,6 +89,8 @@ export interface WorkerAdapters {
   readonly embedding?: EmbeddingAdapter;
   readonly publishRetrievalSnapshot?: (snapshot: RetrievalSnapshot) => Promise<void>;
   readonly foregroundPressure?: () => boolean;
+  /** Builds the dreaming model for the current configuration; absent when Codex is not configured. */
+  readonly dreamModel?: (configuration: DreamingConfiguration) => DreamModel;
 }
 
 async function foregroundMemoryWorkExists(runtimeRoot: string, now: string): Promise<boolean> {
@@ -209,6 +215,11 @@ export async function runWorkerOnce(request: {
   }
   if (captureInbox.remainingCount > 0 && activities.length > 0) {
     return { state: "worked", activities };
+  }
+  const dreaming = await readDreamingConfiguration(request.runtimeRoot);
+  if (dreaming.enabled) {
+    const handedOff = await handOffCaptureToDreaming({ runtimeRoot: request.runtimeRoot, now });
+    if (handedOff > 0) activities.push(`dreaming:captured:${String(handedOff)}`);
   }
   const lifecycleRecovery = await recoverNextBlockedLifecycleOnlyBatch({
     runtimeRoot: request.runtimeRoot,
@@ -415,7 +426,8 @@ export async function runWorkerOnce(request: {
       ? { state: "idle" }
       : { state: "worked", activities };
   }
-  if (request.adapters?.luna !== undefined) {
+  // Dreaming replaces per-turn distillation and Session consolidation; queued Luna work still drains.
+  if (request.adapters?.luna !== undefined && !dreaming.enabled) {
     const prepared = await prepareNextDistillationBatch({
       runtimeRoot: request.runtimeRoot,
       maximumEvents: 64,
@@ -434,6 +446,8 @@ export async function runWorkerOnce(request: {
       activities.push(`consolidation:${consolidation.state}`);
       shouldRefreshReview = true;
     }
+  }
+  if (request.adapters?.luna !== undefined) {
     const luna = await runNextLunaWork({
       runtimeRoot: request.runtimeRoot,
       workerId: request.workerId,
@@ -562,6 +576,23 @@ export async function runWorkerOnce(request: {
       }
     } catch {
       activities.push("memory-quality:failed");
+    }
+  }
+  if (dreaming.enabled) {
+    const scheduled = await scheduleDueDreams({ runtimeRoot: request.runtimeRoot, now, configuration: dreaming });
+    if (scheduled.created.length > 0) activities.push(`dreaming:scheduled:${String(scheduled.created.length)}`);
+    // One bounded model step per idle iteration keeps foreground and maintenance work responsive.
+    const modelWorkThisIteration = activities.some((activity) =>
+      /^(luna|candidate|governance|human-conflict|memory-quality|memory-duplicates|retrieval-index):/u.test(activity));
+    if (request.adapters?.dreamModel !== undefined && !modelWorkThisIteration && request.adapters.foregroundPressure?.() !== true) {
+      const step = await runNextDreamStep({
+        runtimeRoot: request.runtimeRoot,
+        vaultRoot: request.vaultRoot,
+        now,
+        configuration: dreaming,
+        model: request.adapters.dreamModel(dreaming)
+      });
+      if (step.state !== "idle") activities.push(`dreaming:${step.stage ?? "step"}:${step.state}`);
     }
   }
   if (shouldRefreshReview) {

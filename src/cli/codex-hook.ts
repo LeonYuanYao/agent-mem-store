@@ -1,3 +1,4 @@
+import { readDreamingConfiguration } from "../dreaming/config.js";
 import { resolve } from "node:path";
 import { text as consumeText } from "node:stream/consumers";
 import { z } from "zod";
@@ -71,7 +72,9 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
     const result = await handleCodexHook({
       runtimeRoot: resolve(runtimeRoot),
       input: { ...input, hook_event_name: event },
-      captureEnabled: !await readHumanAuthoredOnlyInjection(resolve(runtimeRoot)),
+      // Dreaming needs captured sessions even while automatic injection is limited to Human knowledge.
+      captureEnabled: !await readHumanAuthoredOnlyInjection(resolve(runtimeRoot)) ||
+        (await readDreamingConfiguration(resolve(runtimeRoot))).enabled,
       progress
     });
     if (watchdogExpired()) return;

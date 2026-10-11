@@ -631,6 +631,13 @@ See [ADR-0038](./docs/adr/0038-use-progressive-explicit-recall-with-warnings.md)
 
 See [ADR-0086](./docs/adr/0086-install-and-operate-memstore-through-owned-idempotent-surfaces.md) for the canonical operational command families and managed Codex integration boundary, and [ADR-0127](./docs/adr/0127-install-through-a-preview-first-friendly-setup.md) for the first-install orchestration.
 
+## Nightly dreaming
+
+- `[dreaming]` in machine-local `config.toml` is disabled by default. When enabled, captured events are handed to dreaming and skip per-turn distillation and Session consolidation; already queued Luna work still drains. Capture continues even with `human_authored_only_injection = true`; injection authority is unchanged.
+- One run per Project and local calendar day starts after `hour` (default 03:00, `timezone` default Asia/Shanghai). Eligible Sessions ended (SessionEnd or `inactivity_minutes` without events) within `lookback_days`; each Session is extracted by exactly one run, at most `max_sessions_per_run` per run. Projects whose roots are temporary or no longer exist are not dreamed.
+- Extraction reads Session chunks of `chunk_characters` that keep tool results (head and tail). Merge runs per claim type. Verification uses the Codex model with a read-only sandbox, shell enabled only for `msverify`, which reads every repository at its baseline commit; negative verdicts get a defense pass. Tiers: inject (confirmed, explicit user statement, or two or more Sessions), branch (branch-scoped, or from an unmerged branch without baseline confirmation), pool, review (contradicted or stale) and drop (episodic or already in auto-loaded guidance).
+- Shadow mode writes `_MemStore/Dreams/*.md` and runtime tables only. It never writes canonical Memory or changes injection. Apply mode is not available. See [ADR-0147](./docs/adr/0147-nightly-dreaming.md).
+
 ## Distillation model
 
 - The model for new background Luna invocations is `gpt-6-luna`. Persisted `gpt-5.6-luna` assessments remain readable with their original identity; changing the model does not rerun or relabel historical results.
