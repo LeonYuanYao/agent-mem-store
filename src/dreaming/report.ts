@@ -41,7 +41,7 @@ export async function writeDreamReport(request: {
   const run = request.database.prepare("SELECT scheduled_for, stats_json, mode FROM dream_runs WHERE run_id = ?").get(request.runId);
   const stats = parse<Record<string, number>>(run?.stats_json, {});
   const items = request.database.prepare(
-    "SELECT statement, tier, tier_reason, scope, verdict_json, defense_json, session_ids_json FROM dream_items WHERE run_id = ? ORDER BY tier, claim_type"
+    "SELECT statement, refined_statement, tier, tier_reason, scope, verdict_json, defense_json, session_ids_json FROM dream_items WHERE run_id = ? ORDER BY tier, claim_type"
   ).all(request.runId);
   const lines = [
     `# Dreams · ${request.now.slice(0, 10)}`,
@@ -60,7 +60,13 @@ export async function writeDreamReport(request: {
       const verdict = parse<{ verdict?: string; evidence?: string[]; reason?: string }>(item.verdict_json, {});
       const defense = parse<{ decision?: string; final_verdict?: string; reason?: string } | undefined>(item.defense_json, undefined);
       const sessions = parse<string[]>(item.session_ids_json, []).length;
-      lines.push(`- ${escapeLine(String(item.statement))}`);
+      // The refined statement is what dreaming would keep; the original is shown for review.
+      if (typeof item.refined_statement === "string") {
+        lines.push(`- ${escapeLine(item.refined_statement)}`);
+        lines.push(`  - 收窄前：${escapeLine(String(item.statement))}`);
+      } else {
+        lines.push(`- ${escapeLine(String(item.statement))}`);
+      }
       lines.push(`  - ${String(item.tier_reason)} · verdict: ${verdict.verdict ?? "-"}${defense === undefined ? "" : ` → defense ${defense.decision ?? "-"}: ${defense.final_verdict ?? "-"}`}` +
         ` · scope: ${String(item.scope)} · sessions: ${String(sessions)}`);
       for (const evidence of (verdict.evidence ?? []).slice(0, 2)) lines.push(`  - 证据：${escapeLine(evidence).slice(0, 240)}`);

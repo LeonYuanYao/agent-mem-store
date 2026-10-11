@@ -386,7 +386,7 @@ async function stepRun(
       const items = database.prepare(
         `SELECT item_id, statement, check_hints_json, source_paths_json, presearch_json, first_seen_at FROM dream_items
          WHERE run_id = ? AND verdict_json IS NULL ORDER BY item_id LIMIT ?`
-      ).all(run.runId, configuration.verify_batch_size);
+      ).all(run.runId, configuration.verify_batch_size * configuration.verify_parallelism);
       if (items.length === 0) {
         advance(database, run, "defend", now);
         return "verify_complete";
@@ -395,36 +395,61 @@ async function stepRun(
         for (const item of items) {
           database.prepare("UPDATE dream_items SET verdict_json = ? WHERE item_id = ?").run(json({
             id: String(item.item_id), claim_type: "external_system", durability: "long_term", scope: "project", subsystem: "",
-            verdict: "not_repo_verifiable", branch: "", evidence: [], reason: "Project has no Git repository to verify against."
+            verdict: "not_repo_verifiable", branch: "", evidence: [], reason: "Project has no Git repository to verify against.", refined_statement: ""
           } satisfies Verdict), String(item.item_id));
         }
         return `unverifiable ${String(items.length)}`;
       }
-      const aliases = new Map(items.map((item, position) => [`V${String(position + 1)}`, item]));
-      const claims = [...aliases].map(([alias, item]) => {
-        const hints = parseJson<string[]>(item.check_hints_json, []);
-        const paths = parseJson<string[]>(item.source_paths_json, []);
-        return {
-          id: alias,
-          text: String(item.statement) +
-            (hints.length > 0 ? `（检索提示：${hints.join(", ")}）` : "") +
-            renderPresearch(parseJson(item.presearch_json, [])) +
-            (paths.length > 0 ? `（来源线索：这条记忆产生时 agent 读过这些文件，可优先查看：${paths.join(", ")}）` : ""),
-          created_at: String(item.first_seen_at).slice(0, 10)
-        };
-      });
       const tool = join(runDirectory(runtimeRoot, run.runId), "msverify");
-      const { results, usage } = await request.model.verify({ tool, repoMap: new EvidenceReader(map).map().join("\n"), claims });
-      for (const [alias, item] of aliases) {
-        const result = results.find((candidate) => candidate.id === alias);
-        const verdict: Verdict = result ?? {
-          id: alias, claim_type: "code_state", durability: "long_term", scope: "project", subsystem: "",
-          verdict: "inconclusive", branch: "", evidence: [], reason: "verifier_omitted"
-        };
-        database.prepare("UPDATE dream_items SET verdict_json = ? WHERE item_id = ?").run(json({ ...verdict, id: String(item.item_id) }), String(item.item_id));
+      const repoMap = new EvidenceReader(map).map().join("\n");
+      const batches: (typeof items)[] = [];
+      for (let start = 0; start < items.length; start += configuration.verify_batch_size) {
+        batches.push(items.slice(start, start + configuration.verify_batch_size));
       }
-      advance(database, run, "verify", now, addStats(run, { verify_calls: 1, verify_tokens: usage.tokens }));
-      return `verified ${String(items.length)}`;
+      // Batches run concurrently; a failed batch leaves its items for the next step.
+      const settled = await Promise.allSettled(batches.map(async (batch) => {
+        const aliases = new Map(batch.map((item, position) => [`V${String(position + 1)}`, item]));
+        const claims = [...aliases].map(([alias, item]) => {
+          const hints = parseJson<string[]>(item.check_hints_json, []);
+          const paths = parseJson<string[]>(item.source_paths_json, []);
+          return {
+            id: alias,
+            text: String(item.statement) +
+              (hints.length > 0 ? `（检索提示：${hints.join(", ")}）` : "") +
+              renderPresearch(parseJson(item.presearch_json, [])) +
+              (paths.length > 0 ? `（来源线索：这条记忆产生时 agent 读过这些文件，可优先查看：${paths.join(", ")}）` : ""),
+            created_at: String(item.first_seen_at).slice(0, 10)
+          };
+        });
+        const { results, usage } = await request.model.verify({ tool, repoMap, claims });
+        return { aliases, results, usage };
+      }));
+      let verified = 0;
+      let tokens = 0;
+      let calls = 0;
+      let failure: unknown;
+      for (const outcome of settled) {
+        if (outcome.status === "rejected") {
+          failure = outcome.reason;
+          continue;
+        }
+        calls += 1;
+        tokens += outcome.value.usage.tokens;
+        for (const [alias, item] of outcome.value.aliases) {
+          const result = outcome.value.results.find((candidate) => candidate.id === alias);
+          const verdict: Verdict = result ?? {
+            id: alias, claim_type: "code_state", durability: "long_term", scope: "project", subsystem: "",
+            verdict: "inconclusive", branch: "", evidence: [], reason: "verifier_omitted", refined_statement: ""
+          };
+          const refined = verdict.refined_statement.trim();
+          database.prepare("UPDATE dream_items SET verdict_json = ?, refined_statement = ? WHERE item_id = ?")
+            .run(json({ ...verdict, id: String(item.item_id) }), refined === "" ? null : refined, String(item.item_id));
+          verified += 1;
+        }
+      }
+      advance(database, run, "verify", now, addStats(run, { verify_calls: calls, verify_tokens: tokens }));
+      if (failure !== undefined) throw failure instanceof Error ? failure : new Error("verification batch failed");
+      return `verified ${String(verified)}`;
     }
     case "defend": {
       const map = await loadMap(runtimeRoot, run.runId);

@@ -72,7 +72,8 @@ function fakeModel(log: string[]): DreamModel {
           : claim.text.startsWith(statements.wrong) ? "contradicted"
           : claim.text.startsWith(statements.preference) ? "not_repo_verifiable" : "inconclusive";
         return { id: claim.id, claim_type: "code_state", durability: claim.text.startsWith(statements.oneOff) ? "episodic" : "long_term",
-          scope: "project", subsystem: "preview", verdict, branch: "", evidence: ["clone@abc [R1-implementation 2026-01-01] src/preview.ts:1"], reason: "test" };
+          scope: "project", subsystem: "preview", verdict, branch: "", evidence: ["clone@abc [R1-implementation 2026-01-01] src/preview.ts:1"], reason: "test",
+          refined_statement: claim.text.startsWith(statements.code) ? "TTEH 的 `setVideo` 在预览中调用 `reloadEffect` 重新加载特效。" : "" };
       }) });
     },
     defend(request) {
@@ -143,7 +144,8 @@ test("a dream run extracts, merges, verifies, defends and tiers a Session withou
   const reports = await readdir(join(vaultRoot, "_MemStore", "Dreams"));
   expect(reports).toHaveLength(1);
   const report = await readFile(join(vaultRoot, "_MemStore", "Dreams", reports[0] ?? ""), "utf8");
-  expect(report).toContain(statements.code);
+  expect(report).toContain("TTEH 的 `setVideo` 在预览中调用 `reloadEffect` 重新加载特效。");
+  expect(report).toContain(`收窄前：${statements.code}`);
   expect(report).toContain("需要复核");
   await expect(access(join(vaultRoot, "Memories"))).rejects.toThrow();
 

@@ -46,7 +46,8 @@ export const verdictSchema = z.object({
   verdict: z.enum(verdicts),
   branch: z.string(),
   evidence: z.array(z.string()),
-  reason: z.string()
+  reason: z.string(),
+  refined_statement: z.string()
 });
 export type Verdict = z.infer<typeof verdictSchema>;
 const verifySchema = z.object({ results: z.array(verdictSchema) });
@@ -161,6 +162,7 @@ ${repoMap}
 5. scope：通用工具知识（飞书、lark-cli、git、Codex 等，与本项目无关）填 global，其余 project。durability：一次性信息填 episodic。
 6. 若说法后附有「预检索」：它是本地程序对标识符的确定性搜索结果。标识符只在未合入分支出现而基准中没有时，强烈提示 branch_scoped，需用 branch-grep / show 确认；若附有「来源线索」，优先查看这些文件。
 7. evidence 每条形如 "repo@sha [等级 日期] path:line 简短引用"；reason 一句话；branch 不适用时填空字符串。每条说法最多 6 次工具调用。
+8. refined_statement：若证据支持核心内容，但原说法过度概括（把推荐做法说成必须、漏掉适用条件、范围过宽，或个别细节与证据不符），给出按证据收窄后的完整改写：保留原语言、子系统、条件和否定表述，不加入证据之外的新事实；verdict 按改写后的说法判定。说法准确无需修改，或证据不足以改写时，填空字符串。
 
 待验证说法（JSON；created_at 是记忆形成时间）：
 ${claims}

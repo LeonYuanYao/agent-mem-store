@@ -18,6 +18,7 @@ export const dreamingConfigurationSchema = z.object({
   extract_effort: reasoningEffortSchema.default("medium"),
   verify_effort: reasoningEffortSchema.default("high"),
   verify_batch_size: z.number().int().min(1).max(8).default(3),
+  verify_parallelism: z.number().int().min(1).max(6).default(3),
   fresh_days: z.number().int().min(1).max(90).default(7),
   // Machine-local agent skill directories searched as auto-loaded guidance ("~" expands to the home directory).
   host_skill_roots: z.array(z.string().min(1)).max(10).default([])

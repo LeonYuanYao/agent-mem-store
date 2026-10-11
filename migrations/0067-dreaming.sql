@@ -64,6 +64,7 @@ CREATE TABLE dream_items (
   item_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES dream_runs(run_id),
   statement TEXT NOT NULL,
+  refined_statement TEXT,
   claim_type TEXT NOT NULL,
   scope TEXT NOT NULL CHECK (scope IN ('project', 'global')),
   member_ids_json TEXT NOT NULL,
