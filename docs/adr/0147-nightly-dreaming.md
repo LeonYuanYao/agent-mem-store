@@ -41,3 +41,16 @@ The first release is shadow-only: it writes a Vault report and runtime tables
 and never writes canonical Memory. Apply mode, retrieval of the branch and pool
 tiers, and a Claude Code capture adapter are separate decisions after reviewing
 shadow reports.
+
+## Validation on a copy of live data
+
+A shadow run on a read-only copy of the live runtime (6 Sessions, 12 chunks,
+61 items) was checked by the gold reviewer. The first run exposed two defects:
+verification disabled the code-mode host Codex needs to run commands, and a
+workspace checked out on a feature branch scoped knowledge of nested
+repositories on their baselines. After fixing both and letting the verifier
+narrow over-generalized claims (`refined_statement`), the inject tier held 31
+items: 19 correct, 11 correct and already documented, 1 partially wrong, none
+wrong or branch-only (before refinement: 6 of 28 partially wrong). The run used
+about 1.7M tokens; verification runs batches concurrently
+(`verify_parallelism`).
