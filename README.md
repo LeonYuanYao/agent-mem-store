@@ -151,6 +151,8 @@ When enabled:
 - Each Project runs once a day after 03:00 (Asia/Shanghai) over Sessions that ended in the last 7 days: chunked extraction with tool output → merge per claim type → verification with `msverify`, which reads every repository at its baseline commit → a defense pass for negative verdicts → inject, branch, pool, review and drop tiers.
 - Shadow mode writes only reports under `<vault>/_MemStore/Dreams/` and runtime tables. **It never writes canonical Memory or changes injection.**
 
+With dreaming enabled, Claude Code sessions can be captured too, so Codex and Claude Code share one store (capture only for now, no injection): run `node <repo>/dist/cli/hook.js claude <Event>` with `MEMSTORE_RUNTIME_ROOT` from the SessionStart, UserPromptSubmit, PostToolUse, Stop and SessionEnd hooks in `~/.claude/settings.json`.
+
 Run once by hand and inspect runs:
 
 ```sh

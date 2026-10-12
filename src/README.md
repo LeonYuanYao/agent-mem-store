@@ -46,6 +46,7 @@ The CLI and MCP delegate to application operations. SQLite stores durable work a
 | [retrieval](retrieval/README.md) | Builds derived search snapshots, selects relevant memories and serves both explicit recall and automatic hook injection. |
 | [adapters](adapters/README.md) | Contains host-specific translations at the edge of MemStore; domain rules remain in shared modules. |
 | [adapters/codex](adapters/codex/README.md) | Maps supported Codex events into project-scoped, durable capture and bounded session evidence. |
+| [adapters/claude](adapters/claude/README.md) | Captures Claude Code sessions for dreaming (capture only, no injection). |
 | [adapters/macos](adapters/macos/README.md) | Implements the notifier port used by reminder delivery. |
 | [retrieval/embeddings](retrieval/embeddings/README.md) | Loads configured embedding artifacts and provides normalized vectors for index building and query retrieval. |
 

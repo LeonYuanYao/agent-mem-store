@@ -45,6 +45,8 @@ export interface CodexHookRequest {
   readonly receivedAt?: string;
   readonly progress?: CaptureProgress;
   readonly captureEnabled?: boolean;
+  /** Host agent; Claude Code hooks share this mapping for capture. */
+  readonly agent?: "codex" | "claude";
 }
 
 export type CodexHookResult =
@@ -165,14 +167,14 @@ function hookPayload(input: z.infer<typeof hookInputSchema>): unknown {
   return { reason: input.reason ?? "other" };
 }
 
-function hookIdentity(input: z.infer<typeof hookInputSchema>): {
+function hookIdentity(input: z.infer<typeof hookInputSchema>, agent: "codex" | "claude"): {
   readonly eventId: string;
   readonly deduplicationKey: string;
 } {
   const stableOccurrenceId = input.tool_use_id ?? input.turn_id;
   if (stableOccurrenceId === undefined) {
-    const eventId = `msevent_codex_${randomUUID()}`;
-    return { eventId, deduplicationKey: `codex:${eventId}` };
+    const eventId = `msevent_${agent}_${randomUUID()}`;
+    return { eventId, deduplicationKey: `${agent}:${eventId}` };
   }
   const digest = createHash("sha256")
     .update(input.session_id)
@@ -181,10 +183,10 @@ function hookIdentity(input: z.infer<typeof hookInputSchema>): {
     .update("\0")
     .update(stableOccurrenceId)
     .digest("hex");
-  const eventId = `msevent_codex_${digest.slice(0, 32)}`;
+  const eventId = `msevent_${agent}_${digest.slice(0, 32)}`;
   return {
     eventId,
-    deduplicationKey: `codex:${input.session_id}:${input.hook_event_name}:${stableOccurrenceId}`
+    deduplicationKey: `${agent}:${input.session_id}:${input.hook_event_name}:${stableOccurrenceId}`
   };
 }
 
@@ -231,12 +233,13 @@ export async function handleCodexHook(
       return { continue: true, captured: false, state: "capture_disabled",
         ...(resolvedProjectId === undefined ? {} : { projectId: resolvedProjectId }) };
     }
-    const identity = hookIdentity(input);
+    const agent = request.agent ?? "codex";
+    const identity = hookIdentity(input, agent);
     const event: CaptureEvent = {
       schemaVersion: 1,
       eventId: identity.eventId,
       deduplicationKey: identity.deduplicationKey,
-      agent: "codex",
+      agent,
       eventKind: input.hook_event_name,
       occurredAt,
       sessionId: input.session_id,

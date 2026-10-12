@@ -107,6 +107,8 @@ host_skill_roots = ["~/.agents/skills", "~/.codex/skills", "~/.claude/skills"]
 - 每个项目每天 03:00（Asia/Shanghai）后跑一次，处理最近 7 天内已结束的会话：带工具输出分段提炼 → 按类型合并 → 用 `msverify` 只读对照各仓库的基准 commit 验证 → 对「推翻」类结论做辩护复核 → 分为注入、分支、可搜索池、复核、丢弃五层。
 - 影子模式只写 `<vault>/_MemStore/Dreams/` 下的报告和 Runtime 中的表，**不写正式记忆，也不改变注入**。
 
+开启 dreaming 后，也可以采集 Claude Code 会话，让 Codex 和 Claude Code 共用同一个记忆库（目前只采集，不注入）。在 `~/.claude/settings.json` 的 SessionStart、UserPromptSubmit、PostToolUse、Stop、SessionEnd hook 中运行 `node <repo>/dist/cli/hook.js claude <Event>`，并设置 `MEMSTORE_RUNTIME_ROOT`。
+
 手动试跑和查看状态：
 
 ```sh
