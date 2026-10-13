@@ -16,7 +16,7 @@ import { presearch, renderPresearch } from "./presearch.js";
 import { buildRepoMap, repoMapSchema, temporaryRootPattern, type RepoMap } from "./repo-map.js";
 import { dreamsDirectoryName, overviewFileName, writeDreamOverview, writeDreamReport } from "./report.js";
 import { readSessionStream } from "./stream.js";
-import { relevantRepositories, tierOf } from "./tier.js";
+import { isCatchAllRoot, relevantRepositories, tierOf } from "./tier.js";
 import { routePath } from "./repo-map.js";
 
 const retryBackoffMilliseconds = 5 * 60_000;
@@ -525,6 +525,9 @@ async function stepRun(
     }
     case "tier": {
       const map = await loadMap(runtimeRoot, run.runId);
+      const roots = database.prepare("SELECT canonical_root FROM project_roots WHERE project_id = ?").all(run.projectId)
+        .map((row) => String(row.canonical_root));
+      const catchAllProject = roots.length > 0 && roots.every((root) => isCatchAllRoot(root, homedir()));
       const items = database.prepare("SELECT * FROM dream_items WHERE run_id = ?").all(run.runId);
       const counts: Record<string, number> = {};
       for (const item of items) {
@@ -534,6 +537,7 @@ async function stepRun(
         const scope = verdict?.scope ?? (item.scope === "global" ? "global" : "project");
         const { tier, reason } = tierOf({
           scope,
+          catchAllProject,
           verdict: finalVerdict,
           durability: verdict?.durability ?? "long_term",
           branch: defense?.branch || verdict?.branch || "",

@@ -33,7 +33,8 @@ const reasonLabels: Record<string, string> = {
   contradicted: "与仓库现状矛盾",
   stale: "已过时",
   episodic: "一次性信息",
-  already_in_autoloaded_docs: "已写在自动加载的文档/skill 中"
+  already_in_autoloaded_docs: "已写在自动加载的文档/skill 中",
+  catch_all_project: "主目录兜底项目只保留全局知识"
 };
 
 const verdictLabels: Record<string, string> = {

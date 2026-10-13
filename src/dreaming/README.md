@@ -23,7 +23,7 @@ The Worker reads `[dreaming]` each iteration. When enabled it hands captured eve
 - **merge** deduplicates candidates of one claim type per call; candidates the model drops survive as their own items.
 - **prepare** runs deterministic pre-search (identifiers at baselines and on the owner's unmerged branches) and attaches source branches.
 - **verify** / **defend** run the model with the shell enabled and `msverify` as the only evidence source; negative verdicts get an adversarial second pass.
-- **tier** applies [tier.ts](tier.ts); **report** writes `_MemStore/Dreams/<local date>-<project root name>-<run>.md` and refreshes `总览.md`, the last 14 days of kept items (every tier but drop) with global knowledge first and each item linked to its report. `memstore dream report [RUN_ID]` re-renders completed runs in the current format.
+- **tier** applies [tier.ts](tier.ts); a catch-all Project (only root is the home directory or above) keeps global knowledge only. **report** writes `_MemStore/Dreams/<local date>-<project root name>-<run>.md` and refreshes `总览.md`, the last 14 days of kept items (every tier but drop) with global knowledge first and each item linked to its report. `memstore dream report [RUN_ID]` re-renders completed runs in the current format.
 
 - [capture/README.md](../../src/capture/README.md)
 - [worker/README.md](../../src/worker/README.md)

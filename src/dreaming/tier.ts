@@ -18,6 +18,17 @@ export interface TierInput {
   readonly relevantRepos?: readonly string[];
   /** Global knowledge (general tools) is not tied to any repository's branch. */
   readonly scope?: "project" | "global";
+  /** The Project is a catch-all root (see `isCatchAllRoot`): it keeps global knowledge only. */
+  readonly catchAllProject?: boolean;
+}
+
+/**
+ * The home directory (or an ancestor) registered as a non-Git Project root becomes
+ * the Project of every non-Git directory below it: app workspaces, downloads,
+ * scratch folders. It is not one project, so nothing is kept as its knowledge.
+ */
+export function isCatchAllRoot(root: string, home: string): boolean {
+  return root === home || root === "/" || home.startsWith(`${root}/`);
 }
 
 /**
@@ -27,6 +38,7 @@ export interface TierInput {
  */
 export function tierOf(input: TierInput): { readonly tier: DreamTier; readonly reason: string } {
   if (input.durability === "episodic") return { tier: "drop", reason: "episodic" };
+  if (input.catchAllProject === true && input.scope !== "global") return { tier: "drop", reason: "catch_all_project" };
   if (input.verdict === "contradicted" || input.verdict === "stale") return { tier: "review", reason: input.verdict };
   if (input.verdict === "documented") return { tier: "drop", reason: "already_in_autoloaded_docs" };
   const relevant = input.scope === "global" ? []

@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { relevantRepositories, tierOf, type TierInput } from "../../../src/dreaming/tier.js";
+import { isCatchAllRoot, relevantRepositories, tierOf, type TierInput } from "../../../src/dreaming/tier.js";
 import { identifiersOf } from "../../../src/dreaming/presearch.js";
 import { codexArguments } from "../../../src/dreaming/model.js";
 
@@ -21,6 +21,16 @@ test("negative, redundant and episodic knowledge never reaches injection", () =>
   expect(tierOf({ ...base, verdict: "stale" }).tier).toBe("review");
   expect(tierOf({ ...base, verdict: "documented", sessionCount: 3 })).toEqual({ tier: "drop", reason: "already_in_autoloaded_docs" });
   expect(tierOf({ ...base, verdict: "confirmed", durability: "episodic" })).toEqual({ tier: "drop", reason: "episodic" });
+});
+
+test("a catch-all home-directory Project keeps global knowledge only", () => {
+  expect(tierOf({ ...base, verdict: "confirmed", catchAllProject: true })).toEqual({ tier: "drop", reason: "catch_all_project" });
+  expect(tierOf({ ...base, explicitUser: true, catchAllProject: true }).tier).toBe("drop");
+  expect(tierOf({ ...base, explicitUser: true, scope: "global", catchAllProject: true })).toEqual({ tier: "inject", reason: "explicit_user" });
+  expect(isCatchAllRoot("/Users/owner", "/Users/owner")).toBe(true);
+  expect(isCatchAllRoot("/Users", "/Users/owner")).toBe(true);
+  expect(isCatchAllRoot("/Users/owner/projects/app", "/Users/owner")).toBe(false);
+  expect(isCatchAllRoot("/Users/owner2", "/Users/owner")).toBe(false);
 });
 
 test("knowledge from an unmerged branch stays with the branch unless the baseline confirms it", () => {
