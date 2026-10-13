@@ -69,7 +69,9 @@ const policySchema = z.object({
     archive_months: z.number().int().positive(),
     candidate_tombstone_days: z.number().int().positive().default(180),
     sensitivity_metadata_days: z.number().int().positive().default(15),
-    injection_receipt_days: z.number().int().min(1).max(3650).default(30)
+    injection_receipt_days: z.number().int().min(1).max(3650).default(30),
+    capture_payload_days: z.number().int().min(1).max(3650).default(30),
+    capture_dead_letter_payload_days: z.number().int().min(1).max(3650).default(90)
   }),
   lifecycle: extensibleSectionSchema,
   promotion: extensibleSectionSchema,
@@ -125,6 +127,8 @@ export interface LoadedConfiguration {
     readonly candidateTombstoneDays: number;
     readonly sensitivityMetadataDays: number;
     readonly injectionReceiptDays: number;
+    readonly capturePayloadDays: number;
+    readonly captureDeadLetterPayloadDays: number;
     readonly corpusRetention: CorpusRetentionConfiguration;
     readonly governanceTimezone: string;
     readonly weeklyGovernance: "EVERY_3_DAYS 19:00";
@@ -369,6 +373,8 @@ export async function loadConfiguration(
       candidateTombstoneDays: policy.retention.candidate_tombstone_days,
       sensitivityMetadataDays: policy.retention.sensitivity_metadata_days,
       injectionReceiptDays: policy.retention.injection_receipt_days,
+      capturePayloadDays: policy.retention.capture_payload_days,
+      captureDeadLetterPayloadDays: policy.retention.capture_dead_letter_payload_days,
       corpusRetention: policy.corpus_retention,
       governanceTimezone: policy.governance.timezone,
       weeklyGovernance: policy.governance.weekly,

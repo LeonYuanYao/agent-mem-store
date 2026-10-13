@@ -60,6 +60,7 @@ import {
   inspectDuplicateClusters
 } from "../quality/duplicates.js";
 import {
+  compactRuntimeDatabase,
   createRuntimeBackup,
   inspectMigrationReadiness,
   pauseForMigration,
@@ -1113,6 +1114,13 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       result: parsed.values.preview
         ? previewResult(["review_state"], { action: action.kind })
         : await applyReviewAction({ ...location, action, appliedAt: now }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "runtime" && parsed.positionals[1] === "compact") {
+    return {
+      command: "runtime.compact",
+      result: await compactRuntimeDatabase({ runtimeRoot: location.runtimeRoot, apply: !parsed.values.preview }),
       json: parsed.values.json
     };
   }

@@ -72,7 +72,7 @@ function fakeModel(log: string[]): DreamModel {
           : claim.text.startsWith(statements.wrong) ? "contradicted"
           : claim.text.startsWith(statements.preference) ? "not_repo_verifiable" : "inconclusive";
         return { id: claim.id, claim_type: "code_state", durability: claim.text.startsWith(statements.oneOff) ? "episodic" : "long_term",
-          scope: "project", subsystem: "preview", verdict, branch: "", evidence: ["clone@abc [R1-implementation 2026-01-01] src/preview.ts:1"], reason: "test",
+          scope: claim.text.startsWith(statements.preference) ? "global" : "project", subsystem: "preview", verdict, branch: "", evidence: ["clone@abc [R1-implementation 2026-01-01] src/preview.ts:1"], reason: "test",
           refined_statement: claim.text.startsWith(statements.code) ? "TTEH 的 `setVideo` 在预览中调用 `reloadEffect` 重新加载特效。" : "" };
       }) });
     },
@@ -147,6 +147,8 @@ test("a dream run extracts, merges, verifies, defends and tiers a Session withou
   expect(report).toContain("TTEH 的 `setVideo` 在预览中调用 `reloadEffect` 重新加载特效。");
   expect(report).toContain(`收窄前：${statements.code}`);
   expect(report).toContain("需要复核");
+  // Global knowledge is tagged so it is not mistaken for this Project's knowledge.
+  expect(report).toContain(`〔全局〕${statements.preference}`);
   await expect(access(join(vaultRoot, "Memories"))).rejects.toThrow();
 
   // The Session is never extracted twice, and the schedule creates nothing when no Session is waiting.

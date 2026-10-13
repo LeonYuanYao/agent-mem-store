@@ -41,14 +41,15 @@ export async function writeDreamReport(request: {
   const run = request.database.prepare("SELECT scheduled_for, stats_json, mode FROM dream_runs WHERE run_id = ?").get(request.runId);
   const stats = parse<Record<string, number>>(run?.stats_json, {});
   const items = request.database.prepare(
-    "SELECT statement, refined_statement, tier, tier_reason, scope, verdict_json, defense_json, session_ids_json FROM dream_items WHERE run_id = ? ORDER BY tier, claim_type"
+    "SELECT statement, refined_statement, tier, tier_reason, scope, verdict_json, defense_json, session_ids_json FROM dream_items WHERE run_id = ? ORDER BY tier, scope DESC, claim_type"
   ).all(request.runId);
   const lines = [
     `# Dreams · ${request.now.slice(0, 10)}`,
     "",
     `- Project: \`${request.projectId}\``,
     `- Run: \`${request.runId}\` · mode: ${String(run?.mode ?? "shadow")}（影子模式不写正式记忆、不改变注入）`,
-    `- Sessions: ${String(stats.sessions ?? 0)} · chunks: ${String(stats.chunks ?? 0)} · candidates: ${String(stats.candidates ?? 0)} · items: ${String(items.length)}`,
+    `- Sessions: ${String(stats.sessions ?? 0)} · chunks: ${String(stats.chunks ?? 0)} · candidates: ${String(stats.candidates ?? 0)} · items: ${String(items.length)}` +
+      ` (global: ${String(items.filter((item) => item.scope === "global").length)})`,
     `- Model calls: extract ${String(stats.extract_calls ?? 0)}, merge ${String(stats.merge_calls ?? 0)}, verify ${String(stats.verify_calls ?? 0)}, defense ${String(stats.defense_calls ?? 0)}` +
       ` · tokens ≈ ${String((stats.extract_tokens ?? 0) + (stats.merge_tokens ?? 0) + (stats.verify_tokens ?? 0) + (stats.defense_tokens ?? 0))}`,
     ""
@@ -61,11 +62,14 @@ export async function writeDreamReport(request: {
       const defense = parse<{ decision?: string; final_verdict?: string; reason?: string } | undefined>(item.defense_json, undefined);
       const sessions = parse<string[]>(item.session_ids_json, []).length;
       // The refined statement is what dreaming would keep; the original is shown for review.
+      // Global knowledge (general tools, personal workflow) is listed after project knowledge and tagged:
+      // apply mode stores it in the Global space rather than this Project.
+      const tag = item.scope === "global" ? "〔全局〕" : "";
       if (typeof item.refined_statement === "string") {
-        lines.push(`- ${escapeLine(item.refined_statement)}`);
+        lines.push(`- ${tag}${escapeLine(item.refined_statement)}`);
         lines.push(`  - 收窄前：${escapeLine(String(item.statement))}`);
       } else {
-        lines.push(`- ${escapeLine(String(item.statement))}`);
+        lines.push(`- ${tag}${escapeLine(String(item.statement))}`);
       }
       lines.push(`  - ${String(item.tier_reason)} · verdict: ${verdict.verdict ?? "-"}${defense === undefined ? "" : ` → defense ${defense.decision ?? "-"}: ${defense.final_verdict ?? "-"}`}` +
         ` · scope: ${String(item.scope)} · sessions: ${String(sessions)}`);

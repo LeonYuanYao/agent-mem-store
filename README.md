@@ -205,6 +205,7 @@ Default retention settings in `policy.toml` are:
   per-memory deadlines are handled by the lifecycle rules. The Worker prepares and
   verifies its managed backup before scheduled purge; manual purge commands below
   require a separately supplied verified backup.
+- `retention.capture_payload_days = 30`: completed capture payloads are removed after 30 days, dead-letter payloads after `capture_dead_letter_payload_days` (default 90). Event rows remain without bodies. With dreaming enabled the period never drops below its lookback. Freed space is reused; to shrink the file, run `memstore portability pause`, `memstore runtime compact`, then `portability resume`.
 - `retention.sensitivity_metadata_days = 15`: old sensitivity diagnostics are cleaned up.
 - `retention.injection_receipt_days = 30`: eligible old injection receipts are cleaned
   up, with protected evidence retained and daily summaries recorded.

@@ -146,6 +146,7 @@ Runtime 默认位于 `~/Library/Application Support/MemStore`。Embedding 模型
 `policy.toml` 中的默认保留设置：
 
 - `retention.archive_months = 3`：符合条件的归档记忆到期后自动物理清除。受保护记忆和单条记忆显式指定的期限按生命周期规则处理。定时清除前，Worker 会准备并验证受管备份；下文的手动清除命令则要求另行提供经过验证的备份。
+- `retention.capture_payload_days = 30`：处理完成的采集原文在 30 天后删除；死信原文在 `capture_dead_letter_payload_days`（默认 90 天）后删除。事件记录保留，正文不再可读。开启 dreaming 时不会短于其回看天数。删除释放的空间会被数据库复用；要缩小文件，先 `memstore portability pause`，再运行 `memstore runtime compact`，最后 `portability resume`。
 - `retention.sensitivity_metadata_days = 15`：清理过期的脱敏诊断记录。
 - `retention.injection_receipt_days = 30`：清理符合条件的过期注入回执，保留受保护证据并记录每日汇总。
 - `retention.candidate_tombstone_days = 180`：候选墓碑的保留期，不是正式 Memory 墓碑的保留期。

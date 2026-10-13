@@ -64,6 +64,7 @@ import {
 import { runNextCandidateMaintenance } from "./candidate-maintenance.js";
 import { runScheduledArchiveRetention } from "../purge/index.js";
 import { runScheduledSensitivityRetention } from "../sensitivity/retention.js";
+import { runScheduledCapturePayloadRetention } from "../capture/retention.js";
 import { runScheduledInjectionReceiptRetention } from "../retrieval/receipt-retention.js";
 import {
   advanceCompactQualityDiscovery,
@@ -326,6 +327,18 @@ export async function runWorkerOnce(request: {
     }
     if (archiveRetention.purgedMemoryIds.length > 0) {
       activities.push(`archive-purge:purged:${String(archiveRetention.purgedMemoryIds.length)}`);
+    }
+  }
+  if (request.adapters?.foregroundPressure?.() !== true) {
+    const payloadRetention = await runScheduledCapturePayloadRetention({
+      runtimeRoot: request.runtimeRoot,
+      vaultRoot: request.vaultRoot,
+      now
+    });
+    if (payloadRetention.state === "completed" && payloadRetention.removedEventCount > 0) {
+      activities.push(`capture-retention:removed:${String(payloadRetention.removedEventCount)}`);
+    } else if (payloadRetention.state === "failed") {
+      activities.push(`capture-retention:failed:${payloadRetention.errorCode}`);
     }
   }
   const sensitivityRetention = await runScheduledSensitivityRetention({

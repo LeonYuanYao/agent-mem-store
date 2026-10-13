@@ -263,3 +263,33 @@ export async function verifyDestinationRetrieval(request: {
   if (result.items.length === 0) throw new Error("Destination retrieval verification returned no Memory.");
   return { state: "verified", matchedMemoryIds: result.items.map((item) => item.memoryId) };
 }
+
+/**
+ * Rewrites the runtime database to return pages freed by retention to the file
+ * system. VACUUM needs exclusive use of the database, so it runs only while the
+ * Worker and capture are paused (`portability pause`).
+ */
+export async function compactRuntimeDatabase(request: {
+  readonly runtimeRoot: string;
+  readonly apply: boolean;
+}): Promise<Record<string, unknown>> {
+  const database = await openRuntimeDatabase(request.runtimeRoot, { busyTimeoutMilliseconds: 10_000 });
+  try {
+    const pageSize = Number(database.prepare("PRAGMA page_size").get()?.page_size ?? 0);
+    const pagesBefore = Number(database.prepare("PRAGMA page_count").get()?.page_count ?? 0);
+    const freePages = Number(database.prepare("PRAGMA freelist_count").get()?.freelist_count ?? 0);
+    const paused = database.prepare("SELECT worker_paused, capture_paused FROM worker_control WHERE singleton = 1").get();
+    const summary = { size_bytes: pagesBefore * pageSize, reclaimable_bytes: freePages * pageSize };
+    if (!request.apply) return { state: "preview", dry_run: true, would_change: ["runtime_database_compaction"], ...summary };
+    if (paused?.worker_paused !== 1 || paused.capture_paused !== 1) {
+      throw new Error("Runtime compaction requires `memstore portability pause` first.");
+    }
+    database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    database.exec("VACUUM");
+    database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    const pagesAfter = Number(database.prepare("PRAGMA page_count").get()?.page_count ?? 0);
+    return { state: "compacted", size_before_bytes: summary.size_bytes, size_after_bytes: pagesAfter * pageSize };
+  } finally {
+    database.close();
+  }
+}

@@ -1,3 +1,4 @@
+import { inspectCapturePayloadRetention } from "../capture/retention.js";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { createConnection } from "node:net";
@@ -350,6 +351,7 @@ export async function inspectStatus(request: {
           last_error_code: purgeRun.last_error_code
         }
       },
+      capture_payload_retention: await inspectCapturePayloadRetention(request.runtimeRoot).catch(() => null),
       sensitivity_retention: sensitivityRetention === undefined ? null : {
         metadata_retention_days: sensitivityMetadataDays,
         next_check_at: sensitivityRetention.next_check_at,

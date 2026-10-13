@@ -35,6 +35,11 @@ remain importable and existing captured evidence continues through distillation.
 
 ## State and side effects
 
+[retention.ts](retention.ts) removes captured payload bodies after the policy
+periods (`capture_payload_days`, `capture_dead_letter_payload_days`); rows stay
+with `payload_removed_at`, and `readCapturedEvent` then returns undefined. See
+[ADR-0071](../../docs/adr/0071-retain-pending-outbox-work-and-bound-terminal-payloads.md).
+
 Writes runtime inbox files, capture rows, outbox state and body-free diagnostics. Legacy file import is maintained separately in inbox-files.ts.
 
 ## Invariants and change risks

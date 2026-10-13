@@ -194,7 +194,11 @@ export async function runNextShadowEvaluation(request: {
   if (eventId === undefined) return { state: "empty" };
   try {
     const event = await readCapturedEvent(request.runtimeRoot, eventId);
-    if (event === undefined) throw new Error("Captured event disappeared before Shadow evaluation.");
+    if (event === undefined) {
+      // Retention may have removed an old payload; there is nothing left to evaluate.
+      await finishShadowEvaluation({ runtimeRoot: request.runtimeRoot, eventId, state: "skipped", errorCode: "payload_unavailable", updatedAt: now });
+      return { state: "skipped", eventId, reason: "payload_unavailable" };
+    }
     if (await foregroundDeliveryFailed(request.runtimeRoot, eventId)) {
       const reason = "foreground_delivery_failed";
       await finishShadowEvaluation({

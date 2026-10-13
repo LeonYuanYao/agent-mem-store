@@ -13,3 +13,18 @@ After `candidate-created`, `completed`, `skipped`, or `duplicate` is terminal an
 Before body removal, maintenance rechecks terminal state, absence of an active lease, downstream evidence and provenance durability, and expected content identity. Cleanup uses bounded batches and incremental space reclamation rather than full VACUUM after each deletion.
 
 The 30-day terminal-payload, 90-day dead-letter-payload, and 180-day metadata values are configurable first-version defaults. User-visible status distinguishes replayable payload from metadata-only history and never claims removed content is recoverable.
+
+## Implementation (2026-10-13)
+
+Payload removal is implemented by `src/capture/retention.ts` (migration 0068),
+run by the Worker every six hours and every 30 seconds while a backlog remains.
+Completed payloads are removed after `retention.capture_payload_days` (default 30)
+and dead-letter payloads after `retention.capture_dead_letter_payload_days`
+(default 90); pending, processing and retrying work is never touched, and an
+active lease defers removal. While dreaming is enabled, the payload period is at
+least its lookback plus one day. Event rows remain with `payload_removed_at`, and
+`readCapturedEvent` reports such events as unavailable. Two parts of the original
+decision are deferred: a dead letter keeps its `dead_letter` state instead of a
+new `expired_unresolved` state (the state CHECK would need a table rebuild), and
+body-free metadata is not yet deleted after 180 days. Freed pages are reused; the
+file shrinks only through `memstore runtime compact` while the Worker is paused.

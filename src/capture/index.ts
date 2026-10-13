@@ -1059,11 +1059,15 @@ export async function readCapturedEvent(
       .prepare(
         `SELECT schema_version, event_id, deduplication_key, agent, event_kind,
                 occurred_at, project_id, session_id, turn_id, segment_count,
-                whole_content_sha256
+                whole_content_sha256, payload_removed_at
          FROM capture_events WHERE event_id = ?`
       )
       .get(eventId);
     if (event === undefined) {
+      return undefined;
+    }
+    if (typeof event.payload_removed_at === "string") {
+      // Retention removed the body: callers see an unavailable event, not a corrupt one.
       return undefined;
     }
     const segments = database
