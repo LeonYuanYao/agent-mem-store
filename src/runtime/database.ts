@@ -372,6 +372,11 @@ const migrations: readonly Migration[] = [
     version: 68,
     name: "capture_payload_retention",
     path: new URL("../../migrations/0068-capture-payload-retention.sql", import.meta.url)
+  },
+  {
+    version: 69,
+    name: "dream_session_segments",
+    path: new URL("../../migrations/0069-dream-session-segments.sql", import.meta.url)
   }
 ];
 

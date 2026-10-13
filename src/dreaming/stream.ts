@@ -60,19 +60,24 @@ function boundedResult(value: string): string {
   return `${value.slice(0, toolHeadCharacters)}\n…[${String(omitted)} chars omitted]…\n${value.slice(-toolTailCharacters)}`;
 }
 
+/**
+ * Reads one segment of a Session: every event after `after` (exclusive) up to
+ * `until` (inclusive), whichever Project each event resolved to. The bounds keep
+ * chunking stable while the Session continues.
+ */
 export function readSessionStream(
   database: DatabaseSync,
-  request: { readonly sessionId: string; readonly projectId: string; readonly chunkCharacters: number }
+  request: { readonly sessionId: string; readonly after?: string | undefined; readonly until: string; readonly chunkCharacters: number }
 ): SessionStream | undefined {
   const events = database.prepare(
     `SELECT event_id, event_kind, created_at FROM capture_events
-     WHERE session_id = ? AND project_id = ? ORDER BY created_at, event_id`
-  ).all(request.sessionId, request.projectId);
+     WHERE session_id = ? AND (? IS NULL OR created_at > ?) AND created_at <= ? ORDER BY created_at, event_id`
+  ).all(request.sessionId, request.after ?? null, request.after ?? null, request.until);
   if (events.length === 0) return undefined;
   const segments = database.prepare(
     "SELECT payload FROM capture_segments WHERE event_id = ? ORDER BY segment_index"
   );
-  const lines: string[] = [];
+  const lines: string[] = request.after === undefined ? [] : ["（本会话更早的内容已在之前的 dreaming 中处理；以下只是之后的新活动。）"];
   const cwds = new Set<string>();
   const turnPaths: Record<string, string[]> = {};
   let turn = 0;

@@ -183,6 +183,93 @@ test("a dream run extracts, merges, verifies, defends and tiers a Session withou
   expect((await scheduleDueDreams({ runtimeRoot, now: later, configuration: { ...configuration, hour: 0 }, allowTemporaryRoots: true })).created).toEqual([]);
 });
 
+test("a Session belongs to the Project it started in, and later activity is read once more as a new segment", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-segments-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await mkdir(vaultRoot, { recursive: true });
+  const clone = await workspace(root);
+  const nested = join(root, "nested");
+  await mkdir(nested, { recursive: true });
+  const home = await resolveProject({ sessionId: "resolve-home", path: clone, runtimeRoot });
+  const elsewhere = await resolveProject({ sessionId: "resolve-elsewhere", path: nested, runtimeRoot });
+  if (home.status !== "resolved" || elsewhere.status !== "resolved") throw new Error("Projects did not resolve.");
+  const sessionId = "segmented-session";
+  const start = Date.now() - 8 * 3_600_000;
+  const at = (minutes: number): string => new Date(start + minutes * 60_000).toISOString();
+  async function capture(
+    id: string, eventKind: "UserPromptSubmit" | "PostToolUse" | "Stop", projectId: string, minutes: number, payload: Record<string, unknown>
+  ): Promise<void> {
+    await captureEvent({ runtimeRoot, event: {
+      schemaVersion: 1, eventId: `msevent_segment_${id}`, deduplicationKey: `segment:${id}`, agent: "claude", eventKind,
+      occurredAt: at(minutes), projectId, sessionId, turnId: id, payload
+    } });
+    const database = await openRuntimeDatabase(runtimeRoot);
+    try {
+      database.prepare("UPDATE capture_events SET created_at = ? WHERE event_id = ?").run(at(minutes), `msevent_segment_${id}`);
+    } finally {
+      database.close();
+    }
+  }
+  const chunks: string[] = [];
+  const model: DreamModel = {
+    extract(request) {
+      chunks.push(request.chunk);
+      return Promise.resolve({ usage: { tokens: 1, seconds: 1 }, candidates: [] });
+    },
+    merge: () => Promise.reject(new Error("unexpected merge")),
+    verify: () => Promise.reject(new Error("unexpected verify")),
+    defend: () => Promise.reject(new Error("unexpected defend"))
+  };
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true, hour: 0 });
+  async function dream(now: string): Promise<void> {
+    for (let step = 0; step < 50; step += 1) {
+      if ((await runNextDreamStep({ runtimeRoot, vaultRoot, now, configuration, model, allowTemporaryRoots: true })).state === "idle") return;
+    }
+  }
+  async function segment(): Promise<Record<string, unknown> | undefined> {
+    const database = await openRuntimeDatabase(runtimeRoot);
+    try {
+      return database.prepare("SELECT project_id, segment_after, last_event_at FROM dream_sessions WHERE session_id = ?").get(sessionId);
+    } finally {
+      database.close();
+    }
+  }
+
+  // The Session starts in the workspace, then `cd`s into another Project; it still belongs to the workspace.
+  await capture("p1", "UserPromptSubmit", home.projectId, 0, { prompt: "第一段：看看 setVideo" });
+  await capture("t1", "PostToolUse", elsewhere.projectId, 1, { toolName: "Bash", cwd: nested, input: { command: "ls nested" }, response: "ok" });
+  await capture("s1", "Stop", elsewhere.projectId, 2, { assistantMessage: "第一段完成" });
+  const firstNow = at(2 + 180);
+  const scheduled = await scheduleDueDreams({ runtimeRoot, now: firstNow, configuration, allowTemporaryRoots: true });
+  expect(scheduled.created).toHaveLength(1);
+  expect((await inspectDreams(runtimeRoot, 1))[0]).toMatchObject({ project_id: home.projectId });
+  await dream(firstNow);
+  expect(chunks).toHaveLength(1);
+  expect(chunks[0]).toContain("第一段：看看 setVideo");
+  expect(chunks[0]).toContain("ls nested");
+  expect(chunks[0]).toContain("第一段完成");
+  expect(await segment()).toMatchObject({ project_id: home.projectId, segment_after: null, last_event_at: at(2) });
+
+  // Activity after the Session was dreamed about is read again later, without the earlier turns.
+  await capture("p2", "UserPromptSubmit", elsewhere.projectId, 300, { prompt: "第二段：继续" });
+  await capture("s2", "Stop", elsewhere.projectId, 301, { assistantMessage: "第二段完成" });
+  const secondNow = at(301 + 180);
+  await startDreamRun({ runtimeRoot, projectId: home.projectId, now: secondNow });
+  await dream(secondNow);
+  expect(chunks).toHaveLength(2);
+  expect(chunks[1]).toContain("第二段：继续");
+  expect(chunks[1]).toContain("之前的 dreaming 中处理");
+  expect(chunks[1]).not.toContain("第一段");
+  expect(await segment()).toMatchObject({ project_id: home.projectId, segment_after: at(2), last_event_at: at(301) });
+
+  // Nothing new: no further extraction.
+  await startDreamRun({ runtimeRoot, projectId: home.projectId, now: at(301 + 200) });
+  await dream(at(301 + 200));
+  expect(chunks).toHaveLength(2);
+});
+
 test("dreaming is disabled by default and never schedules without configuration", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-dream-off-"));
   directories.push(root);

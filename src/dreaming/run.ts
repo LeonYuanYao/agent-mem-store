@@ -73,25 +73,57 @@ export async function projectRoots(
   return { roots, kind };
 }
 
+interface EligibleSession {
+  readonly session_id: string;
+  /** Upper bound of the segment already dreamed about; undefined for a Session's first segment. */
+  readonly after: string | undefined;
+  readonly first_at: string;
+  readonly last_at: string;
+}
+
+/**
+ * Sessions of this Project with activity to dream about. A Session belongs to the
+ * Project its first event resolved to: Claude Code reports the shell's current
+ * directory, so a `cd` into a nested repository would otherwise split one Session
+ * across Projects. A Session dreamed about before is eligible again once its newer
+ * events have gone quiet, and only those are read; it is never re-claimed while
+ * its previous run is still open.
+ */
 function eligibleSessions(
   database: DatabaseSync,
   projectId: string,
   now: string,
   configuration: DreamingConfiguration
-): { session_id: string; first_at: string; last_at: string }[] {
+): EligibleSession[] {
   const lookback = new Date(Date.parse(now) - configuration.lookback_days * 86_400_000).toISOString();
   const inactiveBefore = new Date(Date.parse(now) - configuration.inactivity_minutes * 60_000).toISOString();
   return database.prepare(
-    `SELECT session_id, MIN(created_at) AS first_at, MAX(created_at) AS last_at,
-            MAX(event_kind = 'SessionEnd') AS ended
-     FROM capture_events
-     WHERE project_id = ? AND session_id IS NOT NULL
-       AND session_id NOT IN (SELECT session_id FROM dream_sessions)
-     GROUP BY session_id
-     HAVING last_at >= ? AND (ended = 1 OR last_at <= ?)
+    `WITH recent AS (
+       SELECT DISTINCT session_id FROM capture_events WHERE session_id IS NOT NULL AND created_at >= ?
+     ), home AS (
+       SELECT session_id, (SELECT e.project_id FROM capture_events e
+                           WHERE e.session_id = recent.session_id AND e.project_id IS NOT NULL
+                           ORDER BY e.created_at, e.event_id LIMIT 1) AS project_id
+       FROM recent
+     ), pending AS (
+       SELECT h.session_id, d.last_event_at AS after
+       FROM home h LEFT JOIN dream_sessions d USING (session_id)
+       WHERE h.project_id = ?
+         AND NOT EXISTS (SELECT 1 FROM dream_runs r WHERE r.run_id = d.run_id AND r.stage NOT IN ('completed', 'failed'))
+     )
+     SELECT p.session_id, p.after, MIN(e.created_at) AS first_at, MAX(e.created_at) AS last_at,
+            MAX(CASE WHEN e.event_kind = 'SessionEnd' THEN e.created_at END) AS ended_at
+     FROM pending p JOIN capture_events e ON e.session_id = p.session_id AND (p.after IS NULL OR e.created_at > p.after)
+     GROUP BY p.session_id
+     HAVING last_at >= ? AND (ended_at = last_at OR last_at <= ?)
      ORDER BY last_at ASC LIMIT ?`
-  ).all(projectId, lookback, inactiveBefore, configuration.max_sessions_per_run)
-    .map((row) => ({ session_id: String(row.session_id), first_at: String(row.first_at), last_at: String(row.last_at) }));
+  ).all(lookback, projectId, lookback, inactiveBefore, configuration.max_sessions_per_run)
+    .map((row) => ({
+      session_id: String(row.session_id),
+      after: typeof row.after === "string" ? row.after : undefined,
+      first_at: String(row.first_at),
+      last_at: String(row.last_at)
+    }));
 }
 
 /** Creates at most one run per Project per local calendar day once the configured hour has passed. */
@@ -251,13 +283,19 @@ async function stepRun(
       }
       let chunks = 0;
       for (const session of sessions) {
-        const stream = readSessionStream(database, { sessionId: session.session_id, projectId: run.projectId, chunkCharacters: configuration.chunk_characters });
+        const stream = readSessionStream(database, {
+          sessionId: session.session_id, after: session.after, until: session.last_at, chunkCharacters: configuration.chunk_characters
+        });
         const clone = cloneOf(stream?.cwds ?? [], roots) ?? roots[0];
         const branches: SourceBranch[] = map === undefined || clone === undefined ? [] : await sessionSourceBranches({ map, clone, startedAt: session.first_at });
         database.prepare(
-          `INSERT INTO dream_sessions(session_id, project_id, run_id, first_event_at, last_event_at, chunk_count, branch_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        ).run(session.session_id, run.projectId, run.runId, session.first_at, session.last_at, stream?.chunks.length ?? 0, json(branches));
+          `INSERT INTO dream_sessions(session_id, project_id, run_id, first_event_at, last_event_at, chunk_count, branch_json, segment_after)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(session_id) DO UPDATE SET project_id = excluded.project_id, run_id = excluded.run_id,
+             first_event_at = excluded.first_event_at, last_event_at = excluded.last_event_at, chunk_count = excluded.chunk_count,
+             branch_json = excluded.branch_json, segment_after = excluded.segment_after`
+        ).run(session.session_id, run.projectId, run.runId, session.first_at, session.last_at, stream?.chunks.length ?? 0, json(branches),
+          session.after ?? null);
         for (let index = 0; index < (stream?.chunks.length ?? 0); index += 1) {
           database.prepare("INSERT INTO dream_chunks(run_id, session_id, chunk_index, state) VALUES (?, ?, ?, 'pending')")
             .run(run.runId, session.session_id, index + 1);
@@ -278,7 +316,14 @@ async function stepRun(
       }
       const sessionId = String(chunk.session_id);
       const index = Number(chunk.chunk_index);
-      const stream = readSessionStream(database, { sessionId, projectId: run.projectId, chunkCharacters: configuration.chunk_characters });
+      const segment = database.prepare("SELECT segment_after, last_event_at FROM dream_sessions WHERE session_id = ? AND run_id = ?")
+        .get(sessionId, run.runId);
+      const stream = segment === undefined ? undefined : readSessionStream(database, {
+        sessionId,
+        after: typeof segment.segment_after === "string" ? segment.segment_after : undefined,
+        until: String(segment.last_event_at),
+        chunkCharacters: configuration.chunk_characters
+      });
       const text = stream?.chunks[index - 1];
       if (text === undefined) {
         database.prepare("UPDATE dream_chunks SET state = 'failed', last_error_code = 'chunk_unavailable' WHERE run_id = ? AND session_id = ? AND chunk_index = ?")
