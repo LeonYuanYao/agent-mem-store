@@ -2,7 +2,7 @@
 
 import { readDreamingConfiguration, type DreamingConfiguration } from "../dreaming/config.js";
 import { CodexDreamModel, type DreamModel } from "../dreaming/model.js";
-import { inspectDreams, runNextDreamStep, startDreamRun } from "../dreaming/run.js";
+import { inspectDreams, renderDreamReports, runNextDreamStep, startDreamRun } from "../dreaming/run.js";
 import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -940,6 +940,20 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
   }
   if (command === "dream" && parsed.positionals[1] === "status") {
     return { command: "dream.status", result: { runs: await inspectDreams(location.runtimeRoot) }, json: parsed.values.json };
+  }
+  if (command === "dream" && parsed.positionals[1] === "report") {
+    const runId = parsed.positionals[2];
+    if (parsed.values.preview) {
+      return { command: "dream.report", result: previewResult(["vault_dreams_report"], runId === undefined ? {} : { run_id: runId }), json: parsed.values.json };
+    }
+    const configuration = await readDreamingConfiguration(location.runtimeRoot);
+    return {
+      command: "dream.report",
+      result: await renderDreamReports({
+        runtimeRoot: location.runtimeRoot, vaultRoot: location.vaultRoot, now, timeZone: configuration.timezone, ...(runId === undefined ? {} : { runId })
+      }),
+      json: parsed.values.json
+    };
   }
   if (command === "dream" && parsed.positionals[1] === "run") {
     const projectId = parsed.values["project-id"];

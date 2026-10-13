@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -8,7 +8,7 @@ import { captureEvent } from "../../../src/capture/index.js";
 import { dreamingConfigurationSchema } from "../../../src/dreaming/config.js";
 import { handOffCaptureToDreaming } from "../../../src/dreaming/handoff.js";
 import type { DreamModel, Verdict } from "../../../src/dreaming/model.js";
-import { inspectDreams, runNextDreamStep, scheduleDueDreams, startDreamRun } from "../../../src/dreaming/run.js";
+import { inspectDreams, renderDreamReports, runNextDreamStep, scheduleDueDreams, startDreamRun } from "../../../src/dreaming/run.js";
 import { resolveProject } from "../../../src/projects/index.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 
@@ -141,15 +141,42 @@ test("a dream run extracts, merges, verifies, defends and tiers a Session withou
   } finally {
     database.close();
   }
-  const reports = await readdir(join(vaultRoot, "_MemStore", "Dreams"));
-  expect(reports).toHaveLength(1);
-  const report = await readFile(join(vaultRoot, "_MemStore", "Dreams", reports[0] ?? ""), "utf8");
+  const dreams = join(vaultRoot, "_MemStore", "Dreams");
+  const reports = (await readdir(dreams)).filter((name) => name !== "总览.md");
+  // Named by the run's local day and the Project's root, not by UTC date and ID.
+  expect(reports).toEqual([expect.stringMatching(/^\d{4}-\d{2}-\d{2}-clone-[0-9a-f]{8}\.md$/u)]);
+  const reportName = reports[0] ?? "";
+  const report = await readFile(join(dreams, reportName), "utf8");
+  expect(report).toContain(`clone (\`${project.projectId}\`)`);
   expect(report).toContain("TTEH 的 `setVideo` 在预览中调用 `reloadEffect` 重新加载特效。");
   expect(report).toContain(`收窄前：${statements.code}`);
   expect(report).toContain("需要复核");
   // Global knowledge is tagged so it is not mistaken for this Project's knowledge.
   expect(report).toContain(`〔全局〕${statements.preference}`);
   await expect(access(join(vaultRoot, "Memories"))).rejects.toThrow();
+
+  // The overview lists what dreaming kept across runs, global knowledge first, each item linked to its report.
+  const overview = await readFile(join(dreams, "总览.md"), "utf8");
+  expect(overview.indexOf("## 全局")).toBeGreaterThan(0);
+  expect(overview.indexOf("## 全局")).toBeLessThan(overview.indexOf("## 项目"));
+  expect(overview).toContain(`- ${statements.preference}\n  - 用户明确表达 · 来自 `);
+  expect(overview).toContain(`- TTEH 的 \`setVideo\` 在预览中调用 \`reloadEffect\` 重新加载特效。\n  - 已用仓库证据验证 · [[${reportName.replace(/\.md$/u, "")}]]`);
+  expect(overview).not.toContain(statements.oneOff);
+
+  // Re-rendering replaces a report written under an earlier file name and refreshes the overview.
+  const legacy = join(dreams, "2026-01-01-legacy.md");
+  await rename(join(dreams, reportName), legacy);
+  const legacyDatabase = await openRuntimeDatabase(runtimeRoot);
+  try {
+    legacyDatabase.prepare("UPDATE dream_runs SET report_path = ? WHERE run_id = ?").run(legacy, runId);
+  } finally {
+    legacyDatabase.close();
+  }
+  const rendered = await renderDreamReports({ runtimeRoot, vaultRoot, now, timeZone: configuration.timezone });
+  expect(rendered).toMatchObject({ reports: [join(dreams, reportName)], removed: [legacy] });
+  expect((await readdir(dreams)).sort()).toEqual([reportName, "总览.md"].sort());
+  await expect(renderDreamReports({ runtimeRoot, vaultRoot, now, timeZone: configuration.timezone, runId: "msdream_missing" }))
+    .rejects.toThrow(/No completed dream run/u);
 
   // The Session is never extracted twice, and the schedule creates nothing when no Session is waiting.
   const later = new Date(Date.now() + 4 * 3_600_000).toISOString();

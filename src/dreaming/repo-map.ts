@@ -11,6 +11,10 @@ import { git, gitText, isAncestor } from "./git.js";
  * baseline is newest, so the checked-out branch and uncommitted work of any clone
  * never influence verification.
  */
+
+/** Roots under the system temporary directories (scratch clones, test fixtures) are never dreamed about. */
+export const temporaryRootPattern = /^(?:\/private)?\/(?:tmp|var\/folders)\//u;
+
 export const repoEntrySchema = z.object({
   path: z.string(),
   kind: z.enum(["root", "nested", "submodule"]),

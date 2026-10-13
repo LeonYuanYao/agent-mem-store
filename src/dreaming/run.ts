@@ -1,19 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 import { Temporal } from "@js-temporal/polyfill";
 
+import { MemStoreCommandError } from "../contracts/envelope.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { cloneOf, sessionSourceBranches, type SourceBranch } from "./branches.js";
 import type { DreamingConfiguration } from "./config.js";
 import { DreamModelError, type DreamModel, type Verdict } from "./model.js";
 import { EvidenceReader } from "./msverify.js";
 import { presearch, renderPresearch } from "./presearch.js";
-import { buildRepoMap, repoMapSchema, type RepoMap } from "./repo-map.js";
-import { writeDreamReport } from "./report.js";
+import { buildRepoMap, repoMapSchema, temporaryRootPattern, type RepoMap } from "./repo-map.js";
+import { dreamsDirectoryName, overviewFileName, writeDreamOverview, writeDreamReport } from "./report.js";
 import { readSessionStream } from "./stream.js";
 import { relevantRepositories, tierOf } from "./tier.js";
 import { routePath } from "./repo-map.js";
@@ -32,8 +33,6 @@ export interface DreamStepResult {
   readonly stage?: Stage;
   readonly detail?: string;
 }
-
-const temporaryRootPattern = /^(?:\/private)?\/(?:tmp|var\/folders)\//u;
 
 function json(value: unknown): string {
   return JSON.stringify(value);
@@ -512,13 +511,58 @@ async function stepRun(
       return `tiered ${String(items.length)}`;
     }
     case "report": {
-      const path = await writeDreamReport({ database, vaultRoot: request.vaultRoot, runId: run.runId, projectId: run.projectId, now });
+      const timeZone = request.configuration.timezone;
+      const path = await writeDreamReport({ database, vaultRoot: request.vaultRoot, runId: run.runId, projectId: run.projectId, timeZone });
       database.prepare("UPDATE dream_runs SET report_path = ? WHERE run_id = ?").run(path, run.runId);
+      await writeDreamOverview({ database, vaultRoot: request.vaultRoot, now, timeZone, includeRunId: run.runId });
       advance(database, run, "completed", now);
       return path.split(sep).slice(-1)[0];
     }
     default:
       return undefined;
+  }
+}
+
+/**
+ * Re-renders the reports of completed runs (all, or one) and the overview with the
+ * current report format, for `memstore dream report`. A report whose file name
+ * changed replaces the previous file; only Markdown files directly inside the
+ * Dreams directory are ever removed.
+ */
+export async function renderDreamReports(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly now: string;
+  readonly timeZone: string;
+  readonly runId?: string;
+}): Promise<{ readonly reports: readonly string[]; readonly removed: readonly string[]; readonly overview: string }> {
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    const runs = database.prepare(
+      "SELECT run_id, project_id, report_path FROM dream_runs WHERE stage = 'completed' AND (? IS NULL OR run_id = ?) ORDER BY created_at"
+    ).all(request.runId ?? null, request.runId ?? null);
+    if (request.runId !== undefined && runs.length === 0) {
+      throw new MemStoreCommandError("dream_run_not_found", `No completed dream run ${request.runId}.`);
+    }
+    const directory = join(request.vaultRoot, dreamsDirectoryName);
+    const reports: string[] = [];
+    const removed: string[] = [];
+    for (const run of runs) {
+      const runId = String(run.run_id);
+      const path = await writeDreamReport({ database, vaultRoot: request.vaultRoot, runId, projectId: String(run.project_id), timeZone: request.timeZone });
+      const previous = typeof run.report_path === "string" ? run.report_path : undefined;
+      if (previous !== undefined && previous !== path && dirname(previous) === directory &&
+          previous.endsWith(".md") && basename(previous) !== overviewFileName) {
+        await rm(previous, { force: true });
+        removed.push(previous);
+      }
+      database.prepare("UPDATE dream_runs SET report_path = ? WHERE run_id = ?").run(path, runId);
+      reports.push(path);
+    }
+    const overview = await writeDreamOverview({ database, vaultRoot: request.vaultRoot, now: request.now, timeZone: request.timeZone });
+    return { reports, removed, overview };
+  } finally {
+    database.close();
   }
 }
 

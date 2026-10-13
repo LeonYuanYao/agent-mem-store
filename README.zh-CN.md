@@ -105,7 +105,7 @@ host_skill_roots = ["~/.agents/skills", "~/.codex/skills", "~/.claude/skills"]
 
 - 新采集的事件交给 dreaming，不再进入逐轮提炼和 Session 汇总；已排队的 Luna 工作照常完成。即使开着 `human_authored_only_injection`，采集也会恢复，注入权限不变。
 - 每个项目每天 03:00（Asia/Shanghai）后跑一次，处理最近 7 天内已结束的会话：带工具输出分段提炼 → 按类型合并 → 用 `msverify` 只读对照各仓库的基准 commit 验证 → 对「推翻」类结论做辩护复核 → 分为注入、分支、可搜索池、复核、丢弃五层。
-- 影子模式只写 `<vault>/_MemStore/Dreams/` 下的报告和 Runtime 中的表，**不写正式记忆，也不改变注入**。
+- 影子模式只写 `<vault>/_MemStore/Dreams/` 下的报告和 Runtime 中的表，**不写正式记忆，也不改变注入**。其中 `总览.md` 汇总最近 14 天 dreaming 保留下来的知识（全局知识在前），每次运行另有一份带验证证据的单次报告。
 
 开启 dreaming 后，也可以采集 Claude Code 会话，让 Codex 和 Claude Code 共用同一个记忆库（目前只采集，不注入）。在 `~/.claude/settings.json` 的 SessionStart、UserPromptSubmit、PostToolUse、Stop、SessionEnd hook 中运行 `node <repo>/dist/cli/hook.js claude <Event>`，并设置 `MEMSTORE_RUNTIME_ROOT`。
 
@@ -114,6 +114,7 @@ host_skill_roots = ["~/.agents/skills", "~/.codex/skills", "~/.claude/skills"]
 ```sh
 memstore dream run --project-id PROJECT_ID
 memstore dream status
+memstore dream report [RUN_ID]   # 按当前格式重新生成报告和总览
 ```
 
 模型调用通过 Codex（`codex_home`，默认 `~/.codex`，与旧的 Luna 适配器相互独立，开启 dreaming 不会重新启动旧的治理和质量任务）：提炼 Luna medium，验证 Luna high（可用 `extract_effort`、`verify_effort`、`verify_parallelism` 调整）。其他选项见 [SPEC](SPEC.md) 的 Nightly dreaming 一节和 [ADR-0147](docs/adr/0147-nightly-dreaming.md)。
