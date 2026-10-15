@@ -7,7 +7,7 @@ import { afterEach, expect, test } from "vitest";
 import { captureEvent } from "../../../src/capture/index.js";
 import { dreamingConfigurationSchema } from "../../../src/dreaming/config.js";
 import { handOffCaptureToDreaming } from "../../../src/dreaming/handoff.js";
-import type { DreamModel, Verdict } from "../../../src/dreaming/model.js";
+import { DreamModelError, type DreamModel, type Verdict } from "../../../src/dreaming/model.js";
 import { inspectDreams, renderDreamReports, runNextDreamStep, scheduleDueDreams, startDreamRun } from "../../../src/dreaming/run.js";
 import { resolveProject } from "../../../src/projects/index.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
@@ -274,6 +274,59 @@ test("a Session belongs to the Project it started in, and later activity is read
   await startDreamRun({ runtimeRoot, projectId: home.projectId, now: at(301 + 200) });
   await dream(at(301 + 200));
   expect(chunks).toHaveLength(2);
+});
+
+test("connection failures cost a chunk less than failures of the call itself", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-outage-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const folder = join(root, "notes");
+  await mkdir(vaultRoot, { recursive: true });
+  await mkdir(folder, { recursive: true });
+  const project = await resolveProject({ sessionId: "resolve", path: folder, runtimeRoot });
+  if (project.status !== "resolved") throw new Error("Project did not resolve.");
+  const start = Date.now() - 8 * 3_600_000;
+  for (const [index, sessionId] of ["outage", "broken"].entries()) {
+    await captureEvent({ runtimeRoot, event: {
+      schemaVersion: 1, eventId: `msevent_outage_${String(index)}`, deduplicationKey: `outage:${String(index)}`, agent: "codex",
+      eventKind: "UserPromptSubmit", occurredAt: new Date(start).toISOString(), projectId: project.projectId, sessionId, turnId: "t1",
+      payload: { prompt: `${sessionId} 会话` }
+    } });
+  }
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare("UPDATE capture_events SET created_at = ?").run(new Date(start).toISOString());
+  } finally {
+    database.close();
+  }
+  // The outage Session's chunk times out; the broken one's model output is invalid.
+  const model: DreamModel = {
+    extract: (request) => Promise.reject(new DreamModelError(request.chunk.includes("outage") ? "timeout" : "schema_invalid", "failed")),
+    merge: () => Promise.reject(new Error("unexpected merge")),
+    verify: () => Promise.reject(new Error("unexpected verify")),
+    defend: () => Promise.reject(new Error("unexpected defend"))
+  };
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true });
+  let clock = Date.now();
+  await startDreamRun({ runtimeRoot, projectId: project.projectId, now: new Date(clock).toISOString() });
+  async function chunks(): Promise<Record<string, string>> {
+    const db = await openRuntimeDatabase(runtimeRoot);
+    try {
+      return Object.fromEntries(db.prepare("SELECT session_id, state, attempt_count FROM dream_chunks").all()
+        .map((row) => [String(row.session_id), `${String(row.state)}:${String(row.attempt_count)}`]));
+    } finally {
+      db.close();
+    }
+  }
+  // Steps past the retry backoff each time. Step 0 selects; the broken chunk is tried first (session order) until it fails.
+  for (let step = 0; step < 16; step += 1) {
+    clock += 6 * 60_000;
+    await runNextDreamStep({ runtimeRoot, vaultRoot, now: new Date(clock).toISOString(), configuration, model, allowTemporaryRoots: true });
+    if (step === 3) expect(await chunks()).toEqual({ broken: "failed:12", outage: "pending:0" });
+    if (step === 14) expect((await chunks()).outage).toBe("pending:11");
+  }
+  expect((await chunks()).outage).toBe("failed:12");
 });
 
 test("dreaming is disabled by default and never schedules without configuration", async () => {

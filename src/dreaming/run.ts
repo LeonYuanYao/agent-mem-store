@@ -10,7 +10,7 @@ import { MemStoreCommandError } from "../contracts/envelope.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { cloneOf, sessionSourceBranches, type SourceBranch } from "./branches.js";
 import type { DreamingConfiguration } from "./config.js";
-import { DreamModelError, type DreamModel, type Verdict } from "./model.js";
+import { DreamModelError, transientModelErrors, type DreamModel, type Verdict } from "./model.js";
 import { EvidenceReader } from "./msverify.js";
 import { presearch, renderPresearch } from "./presearch.js";
 import { buildRepoMap, repoMapSchema, temporaryRootPattern, type RepoMap } from "./repo-map.js";
@@ -20,7 +20,11 @@ import { isCatchAllRoot, relevantRepositories, tierOf } from "./tier.js";
 import { routePath } from "./repo-map.js";
 
 const retryBackoffMilliseconds = 5 * 60_000;
-const maximumChunkAttempts = 3;
+// A chunk fails for good after three failures of the call itself, or after twelve
+// connection failures (about seven hours offline at a 30-minute timeout and the
+// 5-minute retry backoff), so an outage does not cost a Session its knowledge.
+const chunkFailureBudget = 12;
+const hardFailureWeight = 4;
 const mergeGroupSize = 120;
 const prepareBatchSize = 10;
 const defenseBatchSize = 4;
@@ -355,12 +359,12 @@ async function stepRun(
         advance(database, run, "extract", now, addStats(run, { extract_calls: 1, extract_tokens: usage.tokens, candidates: candidates.length }));
         return `chunk ${sessionId.slice(0, 8)}#${String(index)} -> ${String(candidates.length)}`;
       } catch (error) {
-        const attempts = Number(chunk.attempt_count) + 1;
         const code = error instanceof DreamModelError ? error.code : "local_failure";
+        const attempts = Number(chunk.attempt_count) + (transientModelErrors.includes(code) ? 1 : hardFailureWeight);
         database.prepare(
           `UPDATE dream_chunks SET attempt_count = ?, last_error_code = ?, state = CASE WHEN ? >= ? THEN 'failed' ELSE state END
            WHERE run_id = ? AND session_id = ? AND chunk_index = ?`
-        ).run(attempts, code, attempts, maximumChunkAttempts, run.runId, sessionId, index);
+        ).run(attempts, code, attempts, chunkFailureBudget, run.runId, sessionId, index);
         throw error;
       }
     }

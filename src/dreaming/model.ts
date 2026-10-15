@@ -230,6 +230,13 @@ export function codexArguments(request: {
   return args;
 }
 
+/**
+ * Failures of the connection or account rather than of the call itself. Offline,
+ * Codex keeps "waiting for network" and resumes when it returns, so an outage
+ * usually ends in `timeout`.
+ */
+export const transientModelErrors: readonly string[] = ["timeout", "network", "rate_limited", "authentication"];
+
 export class DreamModelError extends Error {
   public readonly code: string;
 
@@ -293,6 +300,7 @@ export class CodexDreamModel implements DreamModel {
       if (result.code !== 0) {
         const tail = result.stderr.toLowerCase();
         const code = /rate.?limit|429|usage limit/u.test(tail) ? "rate_limited"
+          : /waiting for network|error sending request|connection refused|stream disconnected|failed to connect|dns error|network is unreachable/u.test(tail) ? "network"
           : /401|403|log ?in|auth/u.test(tail) ? "authentication"
           : "process_failed";
         throw new DreamModelError(code, "Dream model call failed.");
