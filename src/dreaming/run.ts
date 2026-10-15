@@ -15,7 +15,7 @@ import { EvidenceReader } from "./msverify.js";
 import { presearch, renderPresearch } from "./presearch.js";
 import { buildRepoMap, repoMapSchema, temporaryRootPattern, type RepoMap } from "./repo-map.js";
 import { dreamsDirectoryName, overviewFileName, writeDreamOverview, writeDreamReport } from "./report.js";
-import { readSessionStream } from "./stream.js";
+import { readSessionStream, userWordsFor } from "./stream.js";
 import { isCatchAllRoot, relevantRepositories, tierOf } from "./tier.js";
 import { routePath } from "./repo-map.js";
 
@@ -339,12 +339,16 @@ async function stepRun(
         for (const candidate of candidates) {
           const quote = candidate.quote.replace(/\s+/gu, "").toLowerCase().slice(0, 50);
           const paths = [...new Set(candidate.turn_refs.flatMap((turn) => stream?.turnPaths[turn] ?? []))].slice(0, 10);
+          // A "user-stated" candidate whose quote comes from a reply or tool output was not said by the user.
+          const user = candidate.explicit_user ? userWordsFor(text, candidate.turn_refs, candidate.quote) : undefined;
+          const explicit = user !== undefined && user.source !== "other";
           database.prepare(
             `INSERT INTO dream_candidates(candidate_id, run_id, session_id, chunk_index, statement, claim_type, scope,
-               explicit_user, quote_found, check_hints_json, source_paths_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+               explicit_user, quote_found, check_hints_json, source_paths_json, user_words_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).run(`msdc_${randomUUID()}`, run.runId, sessionId, index, candidate.statement, candidate.claim_type, candidate.scope,
-            candidate.explicit_user ? 1 : 0, quote.length > 0 && source.includes(quote) ? 1 : 0, json(candidate.check_hints), json(paths));
+            explicit ? 1 : 0, quote.length > 0 && source.includes(quote) ? 1 : 0, json(candidate.check_hints), json(paths),
+            explicit ? json(user.words) : null);
         }
         database.prepare("UPDATE dream_chunks SET state = 'completed', candidate_count = ? WHERE run_id = ? AND session_id = ? AND chunk_index = ?")
           .run(candidates.length, run.runId, sessionId, index);
@@ -415,8 +419,9 @@ async function stepRun(
         return "prepare_complete";
       }
       const branchCache: Parameters<typeof presearch>[3] = new Map();
+      const reader = map === undefined ? undefined : new EvidenceReader(map);
       for (const item of items) {
-        const facts = map === undefined ? [] : await presearch(map, String(item.statement), now, branchCache);
+        const facts = map === undefined ? [] : await presearch(map, String(item.statement), now, branchCache, reader);
         const sessions = parseJson<string[]>(item.session_ids_json, []);
         const branches = sessions.flatMap((sessionId) => parseJson<SourceBranch[]>(
           database.prepare("SELECT branch_json FROM dream_sessions WHERE session_id = ?").get(sessionId)?.branch_json, []));
@@ -428,8 +433,8 @@ async function stepRun(
     case "verify": {
       const map = await loadMap(runtimeRoot, run.runId);
       const items = database.prepare(
-        `SELECT item_id, statement, check_hints_json, source_paths_json, presearch_json, first_seen_at FROM dream_items
-         WHERE run_id = ? AND verdict_json IS NULL ORDER BY item_id LIMIT ?`
+        `SELECT item_id, statement, check_hints_json, source_paths_json, presearch_json, first_seen_at, explicit_user, member_ids_json
+         FROM dream_items WHERE run_id = ? AND verdict_json IS NULL ORDER BY item_id LIMIT ?`
       ).all(run.runId, configuration.verify_batch_size * configuration.verify_parallelism);
       if (items.length === 0) {
         advance(database, run, "defend", now);
@@ -439,7 +444,8 @@ async function stepRun(
         for (const item of items) {
           database.prepare("UPDATE dream_items SET verdict_json = ? WHERE item_id = ?").run(json({
             id: String(item.item_id), claim_type: "external_system", durability: "long_term", scope: "project", subsystem: "",
-            verdict: "not_repo_verifiable", branch: "", evidence: [], reason: "Project has no Git repository to verify against.", refined_statement: ""
+            verdict: "not_repo_verifiable", branch: "", evidence: [], reason: "Project has no Git repository to verify against.", refined_statement: "",
+            documented_at: "", user_support: "not_applicable"
           } satisfies Verdict), String(item.item_id));
         }
         return `unverifiable ${String(items.length)}`;
@@ -456,13 +462,15 @@ async function stepRun(
         const claims = [...aliases].map(([alias, item]) => {
           const hints = parseJson<string[]>(item.check_hints_json, []);
           const paths = parseJson<string[]>(item.source_paths_json, []);
+          const words = item.explicit_user === 1 ? userWordsOf(database, parseJson<string[]>(item.member_ids_json, [])) : [];
           return {
             id: alias,
             text: String(item.statement) +
               (hints.length > 0 ? `（检索提示：${hints.join(", ")}）` : "") +
               renderPresearch(parseJson(item.presearch_json, [])) +
               (paths.length > 0 ? `（来源线索：这条记忆产生时 agent 读过这些文件，可优先查看：${paths.join(", ")}）` : ""),
-            created_at: String(item.first_seen_at).slice(0, 10)
+            created_at: String(item.first_seen_at).slice(0, 10),
+            ...(words.length > 0 ? { user_words: words } : {})
           };
         });
         const { results, usage } = await request.model.verify({ tool, repoMap, claims });
@@ -483,7 +491,7 @@ async function stepRun(
           const result = outcome.value.results.find((candidate) => candidate.id === alias);
           const verdict: Verdict = result ?? {
             id: alias, claim_type: "code_state", durability: "long_term", scope: "project", subsystem: "",
-            verdict: "inconclusive", branch: "", evidence: [], reason: "verifier_omitted", refined_statement: ""
+            verdict: "inconclusive", branch: "", evidence: [], reason: "verifier_omitted", refined_statement: "", documented_at: "", user_support: "not_applicable"
           };
           const refined = verdict.refined_statement.trim();
           database.prepare("UPDATE dream_items SET verdict_json = ?, refined_statement = ? WHERE item_id = ?")
@@ -542,6 +550,8 @@ async function stepRun(
           durability: verdict?.durability ?? "long_term",
           branch: defense?.branch || verdict?.branch || "",
           explicitUser: item.explicit_user === 1,
+          ...(verdict?.user_support === undefined ? {} : { userSupport: verdict.user_support }),
+          ...(verdict?.documented_at === undefined ? {} : { documentedAt: verdict.documented_at }),
           sessionCount: parseJson<string[]>(item.session_ids_json, []).length,
           sourceBranches: parseJson<SourceBranch[]>(item.source_branches_json, []),
           relevantRepos: relevantRepositories({
@@ -613,6 +623,21 @@ export async function renderDreamReports(request: {
   } finally {
     database.close();
   }
+}
+
+/** The user messages behind an item's user-stated members, deduplicated and bounded. */
+function userWordsOf(database: DatabaseSync, memberIds: readonly string[]): string[] {
+  const words: string[] = [];
+  let characters = 0;
+  for (const memberId of memberIds) {
+    const row = database.prepare("SELECT user_words_json FROM dream_candidates WHERE candidate_id = ?").get(memberId);
+    for (const text of parseJson<string[]>(row?.user_words_json, [])) {
+      if (words.includes(text) || words.length >= 3 || characters + text.length > 4_000) continue;
+      words.push(text);
+      characters += text.length;
+    }
+  }
+  return words;
 }
 
 export async function inspectDreams(runtimeRoot: string, limit = 10): Promise<Record<string, unknown>[]> {

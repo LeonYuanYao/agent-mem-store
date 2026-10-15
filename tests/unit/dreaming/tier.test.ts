@@ -20,7 +20,24 @@ test("negative, redundant and episodic knowledge never reaches injection", () =>
   expect(tierOf({ ...base, verdict: "contradicted", explicitUser: true }).tier).toBe("review");
   expect(tierOf({ ...base, verdict: "stale" }).tier).toBe("review");
   expect(tierOf({ ...base, verdict: "documented", sessionCount: 3 })).toEqual({ tier: "drop", reason: "already_in_autoloaded_docs" });
+  // A true claim that guidance already states is redundant, whatever the verdict says about its truth.
+  expect(tierOf({ ...base, verdict: "confirmed", documentedAt: "tteh/AGENTS.md:81" })).toEqual({ tier: "drop", reason: "already_in_autoloaded_docs" });
+  expect(tierOf({ ...base, verdict: "contradicted", documentedAt: "AGENTS.md:3" }).tier).toBe("review");
   expect(tierOf({ ...base, verdict: "confirmed", durability: "episodic" })).toEqual({ tier: "drop", reason: "episodic" });
+});
+
+test("a user-stated item is injected only when the user's own words support it", () => {
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "user_stated_rule" })).toEqual({ tier: "inject", reason: "explicit_user" });
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "pasted_task_instruction" })).toEqual({ tier: "pool", reason: "single_session_inconclusive" });
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "not_user_stated" }).tier).toBe("pool");
+  // The user's instruction for one task stays searchable even when judged one-off, and is injected once it recurs.
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "user_task_instruction", durability: "episodic" }))
+    .toEqual({ tier: "pool", reason: "user_task_instruction" });
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "user_task_instruction", sessionCount: 2 })).toEqual({ tier: "inject", reason: "recurring" });
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "pasted_task_instruction", durability: "episodic" }).tier).toBe("drop");
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "not_user_stated", sessionCount: 2 })).toEqual({ tier: "inject", reason: "recurring" });
+  // Items verified before the source check keep their earlier admission.
+  expect(tierOf({ ...base, explicitUser: true }).tier).toBe("inject");
 });
 
 test("a catch-all home-directory Project keeps global knowledge only", () => {

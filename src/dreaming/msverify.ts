@@ -13,7 +13,13 @@ import { ownerUnmergedBranches, routePath, type RepoEntry, type RepoMap } from "
  */
 
 export const outputLineCap = 120;
-const autoloadPathspecs = [":(glob)AGENTS.md", ":(glob)CLAUDE.md", ":(glob).ai/bootstrap.md", ":(glob).ai/context.md"];
+/**
+ * Guidance an agent already receives: instruction files at any depth (nested ones
+ * load when work moves into that directory) and skills kept in the repository.
+ */
+export const autoloadPathspecs = [
+  ":(glob)**/AGENTS.md", ":(glob)**/CLAUDE.md", ":(glob)**/.ai/bootstrap.md", ":(glob)**/.ai/context.md", ":(glob)**/skills/**/*.md"
+];
 
 export function sourceRank(repo: RepoEntry, innerPath: string): string {
   const path = innerPath.toLowerCase();
@@ -29,6 +35,7 @@ export function sourceRank(repo: RepoEntry, innerPath: string): string {
 export class EvidenceReader {
   readonly #map: RepoMap;
   readonly #dates = new Map<string, string>();
+  #hostSkills: Promise<{ readonly path: string; readonly lines: readonly string[] }[]> | undefined;
 
   public constructor(map: RepoMap) {
     this.#map = map;
@@ -80,6 +87,26 @@ export class EvidenceReader {
     return lines.length > 0 ? lines : ["no matches in any repository baseline"];
   }
 
+  /** Host skill files are read once per reader; verification greps them many times. */
+  #hostSkillFiles(): Promise<{ readonly path: string; readonly lines: readonly string[] }[]> {
+    this.#hostSkills ??= (async () => {
+      const files: { path: string; lines: string[] }[] = [];
+      const visit = async (directory: string, depth: number): Promise<void> => {
+        if (depth > 3) return;
+        const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          const path = join(directory, entry.name);
+          const isDirectory = entry.isDirectory() || (entry.isSymbolicLink() && (await stat(path).catch(() => undefined))?.isDirectory() === true);
+          if (isDirectory) await visit(path, depth + 1);
+          else if (entry.name.endsWith(".md")) files.push({ path, lines: (await readFile(path, "utf8").catch(() => "")).split("\n") });
+        }
+      };
+      for (const root of this.#map.hostSkillRoots) await visit(root, 0);
+      return files;
+    })();
+    return this.#hostSkills;
+  }
+
   async #hostSkillGrep(pattern: string, ignoreCase: boolean): Promise<string[]> {
     let expression: RegExp;
     try {
@@ -89,24 +116,13 @@ export class EvidenceReader {
     }
     const hits: string[] = [];
     const home = homedir();
-    const visit = async (directory: string, depth: number): Promise<void> => {
-      if (depth > 3 || hits.length >= outputLineCap) return;
-      const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
-      for (const entry of entries) {
-        const path = join(directory, entry.name);
-        const isDirectory = entry.isDirectory() || (entry.isSymbolicLink() && (await stat(path).catch(() => undefined))?.isDirectory() === true);
-        if (isDirectory) await visit(path, depth + 1);
-        else if (entry.name.endsWith(".md")) {
-          const text = await readFile(path, "utf8").catch(() => "");
-          text.split("\n").forEach((line, index) => {
-            if (expression.test(line) && hits.length < outputLineCap) {
-              hits.push(`host-skill [R2-host-skill] ${path.replace(home, "~")}:${String(index + 1)}:${line.trim().slice(0, 240)}`);
-            }
-          });
+    for (const file of await this.#hostSkillFiles()) {
+      file.lines.forEach((line, index) => {
+        if (expression.test(line) && hits.length < outputLineCap) {
+          hits.push(`host-skill [R2-host-skill] ${file.path.replace(home, "~")}:${String(index + 1)}:${line.trim().slice(0, 240)}`);
         }
-      }
-    };
-    for (const root of this.#map.hostSkillRoots) await visit(root, 0);
+      });
+    }
     return hits;
   }
 

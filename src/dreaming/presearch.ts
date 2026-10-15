@@ -1,15 +1,20 @@
 import { git } from "./git.js";
+import { EvidenceReader } from "./msverify.js";
 import { ownerUnmergedBranches, type RepoEntry, type RepoMap } from "./repo-map.js";
 
 /**
  * Deterministic pre-search: identifiers in a statement are looked up at every
- * baseline and on the owner's unmerged branches. The verifier receives these
- * facts so branch-only knowledge is noticed even when the model would not search.
+ * baseline, on the owner's unmerged branches, and in the guidance agents already
+ * load (instruction files and skills). The verifier receives these facts so
+ * branch-only or already-documented knowledge is noticed even when the model
+ * would not search.
  */
 export interface PresearchFact {
   readonly identifier: string;
   readonly baseline: readonly string[];
   readonly ownerBranches: readonly string[];
+  /** Instruction or skill files naming the identifier (absent in facts from before this field existed). */
+  readonly autoload?: readonly string[];
 }
 
 const ignored = new Set(["return", "string", "number", "boolean", "undefined", "function", "default", "project", "preview", "session"]);
@@ -33,7 +38,8 @@ export async function presearch(
   map: RepoMap,
   statement: string,
   now: string,
-  branchCache: Map<string, Awaited<ReturnType<typeof ownerUnmergedBranches>>> = new Map()
+  branchCache: Map<string, Awaited<ReturnType<typeof ownerUnmergedBranches>>> = new Map(),
+  reader: EvidenceReader = new EvidenceReader(map)
 ): Promise<PresearchFact[]> {
   const facts: PresearchFact[] = [];
   const branchesOf = async (repo: RepoEntry) => {
@@ -58,7 +64,11 @@ export async function presearch(
         }
       }
     }
-    facts.push({ identifier, baseline, ownerBranches });
+    const autoload = [...new Set((await reader.grep(identifier.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), { autoload: true }))
+      .filter((line) => line !== "no matches in any repository baseline")
+      .map((line) => /^(?:host-skill \[[^\]]*\] (\S+?):\d+:|\S+ \[[^\]]*\] (\S+?):\d+:)/u.exec(line))
+      .flatMap((match) => match === null ? [] : [match[1] ?? match[2] ?? ""]))].filter(Boolean).slice(0, 3);
+    facts.push({ identifier, baseline, ownerBranches, autoload });
   }
   return facts;
 }
@@ -66,5 +76,6 @@ export async function presearch(
 export function renderPresearch(facts: readonly PresearchFact[]): string {
   if (facts.length === 0) return "";
   return `（预检索：${facts.map((fact) =>
-    `${fact.identifier}: 基准=${fact.baseline.join("; ") || "无"}; 未合入分支=${fact.ownerBranches.join("; ") || "无"}`).join(" | ")}）`;
+    `${fact.identifier}: 基准=${fact.baseline.join("; ") || "无"}; 未合入分支=${fact.ownerBranches.join("; ") || "无"}` +
+    `; 说明/skill=${fact.autoload?.join("; ") || "无"}`).join(" | ")}）`;
 }

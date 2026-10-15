@@ -18,6 +18,14 @@ export interface TierInput {
   readonly relevantRepos?: readonly string[];
   /** Global knowledge (general tools) is not tied to any repository's branch. */
   readonly scope?: "project" | "global";
+  /**
+   * The verifier's reading of the user's own words behind a user-stated item. A
+   * pasted task description or words the user never said do not count as the
+   * user's rule; absent for items verified before this check existed.
+   */
+  readonly userSupport?: string;
+  /** Where guidance the agent already reads states the item, judged apart from its truth ("" or absent when nowhere). */
+  readonly documentedAt?: string;
   /** The Project is a catch-all root (see `isCatchAllRoot`): it keeps global knowledge only. */
   readonly catchAllProject?: boolean;
 }
@@ -37,10 +45,14 @@ export function isCatchAllRoot(root: string, home: string): boolean {
  * branch unless the baseline confirms it; everything else remains searchable.
  */
 export function tierOf(input: TierInput): { readonly tier: DreamTier; readonly reason: string } {
-  if (input.durability === "episodic") return { tier: "drop", reason: "episodic" };
+  // The user's own instruction for one task may still be a preference: keep it searchable instead of dropping it.
+  const userTaskInstruction = input.explicitUser && input.userSupport === "user_task_instruction";
+  if (input.durability === "episodic" && !userTaskInstruction) return { tier: "drop", reason: "episodic" };
   if (input.catchAllProject === true && input.scope !== "global") return { tier: "drop", reason: "catch_all_project" };
   if (input.verdict === "contradicted" || input.verdict === "stale") return { tier: "review", reason: input.verdict };
-  if (input.verdict === "documented") return { tier: "drop", reason: "already_in_autoloaded_docs" };
+  if (input.verdict === "documented" || (input.documentedAt ?? "") !== "") return { tier: "drop", reason: "already_in_autoloaded_docs" };
+  // Repeated across Sessions, it reads as a lasting preference after all.
+  if (userTaskInstruction) return input.sessionCount >= 2 ? { tier: "inject", reason: "recurring" } : { tier: "pool", reason: "user_task_instruction" };
   const relevant = input.scope === "global" ? []
     : input.relevantRepos !== undefined && input.relevantRepos.length > 0
       ? input.sourceBranches.filter((source) => input.relevantRepos?.includes(source.repo) === true)
@@ -49,7 +61,10 @@ export function tierOf(input: TierInput): { readonly tier: DreamTier; readonly r
   if (input.verdict === "branch_scoped") return { tier: "branch", reason: input.branch || unmerged[0]?.branch || "unknown_branch" };
   if (unmerged.length > 0 && input.verdict !== "confirmed") return { tier: "branch", reason: unmerged[0]?.branch ?? "unknown_branch" };
   if (input.verdict === "confirmed") return { tier: "inject", reason: "confirmed" };
-  if (input.explicitUser) return { tier: "inject", reason: "explicit_user" };
+  // Only the user's own lasting rule is admitted; an instruction for one task, a pasted task text or words the user never said are not.
+  const userStated = input.explicitUser &&
+    !["user_task_instruction", "pasted_task_instruction", "not_user_stated"].includes(input.userSupport ?? "");
+  if (userStated) return { tier: "inject", reason: "explicit_user" };
   if (input.sessionCount >= 2) return { tier: "inject", reason: "recurring" };
   return { tier: "pool", reason: `single_session_${input.verdict}` };
 }

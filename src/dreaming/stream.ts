@@ -54,6 +54,44 @@ export function userPromptText(prompt: string): string {
   return messages.length === 0 ? prompt : messages.join("\n\n");
 }
 
+const userWordsCharacters = 2_000;
+
+/**
+ * The user message(s) behind a candidate the extractor marked as user-stated. The
+ * quote decides: found in a USER turn gives that message; found only in replies or
+ * tool output means the user did not say it (`other`); not found falls back to the
+ * USER turns the candidate cites.
+ */
+export function userWordsFor(chunk: string, turnRefs: readonly string[], quote: string): {
+  readonly source: "user" | "other" | "missing";
+  readonly words: readonly string[];
+} {
+  const sections: { turn: string; user: boolean; text: string }[] = [];
+  for (const line of chunk.split("\n")) {
+    const heading = /^### (T\d+) (USER|ASSISTANT)$/u.exec(line);
+    const tool = /^\[tool (T\d+)\]/u.exec(line);
+    if (heading !== null) sections.push({ turn: heading[1] ?? "", user: heading[2] === "USER", text: "" });
+    else if (tool !== null) sections.push({ turn: tool[1] ?? "", user: false, text: line });
+    else { const last = sections.at(-1); if (last !== undefined) last.text += `${line}\n`; }
+  }
+  const normalize = (text: string): string => text.replace(/\s+/gu, "").toLowerCase();
+  const needle = normalize(quote).slice(0, 50);
+  const bound = (text: string): string => {
+    const trimmed = text.trim();
+    if (trimmed.length <= userWordsCharacters) return trimmed;
+    const at = trimmed.indexOf(quote.trim().slice(0, 20));
+    const start = at < 0 ? 0 : Math.max(0, at - userWordsCharacters / 2);
+    return trimmed.slice(start, start + userWordsCharacters);
+  };
+  if (needle.length > 0) {
+    const fromUser = sections.filter((section) => section.user && normalize(section.text).includes(needle));
+    if (fromUser.length > 0) return { source: "user", words: fromUser.slice(0, 2).map((section) => bound(section.text)) };
+    if (sections.some((section) => !section.user && normalize(section.text).includes(needle))) return { source: "other", words: [] };
+  }
+  const cited = sections.filter((section) => section.user && turnRefs.includes(section.turn));
+  return { source: "missing", words: cited.slice(0, 2).map((section) => bound(section.text)) };
+}
+
 function boundedResult(value: string): string {
   if (value.length <= toolHeadCharacters + toolTailCharacters) return value;
   const omitted = value.length - toolHeadCharacters - toolTailCharacters;

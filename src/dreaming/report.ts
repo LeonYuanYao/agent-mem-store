@@ -34,7 +34,15 @@ const reasonLabels: Record<string, string> = {
   stale: "已过时",
   episodic: "一次性信息",
   already_in_autoloaded_docs: "已写在自动加载的文档/skill 中",
-  catch_all_project: "主目录兜底项目只保留全局知识"
+  catch_all_project: "主目录兜底项目只保留全局知识",
+  user_task_instruction: "用户对当次任务的要求，只进可搜索池"
+};
+
+const userSupportLabels: Record<string, string> = {
+  user_stated_rule: "用户本人表达",
+  user_task_instruction: "用户对当次任务的要求",
+  pasted_task_instruction: "来自贴入的任务说明",
+  not_user_stated: "原话中找不到"
 };
 
 const verdictLabels: Record<string, string> = {
@@ -114,7 +122,7 @@ export async function writeDreamReport(request: {
     const group = items.filter((item) => item.tier === tier);
     lines.push(`## ${tierTitles[tier] ?? tier} · ${String(group.length)}`, "");
     for (const item of group) {
-      const verdict = parse<{ verdict?: string; evidence?: string[]; reason?: string }>(item.verdict_json, {});
+      const verdict = parse<{ verdict?: string; evidence?: string[]; reason?: string; user_support?: string; documented_at?: string }>(item.verdict_json, {});
       const defense = parse<{ decision?: string; final_verdict?: string; reason?: string } | undefined>(item.defense_json, undefined);
       const sessions = parse<string[]>(item.session_ids_json, []).length;
       // The refined statement is what dreaming would keep; the original is shown for review.
@@ -123,9 +131,12 @@ export async function writeDreamReport(request: {
       const tag = item.scope === "global" ? "〔全局〕" : "";
       lines.push(`- ${tag}${displayStatement(item)}`);
       if (typeof item.refined_statement === "string") lines.push(`  - 收窄前：${escapeLine(String(item.statement))}`);
+      const support = verdict.user_support === undefined ? undefined : userSupportLabels[verdict.user_support];
+      const userSupportNote = support === undefined ? "" : ` · 原话：${support}`;
       const defended = defense === undefined ? "" : ` → defense ${defense.decision ?? "-"}: ${defense.final_verdict ?? "-"}`;
       lines.push(`  - ${reasonLabel(tier, String(item.tier_reason))} · verdict: ${verdict.verdict ?? "-"}${defended}` +
-        ` · scope: ${String(item.scope)} · sessions: ${String(sessions)}`);
+        ` · scope: ${String(item.scope)} · sessions: ${String(sessions)}` + userSupportNote);
+      if ((verdict.documented_at ?? "") !== "") lines.push(`  - 已写在：${escapeLine(verdict.documented_at ?? "")}`);
       for (const evidence of (verdict.evidence ?? []).slice(0, 2)) lines.push(`  - 证据：${escapeLine(evidence).slice(0, 240)}`);
       if (tier === "review" || tier === "branch") lines.push(`  - 理由：${escapeLine(defense?.reason ?? verdict.reason ?? "").slice(0, 240)}`);
     }

@@ -47,7 +47,10 @@ export const verdictSchema = z.object({
   branch: z.string(),
   evidence: z.array(z.string()),
   reason: z.string(),
-  refined_statement: z.string()
+  refined_statement: z.string(),
+  /** Where guidance the agent already reads states this claim ("" when nowhere), judged apart from its truth. */
+  documented_at: z.string(),
+  user_support: z.enum(["user_stated_rule", "user_task_instruction", "pasted_task_instruction", "not_user_stated", "not_applicable"])
 });
 export type Verdict = z.infer<typeof verdictSchema>;
 const verifySchema = z.object({ results: z.array(verdictSchema) });
@@ -84,12 +87,20 @@ export interface ModelUsage {
   readonly seconds: number;
 }
 
+export interface VerifyClaim {
+  readonly id: string;
+  readonly text: string;
+  readonly created_at: string;
+  /** The user's own messages behind a user-stated claim. */
+  readonly user_words?: readonly string[];
+}
+
 export interface DreamModel {
   extract(request: { readonly projectLabel: string; readonly chunk: string; readonly index: number; readonly total: number }):
     Promise<{ readonly candidates: ExtractedCandidate[]; readonly usage: ModelUsage }>;
   merge(request: { readonly candidates: readonly { id: string; statement: string; claim_type: string; scope: string }[] }):
     Promise<{ readonly items: z.infer<typeof mergedItemSchema>[]; readonly usage: ModelUsage }>;
-  verify(request: { readonly tool: string; readonly repoMap: string; readonly claims: readonly { id: string; text: string; created_at: string }[] }):
+  verify(request: { readonly tool: string; readonly repoMap: string; readonly claims: readonly VerifyClaim[] }):
     Promise<{ readonly results: Verdict[]; readonly usage: ModelUsage }>;
   defend(request: { readonly tool: string; readonly repoMap: string; readonly claims: readonly Record<string, unknown>[] }):
     Promise<{ readonly results: Defense[]; readonly usage: ModelUsage }>;
@@ -131,7 +142,7 @@ const mergePrompt = `下面是多个会话各自提炼出的候选记忆。请�
 const verifyPrompt = (tool: string, repoMap: string, claims: string): string => `你是记忆验证器。逐条核实下面的记忆说法。证据只能来自 msverify（只读，基于各仓库的基准 commit，与本地分支和未提交改动无关）：
   ${tool} map
   ${tool} grep [-i] [--repo R] [--path GLOB] PATTERN     PATTERN 为扩展正则（可用 a|b）；每个命中会标注 [来源等级 文件最后修改日期]
-  ${tool} grep --autoload [-i] PATTERN                     只搜 agent 启动时自动加载的说明文件（AGENTS.md、CLAUDE.md、.ai/bootstrap.md、.ai/context.md）和本机 skill
+  ${tool} grep --autoload [-i] PATTERN                     只搜 agent 已经会读到的说明：任意层级的 AGENTS.md、CLAUDE.md、.ai/bootstrap.md、.ai/context.md，仓库内 skills 目录，以及本机 skill
   ${tool} show PATH [--from N --to M]                      读文件（路径相对项目根），表头给出来源等级和最后修改日期
   ${tool} ls PATH
   ${tool} log-s [--repo R] TEXT                            查所有本地分支上引入/删除该文本的提交
@@ -149,7 +160,7 @@ ${repoMap}
 
 步骤：
 1. 先确定说法针对的子系统（subsystem）。证据必须来自同一子系统；同名命令在不同子系统行为不同。
-2. 对 workflow_process / decision_requirement / preference 类，先用 grep --autoload 检查是否已写在自动加载的说明文件或 skill 里。
+2. 先用 grep --autoload 搜说法的核心术语（符号名，以及中文概念在代码和 skill 里的英文写法），预检索里「说明/skill」有命中时先读这些位置。documented_at 单独回答「agent 会读到的说明文件或 skill 是否已经写了这条内容」：核心事实和适用条件都已写明（不要求逐字）就填 "路径:行号"，否则填空字符串。它与 verdict 无关：内容正确且已写明时，verdict 仍按证据判（例如 confirmed），同时填 documented_at。
 3. code_state 类：用说法里的具体符号/路径/配置键搜索，读足够上下文（包括被调用的函数本身，不要只看第一个相关片段）。
 4. 判定：
    - confirmed：同子系统的 R1/R2 来源直接支持；
@@ -160,6 +171,12 @@ ${repoMap}
    - not_repo_verifiable：偏好、外部系统、本机环境等无法用仓库验证；
    - inconclusive：其余情况。
 5. scope：通用工具知识（飞书、lark-cli、git、Codex 等，与本项目无关）填 global，其余 project。durability：一次性信息填 episodic。
+5a. 说法附有 user_words（用户原话）时，据原话判断 user_support：
+    user_stated_rule：用户本人表达的、换一个任务仍然适用的规则、偏好或决定；
+    user_task_instruction：用户本人说的，但只是对当前这次任务的要求（换一个任务就不一定成立）；
+    pasted_task_instruction：来自用户贴进来的任务说明、游戏规则、提示词模板等，不是用户自己的规则；
+    not_user_stated：原话里没有这个意思。
+    没有附 user_words 时填 not_applicable。
 6. 若说法后附有「预检索」：它是本地程序对标识符的确定性搜索结果。标识符只在未合入分支出现而基准中没有时，强烈提示 branch_scoped，需用 branch-grep / show 确认；若附有「来源线索」，优先查看这些文件。
 7. evidence 每条形如 "repo@sha [等级 日期] path:line 简短引用"；reason 一句话；branch 不适用时填空字符串。每条说法最多 6 次工具调用。
 8. refined_statement：若证据支持核心内容，但原说法过度概括（把推荐做法说成必须、漏掉适用条件、范围过宽，或个别细节与证据不符），给出按证据收窄后的完整改写：保留原语言、子系统、条件和否定表述，不加入证据之外的新事实；verdict 按改写后的说法判定。说法准确无需修改，或证据不足以改写时，填空字符串。
@@ -306,7 +323,7 @@ export class CodexDreamModel implements DreamModel {
     return { items: output.items, usage };
   }
 
-  public async verify(request: { tool: string; repoMap: string; claims: readonly { id: string; text: string; created_at: string }[] }) {
+  public async verify(request: { tool: string; repoMap: string; claims: readonly VerifyClaim[] }) {
     const { output, usage } = await this.#invoke(verifyPrompt(request.tool, request.repoMap, JSON.stringify(request.claims, null, 1)),
       verifySchema, this.#options.verifyEffort, true);
     return { results: output.results, usage };

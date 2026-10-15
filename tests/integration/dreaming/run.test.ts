@@ -67,13 +67,19 @@ function fakeModel(log: string[]): DreamModel {
     verify(request) {
       log.push(`verify:${String(request.claims.length)}`);
       expect(request.repoMap).toContain("origin/");
+      // The user's own message travels with the user-stated claim, and only with it.
+      for (const claim of request.claims) {
+        if (claim.text.startsWith(statements.preference)) expect(claim.user_words?.[0]).toContain("以后提 MR 都用 Bits");
+        else expect(claim.user_words).toBeUndefined();
+      }
       return Promise.resolve({ usage: { tokens: 50, seconds: 1 }, results: request.claims.map((claim): Verdict => {
         const verdict = claim.text.startsWith(statements.code) ? "confirmed"
           : claim.text.startsWith(statements.wrong) ? "contradicted"
           : claim.text.startsWith(statements.preference) ? "not_repo_verifiable" : "inconclusive";
         return { id: claim.id, claim_type: "code_state", durability: claim.text.startsWith(statements.oneOff) ? "episodic" : "long_term",
           scope: claim.text.startsWith(statements.preference) ? "global" : "project", subsystem: "preview", verdict, branch: "", evidence: ["clone@abc [R1-implementation 2026-01-01] src/preview.ts:1"], reason: "test",
-          refined_statement: claim.text.startsWith(statements.code) ? "TTEH 的 `setVideo` 在预览中调用 `reloadEffect` 重新加载特效。" : "" };
+          refined_statement: claim.text.startsWith(statements.code) ? "TTEH 的 `setVideo` 在预览中调用 `reloadEffect` 重新加载特效。" : "",
+          documented_at: "", user_support: claim.user_words === undefined ? "not_applicable" : "user_stated_rule" };
       }) });
     },
     defend(request) {

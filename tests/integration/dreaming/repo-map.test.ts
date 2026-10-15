@@ -6,6 +6,7 @@ import { afterEach, expect, test } from "vitest";
 
 import { branchAt, sessionSourceBranches } from "../../../src/dreaming/branches.js";
 import { EvidenceReader, sourceRank } from "../../../src/dreaming/msverify.js";
+import { presearch } from "../../../src/dreaming/presearch.js";
 import { buildRepoMap, routePath } from "../../../src/dreaming/repo-map.js";
 
 const directories: string[] = [];
@@ -42,7 +43,10 @@ async function clonedRepository(parent: string, name: string, files: Record<stri
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "memstore-dream-repo-"));
   directories.push(root);
-  const workspaceOrigin = await clonedRepository(root, "workspace", { "AGENTS.md": "Use Bits to create merge requests.\n", "README.md": "workspace\n" });
+  const workspaceOrigin = await clonedRepository(root, "workspace", {
+    "AGENTS.md": "Use Bits to create merge requests.\n", "README.md": "workspace\n",
+    "tools/ui/.ai/skills/ui-dsl/SKILL.md": "Reorder tree rows with uiDrag.\n", "docs/notes.md": "uiDrag is also mentioned here.\n"
+  });
   const engineOrigin = await clonedRepository(root, "engine", {
     "src/preview.ts": "export function setVideo() { reloadEffect(); }\n",
     "src/__tests__/preview.test.ts": "test('setVideo reloads', () => {});\n"
@@ -79,6 +83,12 @@ test("the repository map reads every repository at its baseline, never the check
   expect(hits[0]).toMatch(/\[R1-implementation \d{4}-\d{2}-\d{2}\]/u);
   expect((await reader.show("engine/src/preview.ts"))[1]).toContain("reloadEffect");
   expect((await reader.grep("Bits", { autoload: true })).join("\n")).toContain("AGENTS.md:1");
+  // Skills kept inside a repository count as guidance the agent already has; ordinary docs do not.
+  const guidance = (await reader.grep("uiDrag", { autoload: true })).join("\n");
+  expect(guidance).toContain("tools/ui/.ai/skills/ui-dsl/SKILL.md:1");
+  expect(guidance).not.toContain("docs/notes.md");
+  const [fact] = await presearch(map, "树形重排使用 `uiDrag`", new Date().toISOString());
+  expect(fact).toMatchObject({ identifier: "uiDrag", autoload: ["tools/ui/.ai/skills/ui-dsl/SKILL.md"] });
 
   const branch = await reader.branchGrep("keepState", new Date().toISOString());
   expect(branch.join("\n")).toContain("engine@branch:feature/keep-state");
