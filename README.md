@@ -152,7 +152,7 @@ When enabled:
 - Shadow mode writes only reports under `<vault>/_MemStore/Dreams/` and runtime tables. **It never writes canonical Memory or changes injection.** `总览.md` there lists what dreaming kept in the last 14 days, global knowledge first; each run also has its own report with the verifier's evidence.
 - With `mode = "apply"` the inject tier is also written as canonical Memory (agent-derived, policy version `dreaming-v1`), after comparison with the closest existing Memory in its scope; Human-authored Memory always wins. `[adapters].dreaming_injection = true` admits it to automatic injection while `human_authored_only_injection` keeps other agent-derived Memory out. See [ADR-0148](docs/adr/0148-apply-dreaming-to-canonical-memory.md).
 
-With dreaming enabled, Claude Code sessions can be captured too, so Codex and Claude Code share one store (capture only for now, no injection): run `node <repo>/dist/cli/hook.js claude <Event>` with `MEMSTORE_RUNTIME_ROOT` from the SessionStart, UserPromptSubmit, PostToolUse, Stop and SessionEnd hooks in `~/.claude/settings.json`.
+Claude Code shares the same store: run `node <repo>/dist/cli/hook.js claude <Event>` with `MEMSTORE_RUNTIME_ROOT` from the SessionStart, UserPromptSubmit, PostToolUse, Stop and SessionEnd hooks in `~/.claude/settings.json`. With dreaming enabled the hooks capture sessions; with `MEMSTORE_INJECTION_MODE=active` and a synchronous UserPromptSubmit hook they also inject memory like Codex (`[adapters].claude_hook_display` sets the line shown, default `summary`). See [ADR-0149](docs/adr/0149-inject-memory-into-claude-code.md).
 
 Run once by hand and inspect runs:
 

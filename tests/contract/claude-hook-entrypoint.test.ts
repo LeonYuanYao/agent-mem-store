@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createServer, type Server } from "node:net";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import { afterEach, expect, test } from "vitest";
 
 import { readLastAssistantMessage } from "../../src/adapters/claude/transcript.js";
 import { importCaptureInboxBatch } from "../../src/capture/inbox.js";
+import { foregroundRetrievalSocketPath } from "../../src/retrieval/foreground-protocol.js";
 import { openRuntimeDatabase } from "../../src/runtime/database.js";
 
 const temporaryDirectories: string[] = [];
@@ -29,11 +31,11 @@ async function fixture(dreaming: boolean) {
   return { root, runtimeRoot, project };
 }
 
-function runHook(runtimeRoot: string, event: string, input: Record<string, unknown>): Promise<{ status: number | null; stdout: string; stderr: string }> {
+function runHook(runtimeRoot: string, event: string, input: Record<string, unknown>, environment: Record<string, string> = {}): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((resolvePromise) => {
     const child = spawn(process.execPath, ["--import", "tsx", hookEntrypoint, "claude", event], {
       cwd: repositoryRoot,
-      env: { ...process.env, MEMSTORE_RUNTIME_ROOT: runtimeRoot },
+      env: { ...process.env, MEMSTORE_INJECTION_MODE: "", MEMSTORE_RUNTIME_ROOT: runtimeRoot, ...environment },
       stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "";
@@ -104,4 +106,85 @@ test("the last assistant reply is read from the transcript tail, scoped to the S
   ].map((record) => JSON.stringify(record)).join("\n"));
   expect(await readLastAssistantMessage(path, "s")).toBe("part one\npart two");
   expect(await readLastAssistantMessage(join(root, "missing.jsonl"), "s")).toBeUndefined();
+});
+
+const memoryText = "<memstore-candidates>\n[M:123 S:P A:A R:C] verified dreaming memory\n</memstore-candidates>";
+
+/** A stand-in for the Worker's foreground retrieval lane that answers every request with one memory. */
+async function foregroundServer(runtimeRoot: string, requests: Record<string, unknown>[]): Promise<Server> {
+  await mkdir(join(runtimeRoot, "state"), { recursive: true });
+  const server = createServer((socket) => {
+    let source = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      source += chunk;
+      if (!source.includes("\n")) return;
+      const request = JSON.parse(source.split("\n", 1)[0] ?? "{}") as Record<string, unknown>;
+      requests.push(request);
+      if (request.kind === "context_update") {
+        socket.end(`${JSON.stringify({ schemaVersion: 2, requestId: request.requestId, kind: "context_update", state: "applied" })}\n`);
+        return;
+      }
+      socket.end(`${JSON.stringify({ schemaVersion: 2, requestId: request.requestId, state: "completed", event: request.event,
+        text: memoryText, receiptId: "msreceipt_claude", renderedTokenCount: 8 })}\n`);
+    });
+  });
+  await new Promise<void>((resolveListen) => server.listen(foregroundRetrievalSocketPath(runtimeRoot), resolveListen));
+  return server;
+}
+
+async function shortFixture(config: string) {
+  // Unix socket paths are short; keep the runtime under /tmp.
+  const root = await mkdtemp("/tmp/msclaude-");
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "rt");
+  const project = join(root, "project");
+  await mkdir(project, { recursive: true });
+  await mkdir(runtimeRoot, { recursive: true });
+  await writeFile(join(runtimeRoot, "config.toml"), config);
+  (await openRuntimeDatabase(runtimeRoot, { applyPendingMigrations: true })).close();
+  return { runtimeRoot, project };
+}
+
+for (const display of ["default", "off"] as const) {
+  test(`active Claude UserPromptSubmit injects retrieved memory as additional context (${display} display)`, async () => {
+    const { runtimeRoot, project } = await shortFixture(
+      `schema_version = 1\n${display === "off" ? "[adapters]\nclaude_hook_display = \"off\"\n" : ""}\n[dreaming]\nenabled = true\n`);
+    const requests: Record<string, unknown>[] = [];
+    const server = await foregroundServer(runtimeRoot, requests);
+    try {
+      const result = await runHook(runtimeRoot, "UserPromptSubmit",
+        { session_id: "claude-inject", cwd: project, prompt: "recall sqlite", hook_event_name: "UserPromptSubmit" },
+        { MEMSTORE_INJECTION_MODE: "active" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        ...(display === "off" ? {} : { systemMessage: "MemStore (UserPromptSubmit): 1 memories · 8 tokens" }),
+        hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: memoryText }
+      });
+      // The request carries the prompt and the captured event, so the Worker does not evaluate it again later.
+      expect(requests.at(-1)).toMatchObject({ event: "UserPromptSubmit", sessionId: "claude-inject", prompt: "recall sqlite" });
+      expect(String(requests.at(-1)?.eventId)).toMatch(/^msevent_claude_/u);
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => { resolveClose(); }));
+    }
+  });
+}
+
+test("Claude injection works without dreaming and fails open when the Worker is unavailable", async () => {
+  const { runtimeRoot, project } = await shortFixture("schema_version = 1\n");
+  const input = { session_id: "claude-no-dreaming", cwd: project, prompt: "recall sqlite", hook_event_name: "UserPromptSubmit" };
+  const requests: Record<string, unknown>[] = [];
+  const server = await foregroundServer(runtimeRoot, requests);
+  try {
+    const injected = await runHook(runtimeRoot, "UserPromptSubmit", input, { MEMSTORE_INJECTION_MODE: "active" });
+    expect(JSON.parse(injected.stdout)).toMatchObject({ hookSpecificOutput: { additionalContext: memoryText } });
+    expect(requests.at(-1)?.eventId).toBeUndefined();
+    expect(await capturedEvents(runtimeRoot)).toEqual([]);
+  } finally {
+    await new Promise<void>((resolveClose) => server.close(() => { resolveClose(); }));
+  }
+  const started = performance.now();
+  const unavailable = await runHook(runtimeRoot, "UserPromptSubmit", input, { MEMSTORE_INJECTION_MODE: "active" });
+  expect(unavailable).toMatchObject({ status: 0, stdout: "" });
+  expect(performance.now() - started).toBeLessThan(2_500);
 });

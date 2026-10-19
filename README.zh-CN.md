@@ -108,7 +108,7 @@ host_skill_roots = ["~/.agents/skills", "~/.codex/skills", "~/.claude/skills"]
 - 影子模式只写 `<vault>/_MemStore/Dreams/` 下的报告和 Runtime 中的表，**不写正式记忆，也不改变注入**。其中 `总览.md` 汇总最近 14 天 dreaming 保留下来的知识（全局知识在前），每次运行另有一份带验证证据的单次报告。
 - `mode = "apply"` 时，注入层还会写成正式记忆（代理生成，来源标记 `dreaming-v1`）：写入前和同范围内最相近的已有记忆比对，手写记忆永远优先。`[adapters].dreaming_injection = true` 让自动注入接纳这些记忆，其他代理记忆仍被 `human_authored_only_injection` 排除。见 [ADR-0148](docs/adr/0148-apply-dreaming-to-canonical-memory.md)。
 
-开启 dreaming 后，也可以采集 Claude Code 会话，让 Codex 和 Claude Code 共用同一个记忆库（目前只采集，不注入）。在 `~/.claude/settings.json` 的 SessionStart、UserPromptSubmit、PostToolUse、Stop、SessionEnd hook 中运行 `node <repo>/dist/cli/hook.js claude <Event>`，并设置 `MEMSTORE_RUNTIME_ROOT`。
+Claude Code 和 Codex 共用同一个记忆库：在 `~/.claude/settings.json` 的 SessionStart、UserPromptSubmit、PostToolUse、Stop、SessionEnd hook 中运行 `node <repo>/dist/cli/hook.js claude <Event>`，并设置 `MEMSTORE_RUNTIME_ROOT`。开启 dreaming 时这些 hook 负责采集；再设置 `MEMSTORE_INJECTION_MODE=active`，并把 UserPromptSubmit hook 设为同步，就会像 Codex 一样注入记忆（`[adapters].claude_hook_display` 控制界面显示，默认只显示一行摘要）。见 [ADR-0149](docs/adr/0149-inject-memory-into-claude-code.md)。
 
 手动试跑和查看状态：
 

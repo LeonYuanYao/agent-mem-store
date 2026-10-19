@@ -11,9 +11,11 @@ export const adapterDisplaySchema = z.object({
   session_start_injection: z.boolean().default(false),
   subagents_enabled: z.boolean().default(false),
   human_authored_only_injection: z.boolean().default(false),
-  dreaming_injection: z.boolean().default(false)
+  dreaming_injection: z.boolean().default(false),
+  // Claude Code shows a Hook systemMessage on every prompt, so a one-line summary is its default.
+  claude_hook_display: hookDisplaySchema.default("summary")
 }).loose().default({ hook_display: "summary", session_start_injection: false, subagents_enabled: false,
-  human_authored_only_injection: false, dreaming_injection: false });
+  human_authored_only_injection: false, dreaming_injection: false, claude_hook_display: "summary" });
 
 export async function readHumanAuthoredOnlyInjection(runtimeRoot: string): Promise<boolean> {
   try {
@@ -87,6 +89,18 @@ export async function readHookDisplay(runtimeRoot: string): Promise<HookDisplay>
     return config.adapters.hook_display;
   } catch {
     // Presentation failure must not prevent capture or model context delivery.
+    return "summary";
+  }
+}
+
+export async function readClaudeHookDisplay(runtimeRoot: string): Promise<HookDisplay> {
+  try {
+    const config = z.object({
+      schema_version: z.literal(1),
+      adapters: adapterDisplaySchema
+    }).parse(parse(await readFile(join(runtimeRoot, "config.toml"), "utf8")));
+    return config.adapters.claude_hook_display;
+  } catch {
     return "summary";
   }
 }
