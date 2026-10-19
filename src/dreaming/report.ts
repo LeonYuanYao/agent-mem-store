@@ -5,6 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { Temporal } from "@js-temporal/polyfill";
 
 import { writeFileAtomically } from "../contracts/atomic-file.js";
+import { openRuntimeDatabase } from "../runtime/database.js";
 import { temporaryRootPattern } from "./repo-map.js";
 
 /**
@@ -56,6 +57,83 @@ function reasonLabel(tier: string, reason: string): string {
   if (tier === "branch") return `分支 ${reason}`;
   const verdict = /^single_session_(.+)$/u.exec(reason)?.[1];
   return verdict === undefined ? reason : `仅一个会话出现，${verdictLabels[verdict] ?? verdict}`;
+}
+
+export const applyStateLabels: Record<string, string> = {
+  written: "新建",
+  revised: "修订已有的 dreaming 记忆",
+  observed: "已有同一条，记一次观察",
+  duplicate_human: "手写记忆已覆盖，跳过",
+  conflict_human: "与手写记忆矛盾，需要你复核",
+  review_due: "已写入的记忆被判错误或过时，停止注入",
+  skipped: "跳过",
+  failed: "失败，下次重试",
+  pending: "待写入"
+};
+const applyStateOrder = ["conflict_human", "written", "revised", "review_due", "observed", "duplicate_human", "skipped", "failed", "pending"];
+
+function memoryRefs(database: DatabaseSync, memoryIds: readonly string[]): Map<string, string> {
+  const refs = new Map<string, string>();
+  for (const memoryId of new Set(memoryIds)) {
+    const ref = database.prepare("SELECT memory_ref FROM memory_catalog WHERE memory_id = ?").get(memoryId)?.memory_ref;
+    refs.set(memoryId, typeof ref === "number" ? `M:${String(ref)}` : memoryId.slice(0, 14));
+  }
+  return refs;
+}
+
+function applyLines(database: DatabaseSync, rows: readonly { state: string; text: string; memoryId?: string | undefined; reason: string; prefix?: string }[]): string[] {
+  const refs = memoryRefs(database, rows.flatMap((row) => row.memoryId === undefined ? [] : [row.memoryId]));
+  const lines: string[] = [];
+  for (const state of applyStateOrder) {
+    const group = rows.filter((row) => row.state === state);
+    if (group.length === 0) continue;
+    lines.push(`### ${applyStateLabels[state] ?? state} · ${String(group.length)}`, "");
+    for (const row of group) {
+      const ref = row.memoryId === undefined ? "" : ` → ${refs.get(row.memoryId) ?? ""}`;
+      lines.push(`- ${row.prefix ?? ""}${escapeLine(row.text)}${ref}`);
+      if (state !== "written" && state !== "observed" && row.reason !== "") lines.push(`  - ${escapeLine(row.reason).slice(0, 200)}`);
+    }
+    lines.push("");
+  }
+  return lines;
+}
+
+/** The note `memstore dream apply` writes: what apply would do (preview) or did. */
+export async function writeApplyNote(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly now: string;
+  readonly timeZone: string;
+  readonly preview: boolean;
+  readonly outcomes: readonly { readonly state: string; readonly text: string; readonly memoryId?: string; readonly reason: string; readonly projectId: string }[];
+}): Promise<string> {
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    const at = Temporal.Instant.from(request.now).toZonedDateTimeISO(request.timeZone);
+    const counts = applyStateOrder.flatMap((state) => {
+      const count = request.outcomes.filter((outcome) => outcome.state === state).length;
+      return count === 0 ? [] : [`${applyStateLabels[state] ?? state} ${String(count)}`];
+    });
+    const lines = [
+      `# Dreams apply ${request.preview ? "预演" : "结果"} · ${at.toPlainDate().toString()}`, "",
+      request.preview
+        ? "- 预演只判断、不写入：下面是正式写入时每条注入层知识会怎么处理。预演中每批只能看到已有记忆，所以同一条在不同批次重复时，正式写入会比这里多出「已有同一条」。"
+        : "- 已写入正式记忆（来源标记 dreaming-v1，归在代理生成）。撤销：`memstore dream rollback --apply`（批量归档，可恢复）。",
+      `- ${counts.join(" · ") || "没有需要处理的条目"}`, ""
+    ];
+    const projects = [...new Set(request.outcomes.map((outcome) => outcome.projectId))];
+    for (const projectId of projects) {
+      const rows = request.outcomes.filter((outcome) => outcome.projectId === projectId);
+      lines.push(`## ${projectDisplay(database, projectId).label} · ${String(rows.length)}`, "", ...applyLines(database, rows));
+    }
+    const directory = join(request.vaultRoot, dreamsDirectoryName);
+    await mkdir(directory, { recursive: true });
+    const path = join(directory, `apply-${request.preview ? "preview" : "result"}-${at.toPlainDate().toString()}.md`);
+    await writeFileAtomically(path, `${lines.join("\n")}\n`, 0o644);
+    return path;
+  } finally {
+    database.close();
+  }
 }
 
 function parse<T>(value: unknown, fallback: T): T {
@@ -141,6 +219,15 @@ export async function writeDreamReport(request: {
       if (tier === "review" || tier === "branch") lines.push(`  - 理由：${escapeLine(defense?.reason ?? verdict.reason ?? "").slice(0, 240)}`);
     }
     lines.push("");
+  }
+  const applied = request.database.prepare(
+    "SELECT COALESCE(refined_statement, statement) AS text, apply_state, apply_memory_id, apply_reason FROM dream_items WHERE run_id = ? AND apply_state IS NOT NULL ORDER BY item_id"
+  ).all(request.runId);
+  if (applied.length > 0) {
+    lines.push(`## 写入正式记忆 · ${String(applied.length)}`, "", ...applyLines(request.database, applied.map((row) => ({
+      state: String(row.apply_state), text: String(row.text), reason: typeof row.apply_reason === "string" ? row.apply_reason : "",
+      ...(typeof row.apply_memory_id === "string" ? { memoryId: row.apply_memory_id } : {})
+    }))));
   }
   const directory = join(request.vaultRoot, dreamsDirectoryName);
   await mkdir(directory, { recursive: true });

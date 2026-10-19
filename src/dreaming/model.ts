@@ -56,6 +56,15 @@ export const verdictSchema = z.object({
 export type Verdict = z.infer<typeof verdictSchema>;
 const verifySchema = z.object({ results: z.array(verdictSchema) });
 
+export const reconciliationSchema = z.object({
+  id: z.string(),
+  decision: z.enum(["new", "duplicate", "refines", "conflicts"]),
+  target: z.string(),
+  reason: z.string()
+});
+export type Reconciliation = z.infer<typeof reconciliationSchema>;
+const reconcileSchema = z.object({ results: z.array(reconciliationSchema) });
+
 export const defenseSchema = z.object({
   id: z.string(),
   decision: z.enum(["uphold", "overturn"]),
@@ -105,6 +114,14 @@ export interface DreamModel {
     Promise<{ readonly results: Verdict[]; readonly usage: ModelUsage }>;
   defend(request: { readonly tool: string; readonly repoMap: string; readonly claims: readonly Record<string, unknown>[] }):
     Promise<{ readonly results: Defense[]; readonly usage: ModelUsage }>;
+  /** Apply mode: compares new items with the closest existing Memory and earlier items of the batch. */
+  reconcile(request: { readonly items: readonly ReconcileItem[] }): Promise<{ readonly results: Reconciliation[]; readonly usage: ModelUsage }>;
+}
+
+export interface ReconcileItem {
+  readonly id: string;
+  readonly text: string;
+  readonly candidates: readonly { readonly id: string; readonly text: string }[];
 }
 
 // ------------------------------------------------------------------ prompts
@@ -201,6 +218,15 @@ ${claims}
 
 仓库地图：
 ${repoMap}
+`;
+
+const reconcilePrompt = `下面是准备写入记忆库的新知识（N 开头），每条附有记忆库中文本最接近的已有记忆（H 开头是用户手写的，D 开头是之前自动写入的）和同一批里更早的新知识（N 开头）。逐条判断它与这些记忆的关系：
+- new：没有任何一条表达同一事实；
+- duplicate：与某一条（target）表达同一事实，没有新的信息；
+- refines：与某一条（target）是同一事实，但新知识更准确、更完整，或纠正了它的细节；
+- conflicts：与某一条（target）直接矛盾。
+只比较事实本身：措辞、语言、详略不同不算不同事实；同一主题下的不同事实是 new。target 填对应编号，new 时填空字符串；reason 一句话。
+新知识（JSON）：
 `;
 
 // ------------------------------------------------------------------ Codex invocation
@@ -344,6 +370,11 @@ export class CodexDreamModel implements DreamModel {
   public async verify(request: { tool: string; repoMap: string; claims: readonly VerifyClaim[] }) {
     const { output, usage } = await this.#invoke(verifyPrompt(request.tool, request.repoMap, JSON.stringify(request.claims, null, 1)),
       verifySchema, this.#options.verifyEffort, true);
+    return { results: output.results, usage };
+  }
+
+  public async reconcile(request: { items: readonly ReconcileItem[] }) {
+    const { output, usage } = await this.#invoke(reconcilePrompt + JSON.stringify(request.items, null, 1), reconcileSchema, this.#options.extractEffort, false);
     return { results: output.results, usage };
   }
 

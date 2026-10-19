@@ -382,6 +382,11 @@ const migrations: readonly Migration[] = [
     version: 70,
     name: "dream_candidate_user_words",
     path: new URL("../../migrations/0070-dream-candidate-user-words.sql", import.meta.url)
+  },
+  {
+    version: 71,
+    name: "dream_apply",
+    path: new URL("../../migrations/0071-dream-apply.sql", import.meta.url)
   }
 ];
 

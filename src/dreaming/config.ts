@@ -7,8 +7,8 @@ const reasoningEffortSchema = z.enum(["low", "medium", "high", "xhigh"]);
 
 export const dreamingConfigurationSchema = z.object({
   enabled: z.boolean().default(false),
-  // Apply mode (writing canonical Memory) is intentionally not available yet.
-  mode: z.literal("shadow").default("shadow"),
+  // shadow writes reports only; apply also writes inject-tier items to canonical Memory (ADR-0148).
+  mode: z.enum(["shadow", "apply"]).default("shadow"),
   hour: z.number().int().min(0).max(23).default(3),
   timezone: z.string().min(1).default("Asia/Shanghai"),
   lookback_days: z.number().int().min(1).max(30).default(7),

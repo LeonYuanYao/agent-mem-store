@@ -33,7 +33,8 @@ const indexedMemoryRowSchema = z.object({
   standard_validated: z.union([z.literal(0), z.literal(1)]),
   standard_token_count: z.number().int().nonnegative(),
   searchable_text: z.string(),
-  vector_ordinal: z.number().int().nonnegative()
+  vector_ordinal: z.number().int().nonnegative(),
+  policy_version: z.string().nullable().optional()
 });
 
 export interface IndexedMemory {
@@ -64,6 +65,8 @@ export interface IndexedMemory {
   readonly standardTokenCount: number;
   readonly searchableText: string;
   readonly vectorOrdinal: number;
+  /** Absent in documents indexed before policy versions were recorded. */
+  readonly policyVersion?: string | undefined;
 }
 
 export interface RetrievalSearchDocument {
@@ -176,7 +179,8 @@ const indexedMemorySnapshotSchema = z.object({
   standardValidated: z.boolean(),
   standardTokenCount: z.number().int().nonnegative(),
   searchableText: z.string(),
-  vectorOrdinal: z.number().int().nonnegative()
+  vectorOrdinal: z.number().int().nonnegative(),
+  policyVersion: z.string().optional()
 });
 
 export function rowToIndexedMemory(row: Record<string, unknown>): IndexedMemory {
@@ -212,7 +216,8 @@ export function rowToIndexedMemory(row: Record<string, unknown>): IndexedMemory 
     standardValidated: parsed.standard_validated === 1,
     standardTokenCount: parsed.standard_token_count,
     searchableText: parsed.searchable_text,
-    vectorOrdinal: parsed.vector_ordinal
+    vectorOrdinal: parsed.vector_ordinal,
+    ...(parsed.policy_version === null || parsed.policy_version === undefined ? {} : { policyVersion: parsed.policy_version })
   };
 }
 

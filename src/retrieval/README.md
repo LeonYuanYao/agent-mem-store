@@ -93,7 +93,7 @@ Machine-local `[adapters].human_authored_only_injection = true` excludes
 Agent-derived memories before automatic candidate ranking and Jev. Both
 SessionStart bucket paging and UserPromptSubmit scope loading enforce it for
 SQLite and resident snapshots. Startup priority, direct IDs, relationships and
-Jev fallback cannot bypass this gate. The flag is read on each request; false
+Jev fallback cannot bypass this gate. With `[adapters].dreaming_injection = true` the gate also admits Agent-derived Memory whose policy version is `dreaming-v1` (stored on retrieval documents; ADR-0148). The flag is read on each request; false
 restores the original authority range without changing the index or memories.
 The Hook also uses the flag to stop new capture while still requesting injection
 without a capture event ID. Retrieval receipts remain for accounting and dedup;

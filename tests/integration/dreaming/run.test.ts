@@ -82,6 +82,7 @@ function fakeModel(log: string[]): DreamModel {
           documented_at: "", user_support: claim.user_words === undefined ? "not_applicable" : "user_stated_rule" };
       }) });
     },
+    reconcile: () => Promise.reject(new Error("unexpected reconcile")),
     defend(request) {
       log.push(`defend:${String(request.claims.length)}`);
       return Promise.resolve({ usage: { tokens: 5, seconds: 1 }, results: request.claims.map((claim) => ({
@@ -189,6 +190,55 @@ test("a dream run extracts, merges, verifies, defends and tiers a Session withou
   expect((await scheduleDueDreams({ runtimeRoot, now: later, configuration: { ...configuration, hour: 0 }, allowTemporaryRoots: true })).created).toEqual([]);
 });
 
+test("in apply mode a nightly run writes its inject tier as dreaming Memory before reporting it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-apply-run-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await mkdir(vaultRoot, { recursive: true });
+  const clone = await workspace(root);
+  const project = await resolveProject({ sessionId: "apply-session", path: clone, runtimeRoot });
+  if (project.status !== "resolved") throw new Error("Project did not resolve.");
+  const events = [
+    { eventKind: "UserPromptSubmit", turnId: "t1", payload: { prompt: "以后提 MR 都用 Bits。看看 setVideo 做了什么" } },
+    { eventKind: "PostToolUse", turnId: "t1", payload: { toolName: "Bash", cwd: clone, input: { command: "cat src/preview.ts" },
+      response: "export function setVideo() { reloadEffect(); }" } },
+    { eventKind: "Stop", turnId: "t1", payload: { assistantMessage: "setVideo 会重新加载特效。" } },
+    { eventKind: "SessionEnd", payload: { reason: "other" } }
+  ] as const;
+  for (const [index, event] of events.entries()) {
+    await captureEvent({ runtimeRoot, event: {
+      schemaVersion: 1, eventId: `msevent_apply_${String(index)}`, deduplicationKey: `apply:${String(index)}`, agent: "codex",
+      eventKind: event.eventKind, occurredAt: new Date().toISOString(), projectId: project.projectId, sessionId: "apply-session",
+      ...("turnId" in event ? { turnId: event.turnId } : {}), payload: event.payload
+    } });
+  }
+  const now = new Date(Date.now() + 60_000).toISOString();
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true, mode: "apply", verify_batch_size: 8 });
+  await startDreamRun({ runtimeRoot, projectId: project.projectId, now });
+  const model = fakeModel([]);
+  const steps: string[] = [];
+  for (let step = 0; step < 50; step += 1) {
+    const result = await runNextDreamStep({ runtimeRoot, vaultRoot, now, configuration, model, allowTemporaryRoots: true });
+    if (result.state === "idle") break;
+    steps.push(`${result.stage ?? ""}:${result.detail ?? ""}`);
+  }
+  expect(steps).toContain("report:applied 2");
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(database.prepare("SELECT authority, scope_kind, lifecycle FROM memory_catalog ORDER BY scope_kind").all())
+      .toEqual([{ authority: "agent_derived", scope_kind: "global", lifecycle: "active" }, { authority: "agent_derived", scope_kind: "project", lifecycle: "active" }]);
+    expect(database.prepare("SELECT apply_state, COUNT(*) AS n FROM dream_items GROUP BY apply_state ORDER BY apply_state").all())
+      .toEqual([{ apply_state: null, n: 2 }, { apply_state: "written", n: 2 }]);
+  } finally {
+    database.close();
+  }
+  const reports = (await readdir(join(vaultRoot, "_MemStore", "Dreams"))).filter((name) => name !== "总览.md");
+  const report = await readFile(join(vaultRoot, "_MemStore", "Dreams", reports[0] ?? ""), "utf8");
+  expect(report).toContain("## 写入正式记忆 · 2");
+  expect(report).toMatch(/### 新建 · 2[\s\S]*→ M:\d+/u);
+});
+
 test("a Session belongs to the Project it started in, and later activity is read once more as a new segment", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-dream-segments-"));
   directories.push(root);
@@ -226,7 +276,8 @@ test("a Session belongs to the Project it started in, and later activity is read
     },
     merge: () => Promise.reject(new Error("unexpected merge")),
     verify: () => Promise.reject(new Error("unexpected verify")),
-    defend: () => Promise.reject(new Error("unexpected defend"))
+    defend: () => Promise.reject(new Error("unexpected defend")),
+    reconcile: () => Promise.reject(new Error("unexpected reconcile"))
   };
   const configuration = dreamingConfigurationSchema.parse({ enabled: true, hour: 0 });
   async function dream(now: string): Promise<void> {
@@ -305,7 +356,8 @@ test("connection failures cost a chunk less than failures of the call itself", a
     extract: (request) => Promise.reject(new DreamModelError(request.chunk.includes("outage") ? "timeout" : "schema_invalid", "failed", "ERROR: Reconnecting... waiting for network")),
     merge: () => Promise.reject(new Error("unexpected merge")),
     verify: () => Promise.reject(new Error("unexpected verify")),
-    defend: () => Promise.reject(new Error("unexpected defend"))
+    defend: () => Promise.reject(new Error("unexpected defend")),
+    reconcile: () => Promise.reject(new Error("unexpected reconcile"))
   };
   const configuration = dreamingConfigurationSchema.parse({ enabled: true });
   let clock = Date.now();
@@ -343,5 +395,6 @@ test("dreaming is disabled by default and never schedules without configuration"
   const configuration = dreamingConfigurationSchema.parse({});
   expect(configuration).toMatchObject({ enabled: false, mode: "shadow", hour: 3, verify_effort: "high", extract_effort: "medium" });
   expect((await scheduleDueDreams({ runtimeRoot: join(root, "runtime"), now: new Date().toISOString(), configuration })).created).toEqual([]);
-  expect(() => dreamingConfigurationSchema.parse({ mode: "apply" })).toThrow();
+  expect(dreamingConfigurationSchema.parse({ mode: "apply" }).mode).toBe("apply");
+  expect(() => dreamingConfigurationSchema.parse({ mode: "live" })).toThrow();
 });

@@ -16,6 +16,8 @@ import { presearch, renderPresearch } from "./presearch.js";
 import { buildRepoMap, repoMapSchema, temporaryRootPattern, type RepoMap } from "./repo-map.js";
 import { dreamsDirectoryName, overviewFileName, writeDreamOverview, writeDreamReport } from "./report.js";
 import { readSessionStream, userWordsFor } from "./stream.js";
+import { applyBatch, applyBatchSize, loadApplyItems, statementKey, type ApplyItem, type ApplyOutcome } from "./apply.js";
+import { applyMemoryLifecycleChange } from "../operations/memory-lifecycle.js";
 import { isCatchAllRoot, relevantRepositories, tierOf } from "./tier.js";
 import { routePath } from "./repo-map.js";
 
@@ -590,10 +592,24 @@ async function stepRun(
       }
       // Re-tiering replaces earlier tier counts instead of accumulating them.
       const previous = Object.fromEntries(Object.entries(run.stats).filter(([key]) => !key.startsWith("tier_")));
+      if (configuration.mode === "apply") markApplyPending(database, run.runId);
       advance(database, run, "report", now, { ...previous, items: items.length, ...counts });
       return `tiered ${String(items.length)}`;
     }
     case "report": {
+      if (configuration.mode === "apply") {
+        // Apply pending items one batch per step before reporting them.
+        const pending = loadApplyItems(database, "i.run_id = ? AND i.apply_state = 'pending'", run.runId).slice(0, applyBatchSize);
+        if (pending.length > 0) {
+          const { outcomes, usage } = await applyBatch({
+            database, vaultRoot: request.vaultRoot, runtimeRoot, items: pending, model: request.model, now, preview: false
+          });
+          const counts: Record<string, number> = { apply_calls: usage === undefined ? 0 : 1, apply_tokens: usage?.tokens ?? 0 };
+          for (const outcome of outcomes) counts[`apply_${outcome.state}`] = (counts[`apply_${outcome.state}`] ?? 0) + 1;
+          advance(database, run, "report", now, addStats(run, counts));
+          return `applied ${String(outcomes.length)}`;
+        }
+      }
       const timeZone = request.configuration.timezone;
       const path = await writeDreamReport({ database, vaultRoot: request.vaultRoot, runId: run.runId, projectId: run.projectId, timeZone });
       database.prepare("UPDATE dream_runs SET report_path = ? WHERE run_id = ?").run(path, run.runId);
@@ -647,6 +663,97 @@ export async function renderDreamReports(request: {
   } finally {
     database.close();
   }
+}
+
+/**
+ * Queues a run's items for apply mode: every inject item, and review items whose
+ * statement dreaming already wrote (their Memory becomes review_due).
+ */
+function markApplyPending(database: DatabaseSync, runId: string): void {
+  const written = new Set(database.prepare("SELECT statement_key FROM dream_memories").all().map((row) => String(row.statement_key)));
+  for (const row of database.prepare(
+    "SELECT item_id, tier, COALESCE(refined_statement, statement) AS text FROM dream_items WHERE run_id = ? AND apply_state IS NULL AND tier IN ('inject', 'review')"
+  ).all(runId)) {
+    if (row.tier === "inject" || written.has(statementKey(String(row.text)))) {
+      database.prepare("UPDATE dream_items SET apply_state = 'pending' WHERE item_id = ?").run(String(row.item_id));
+    }
+  }
+}
+
+/**
+ * `memstore dream apply`: applies (or previews) inject items of completed runs
+ * created since `from`, or of one run, that apply has not considered yet.
+ * Batches are per Project; each later batch sees what earlier ones wrote.
+ */
+export async function applyCompletedRuns(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly now: string;
+  readonly model: DreamModel;
+  readonly preview: boolean;
+  readonly from?: string;
+  readonly runId?: string;
+  readonly timeZone: string;
+}): Promise<{ readonly outcomes: readonly (ApplyOutcome & { readonly text: string; readonly projectId: string; readonly runId: string })[]; readonly tokens: number }> {
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    const items = loadApplyItems(database,
+      `r.stage = 'completed' AND i.tier = 'inject' AND (i.apply_state IS NULL OR i.apply_state = 'pending')
+       AND (? IS NULL OR r.created_at >= ?) AND (? IS NULL OR r.run_id = ?)`,
+      request.from ?? null, request.from ?? null, request.runId ?? null, request.runId ?? null);
+    const outcomes: (ApplyOutcome & { text: string; projectId: string; runId: string })[] = [];
+    let tokens = 0;
+    const byProject = new Map<string, ApplyItem[]>();
+    for (const item of items) byProject.set(item.projectId, [...(byProject.get(item.projectId) ?? []), item]);
+    for (const group of byProject.values()) {
+      for (let start = 0; start < group.length; start += applyBatchSize) {
+        const batch = group.slice(start, start + applyBatchSize);
+        const result = await applyBatch({ database, vaultRoot: request.vaultRoot, runtimeRoot: request.runtimeRoot, items: batch, model: request.model, now: request.now, preview: request.preview });
+        tokens += result.usage?.tokens ?? 0;
+        for (const outcome of result.outcomes) {
+          const item = batch.find((candidate) => candidate.itemId === outcome.itemId);
+          outcomes.push({ ...outcome, text: item?.text ?? "", projectId: item?.projectId ?? "", runId: item?.runId ?? "" });
+        }
+      }
+    }
+    return { outcomes, tokens };
+  } finally {
+    database.close();
+  }
+}
+
+/** `memstore dream rollback`: archives (recoverably) the active Memory dreaming wrote, for one run or all. */
+export async function rollbackDreamMemories(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly now: string;
+  readonly apply: boolean;
+  readonly runId?: string;
+}): Promise<{ readonly memories: readonly { readonly memory_id: string; readonly memory_ref: number | null; readonly state: string }[] }> {
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  let targets: { memoryId: string; memoryRef: number | null }[];
+  try {
+    targets = database.prepare(
+      `SELECT d.memory_id, c.memory_ref FROM dream_memories d JOIN memory_catalog c USING (memory_id)
+       WHERE c.lifecycle = 'active' AND (? IS NULL OR d.created_run_id = ?) ORDER BY d.created_at`
+    ).all(request.runId ?? null, request.runId ?? null)
+      .map((row) => ({ memoryId: String(row.memory_id), memoryRef: typeof row.memory_ref === "number" ? row.memory_ref : null }));
+  } finally {
+    database.close();
+  }
+  const memories: { memory_id: string; memory_ref: number | null; state: string }[] = [];
+  for (const target of targets) {
+    if (!request.apply) {
+      memories.push({ memory_id: target.memoryId, memory_ref: target.memoryRef, state: "would_archive" });
+      continue;
+    }
+    const result = await applyMemoryLifecycleChange({
+      runtimeRoot: request.runtimeRoot, vaultRoot: request.vaultRoot, memory: target.memoryId, action: "archive",
+      changedAt: request.now, reason: "dreaming_rollback"
+    });
+    memories.push({ memory_id: target.memoryId, memory_ref: target.memoryRef, state: result.state });
+  }
+  return { memories };
 }
 
 /** The user messages behind an item's user-stated members, deduplicated and bounded. */

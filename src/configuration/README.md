@@ -45,7 +45,8 @@ policy. The foreground worker re-reads these settings when it has a nonempty pac
 
 `[adapters].human_authored_only_injection` is a boolean, defaulting false in a
 valid configuration. True restricts automatic injection candidates to
-`human_authored` memories. Automatic pack construction reads it on each request;
+`human_authored` memories, plus dreaming Memory when `[adapters].dreaming_injection`
+is true (default false). Automatic pack construction reads it on each request;
 changes need no index rebuild or Worker restart after the feature is installed.
 Missing, unreadable or invalid configuration documents use the restrictive true
 behavior. Each Hook also reads the flag: true disables new automatic capture

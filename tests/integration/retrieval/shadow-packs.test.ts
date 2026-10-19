@@ -15,6 +15,7 @@ import { loadRetrievalSnapshot } from "../../../src/retrieval/snapshot.js";
 import { recallSearch } from "../../../src/retrieval/recall.js";
 import { writeCanonicalMemory } from "../../../src/vault/index.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
+import { dreamingPolicyVersion } from "../../../src/memories/origins.js";
 
 const roots: string[] = [];
 const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
@@ -175,6 +176,38 @@ test.each(["database", "snapshot"])("human-only injection filters both automatic
   });
   expect(restoredPrompt.items.map(item => item.memoryId).sort())
     .toEqual(memories.map(memory => memory.memoryId).sort());
+});
+
+test.each(["database", "snapshot"])("dreaming injection admits dreaming Memory but no other Agent-derived Memory (%s)", async (mode) => {
+  const location = await createRoot();
+  const human = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174971", revisionId: "msrev_123e4567-e89b-42d3-a456-426614174981",
+    body: "Use SQLite WAL for durable storage.", scope: { kind: "project", projectId }
+  });
+  const dreaming = { ...makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174972", revisionId: "msrev_123e4567-e89b-42d3-a456-426614174982",
+    body: "Use SQLite WAL for durable storage.", scope: { kind: "project", projectId }, authority: "agent_derived", startup: "always"
+  }), policyVersion: dreamingPolicyVersion };
+  const legacy = makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614174973", revisionId: "msrev_123e4567-e89b-42d3-a456-426614174983",
+    body: "Use SQLite WAL for durable storage.", scope: { kind: "project", projectId }, authority: "agent_derived", startup: "always"
+  });
+  for (const memory of [human, dreaming, legacy]) {
+    await writeCanonicalMemory({ ...location, actor: memory.authority === "human_authored" ? "human" : "agent", memory });
+  }
+  await buildRetrievalIndex({ ...location, adapter, builtAt: "2026-08-07T12:00:00.000Z" });
+  const snapshot = mode === "snapshot" ? await loadRetrievalSnapshot(location) : undefined;
+  const common = { ...location, projectId, requestedAt: "2026-08-07T12:01:00.000Z", ...(snapshot === undefined ? {} : { snapshot }) };
+  const configure = (dreamingInjection: boolean) => writeFile(join(location.runtimeRoot, "config.toml"),
+    `schema_version = 1\n[adapters]\nsession_start_injection = true\nhuman_authored_only_injection = true\ndreaming_injection = ${String(dreamingInjection)}\n`);
+  const prompt = (sessionId: string) => prepareUserPromptShadowPack({ ...common, sessionId, adapter, prompt: "SQLite WAL",
+    signals: { files: [], symbols: [], errors: [], commands: [] } });
+  await configure(true);
+  const admitted = [human.memoryId, dreaming.memoryId].sort();
+  expect((await prepareSessionStartShadowPack({ ...common, sessionId: "dreaming-start" })).items.map((item) => item.memoryId).sort()).toEqual(admitted);
+  expect((await prompt("dreaming-prompt")).items.map((item) => item.memoryId).sort()).toEqual(admitted);
+  await configure(false);
+  expect((await prompt("human-prompt")).items.map((item) => item.memoryId)).toEqual([human.memoryId]);
 });
 
 test("SessionStart prepares a bounded authority-labelled Core Memory Pack without injecting it", async () => {

@@ -10,9 +10,10 @@ export const adapterDisplaySchema = z.object({
   hook_display: hookDisplaySchema.default("summary"),
   session_start_injection: z.boolean().default(false),
   subagents_enabled: z.boolean().default(false),
-  human_authored_only_injection: z.boolean().default(false)
+  human_authored_only_injection: z.boolean().default(false),
+  dreaming_injection: z.boolean().default(false)
 }).loose().default({ hook_display: "summary", session_start_injection: false, subagents_enabled: false,
-  human_authored_only_injection: false });
+  human_authored_only_injection: false, dreaming_injection: false });
 
 export async function readHumanAuthoredOnlyInjection(runtimeRoot: string): Promise<boolean> {
   try {
@@ -25,6 +26,31 @@ export async function readHumanAuthoredOnlyInjection(runtimeRoot: string): Promi
   } catch {
     // Unreadable or invalid configuration must not broaden injection authority.
     return true;
+  }
+}
+
+/**
+ * Which authorities automatic injection admits: every authority, or Human-authored
+ * Memory plus, with `dreaming_injection`, Memory dreaming verified (ADR-0148).
+ */
+export interface InjectionAuthorityGate {
+  readonly humanAuthoredOnly: boolean;
+  readonly dreamingVerified: boolean;
+}
+
+export async function readInjectionAuthorityGate(runtimeRoot: string): Promise<InjectionAuthorityGate> {
+  try {
+    const config = z.object({
+      schema_version: z.literal(1),
+      adapters: z.object({
+        human_authored_only_injection: z.boolean().default(false),
+        dreaming_injection: z.boolean().default(false)
+      }).default({ human_authored_only_injection: false, dreaming_injection: false })
+    }).parse(parse(await readFile(join(runtimeRoot, "config.toml"), "utf8")));
+    return { humanAuthoredOnly: config.adapters.human_authored_only_injection, dreamingVerified: config.adapters.dreaming_injection };
+  } catch {
+    // Unreadable or invalid configuration must not broaden injection authority.
+    return { humanAuthoredOnly: true, dreamingVerified: false };
   }
 }
 

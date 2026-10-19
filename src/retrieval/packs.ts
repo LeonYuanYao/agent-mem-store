@@ -5,7 +5,8 @@ import { z } from "zod";
 
 import type { ConversationView } from "./conversation-cache.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
-import { readHumanAuthoredOnlyInjection, readSessionStartInjection } from "../configuration/hook-display.js";
+import { readInjectionAuthorityGate, readSessionStartInjection, type InjectionAuthorityGate } from "../configuration/hook-display.js";
+import { dreamingPolicyVersion } from "../memories/origins.js";
 import type { EmbeddingAdapter } from "./index.js";
 import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
 import { jevTelemetrySchema, type JevTelemetry, type AutomaticRelevanceFilter } from "./jev.js";
@@ -150,9 +151,18 @@ export interface ShadowPack {
   readonly semanticStage: "complete" | "lexical_only" | "not_applicable";
 }
 
-function eligibleForAutomaticRecall(memory: IndexedMemory, humanAuthoredOnly: boolean): boolean {
-  return (!humanAuthoredOnly || memory.authority === "human_authored") &&
-    !(memory.authority === "agent_derived" && memory.validityState === "review_due");
+function eligibleForAutomaticRecall(memory: IndexedMemory, gate: InjectionAuthorityGate): boolean {
+  const admitted = !gate.humanAuthoredOnly || memory.authority === "human_authored" ||
+    (gate.dreamingVerified && memory.policyVersion === dreamingPolicyVersion);
+  return admitted && !(memory.authority === "agent_derived" && memory.validityState === "review_due");
+}
+
+/** The SQL form of the same authority gate, for paths that read retrieval_documents directly. */
+function authorityGateSql(gate: InjectionAuthorityGate): string {
+  if (!gate.humanAuthoredOnly) return "";
+  return gate.dreamingVerified
+    ? `AND (authority = 'human_authored' OR policy_version = '${dreamingPolicyVersion}')`
+    : "AND authority = 'human_authored'";
 }
 
 function tierFor(memory: IndexedMemory, projectId: string): PriorityTier {
@@ -188,7 +198,7 @@ async function visitPagedSessionCandidates(request: {
   readonly requestedAt: string;
   readonly deadlineAt: number;
   readonly startup: "always" | "auto";
-  readonly humanAuthoredOnly: boolean;
+  readonly authorityGate: InjectionAuthorityGate;
   readonly visit: (memory: IndexedMemory) => boolean;
   readonly snapshot?: RetrievalSnapshot;
   readonly foregroundControl?: ForegroundExecutionControl;
@@ -203,7 +213,7 @@ async function visitPagedSessionCandidates(request: {
         candidates: bucket.ordinals
           .map((ordinal) => request.snapshot?.documents[ordinal])
           .filter((memory): memory is IndexedMemory => memory !== undefined)
-          .filter((memory) => eligibleForAutomaticRecall(memory, request.humanAuthoredOnly) &&
+          .filter((memory) => eligibleForAutomaticRecall(memory, request.authorityGate) &&
             (memory.validFrom === undefined || memory.validFrom <= request.requestedAt) &&
             (memory.validUntil === undefined || memory.validUntil >= request.requestedAt)),
         cursor: 0
@@ -249,7 +259,7 @@ async function visitPagedSessionCandidates(request: {
       `SELECT DISTINCT ${tierExpression} AS effective_tier, category
        FROM retrieval_documents
        WHERE index_revision_id = ? AND startup = ?
-         ${request.humanAuthoredOnly ? "AND authority = 'human_authored'" : ""}
+         ${authorityGateSql(request.authorityGate)}
          AND (scope_kind = 'global' OR (scope_kind = 'project' AND project_id = ?))
          AND NOT EXISTS (
            SELECT 1 FROM memory_ranking_exclusions AS exclusion
@@ -295,7 +305,7 @@ async function visitPagedSessionCandidates(request: {
             const pageRows = database.prepare(
               `SELECT * FROM retrieval_documents
                WHERE index_revision_id = ? AND startup = ? AND category = ?
-                 ${request.humanAuthoredOnly ? "AND authority = 'human_authored'" : ""}
+                 ${authorityGateSql(request.authorityGate)}
                  AND (scope_kind = 'global' OR (scope_kind = 'project' AND project_id = ?))
                  AND NOT EXISTS (
                    SELECT 1 FROM memory_ranking_exclusions AS exclusion
@@ -326,7 +336,7 @@ async function visitPagedSessionCandidates(request: {
             rowsExamined += pageRows.length;
             bucket.queue.push(...pageRows.map((row) =>
               rowToIndexedMemory(row)
-            ).filter((memory) => eligibleForAutomaticRecall(memory, request.humanAuthoredOnly)));
+            ).filter((memory) => eligibleForAutomaticRecall(memory, request.authorityGate)));
             bucket.exhausted = pageRows.length < SESSION_BUCKET_PAGE_SIZE;
             const last = pageRows.at(-1);
             if (last !== undefined) bucket.cursor = z.string().parse(last.session_order_key);
@@ -438,7 +448,7 @@ async function loadActiveScope(request: {
   readonly active: Record<string, unknown>;
   readonly memories: readonly IndexedMemory[];
 }> {
-  const humanAuthoredOnly = await readHumanAuthoredOnlyInjection(request.runtimeRoot);
+  const authorityGate = await readInjectionAuthorityGate(request.runtimeRoot);
   if (request.snapshot !== undefined) {
     return {
       active: {
@@ -453,7 +463,7 @@ async function loadActiveScope(request: {
         snapshot: request.snapshot,
         projectId: request.projectId,
         requestedAt: request.requestedAt
-      }).filter((memory) => eligibleForAutomaticRecall(memory, humanAuthoredOnly))
+      }).filter((memory) => eligibleForAutomaticRecall(memory, authorityGate))
     };
   }
   const database = await openRuntimeDatabase(request.runtimeRoot);
@@ -470,7 +480,7 @@ async function loadActiveScope(request: {
       `SELECT document.* FROM retrieval_documents AS document
        WHERE index_revision_id = ? AND
          (scope_kind = 'global' OR (scope_kind = 'project' AND project_id = ?))
-         ${humanAuthoredOnly ? "AND authority = 'human_authored'" : ""}
+         ${authorityGateSql(authorityGate)}
          AND NOT EXISTS (
            SELECT 1 FROM memory_ranking_exclusions AS exclusion
            WHERE exclusion.memory_id = document.memory_id
@@ -482,7 +492,7 @@ async function loadActiveScope(request: {
        ORDER BY memory_id`
     ).all(indexRevisionId, request.projectId);
     const memories = rows.map((row) => rowToIndexedMemory(row)).filter((memory) =>
-      eligibleForAutomaticRecall(memory, humanAuthoredOnly) &&
+      eligibleForAutomaticRecall(memory, authorityGate) &&
       (memory.validFrom === undefined || memory.validFrom <= request.requestedAt) &&
       (memory.validUntil === undefined || memory.validUntil >= request.requestedAt)
     );
@@ -817,7 +827,7 @@ async function prepareSessionStartShadowPackCore(
   }
   const selected: ShadowPackItem[] = [];
   const examined: IndexedMemory[] = [];
-  const humanAuthoredOnly = await readHumanAuthoredOnlyInjection(request.runtimeRoot);
+  const authorityGate = await readInjectionAuthorityGate(request.runtimeRoot);
   let identityCount = 0;
   let alwaysTokens = 0;
   let selectedRenderedTokenCount = 0;
@@ -874,7 +884,7 @@ async function prepareSessionStartShadowPackCore(
     requestedAt,
     deadlineAt: started + 450,
     startup: "always",
-    humanAuthoredOnly,
+    authorityGate,
     visit: (memory) => trySelect(memory, true),
     ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot }),
     ...(request.foregroundControl === undefined
@@ -890,7 +900,7 @@ async function prepareSessionStartShadowPackCore(
         requestedAt,
         deadlineAt: started + 450,
         startup: "auto",
-        humanAuthoredOnly,
+        authorityGate,
         visit: (memory) => trySelect(memory, false),
         ...(request.snapshot === undefined ? {} : { snapshot: request.snapshot }),
         ...(request.foregroundControl === undefined

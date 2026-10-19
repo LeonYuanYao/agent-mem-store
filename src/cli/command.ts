@@ -2,7 +2,8 @@
 
 import { readDreamingConfiguration, type DreamingConfiguration } from "../dreaming/config.js";
 import { CodexDreamModel, type DreamModel } from "../dreaming/model.js";
-import { inspectDreams, renderDreamReports, runNextDreamStep, startDreamRun } from "../dreaming/run.js";
+import { applyCompletedRuns, inspectDreams, renderDreamReports, rollbackDreamMemories, runNextDreamStep, startDreamRun } from "../dreaming/run.js";
+import { writeApplyNote } from "../dreaming/report.js";
 import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -952,6 +953,41 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       result: await renderDreamReports({
         runtimeRoot: location.runtimeRoot, vaultRoot: location.vaultRoot, now, timeZone: configuration.timezone, ...(runId === undefined ? {} : { runId })
       }),
+      json: parsed.values.json
+    };
+  }
+  if (command === "dream" && parsed.positionals[1] === "apply") {
+    const runId = parsed.positionals[2];
+    const from = parsed.values.from;
+    if (runId === undefined && from === undefined) {
+      throw new MemStoreCommandError("invalid_arguments", "dream apply requires a RUN_ID or --from YYYY-MM-DD.");
+    }
+    const configured = await configuredWorkerAdapters(location.runtimeRoot, { includeEmbedding: false });
+    try {
+      const factory = configured.adapters?.dreamModel;
+      if (factory === undefined) throw new MemStoreCommandError("dream_model_unavailable", "Dreaming model is unavailable.");
+      const configuration = await readDreamingConfiguration(location.runtimeRoot);
+      const result = await applyCompletedRuns({
+        runtimeRoot: location.runtimeRoot, vaultRoot: location.vaultRoot, now, model: factory(configuration), preview: parsed.values.preview,
+        timeZone: configuration.timezone,
+        ...(from === undefined ? {} : { from: new Date(`${from}T00:00:00+08:00`).toISOString() }), ...(runId === undefined ? {} : { runId })
+      });
+      const note = await writeApplyNote({ runtimeRoot: location.runtimeRoot, vaultRoot: location.vaultRoot, now, timeZone: configuration.timezone, preview: parsed.values.preview, outcomes: result.outcomes });
+      if (!parsed.values.preview) await renderDreamReports({ runtimeRoot: location.runtimeRoot, vaultRoot: location.vaultRoot, now, timeZone: configuration.timezone });
+      const counts: Record<string, number> = {};
+      for (const outcome of result.outcomes) counts[outcome.state] = (counts[outcome.state] ?? 0) + 1;
+      return { command: "dream.apply", result: { dry_run: parsed.values.preview, items: result.outcomes.length, outcomes: counts, tokens: result.tokens, note }, json: parsed.values.json };
+    } finally {
+      await configured.dispose();
+    }
+  }
+  if (command === "dream" && parsed.positionals[1] === "rollback") {
+    const runId = parsed.positionals[2];
+    return {
+      command: "dream.rollback",
+      result: { dry_run: !parsed.values.apply, ...await rollbackDreamMemories({
+        runtimeRoot: location.runtimeRoot, vaultRoot: location.vaultRoot, now, apply: parsed.values.apply, ...(runId === undefined ? {} : { runId })
+      }) },
       json: parsed.values.json
     };
   }

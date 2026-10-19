@@ -376,8 +376,8 @@ async function buildRetrievalIndexImpl(request: {
            validity_state, valid_from, valid_until, identity_label,
            identity_validated, identity_token_count, compact_text,
            compact_validated, compact_token_count, standard_text,
-           standard_validated, standard_token_count, searchable_text, revised_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           standard_validated, standard_token_count, searchable_text, revised_at, policy_version
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       const insertFtsDocument = database.prepare(
         `INSERT INTO active_fts_memories(index_revision_id, memory_id, searchable_text)
@@ -428,7 +428,8 @@ async function buildRetrievalIndexImpl(request: {
               document.standardValidated ? 1 : 0,
               document.standardTokenCount,
               document.text,
-              memory.revisedAt
+              memory.revisedAt,
+              memory.policyVersion
             );
             insertFtsDocument.run(indexRevisionId, memory.memoryId, document.text);
           }
