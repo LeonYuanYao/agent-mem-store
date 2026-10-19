@@ -20,8 +20,9 @@ Code Session identifiers are UUIDs, so they share the Codex keys.
 - Claude Code adds Hook stdout to the model context and blocks on exit code 2, so
   stdout carries only a completed pack. Timeouts (1.7 s), an unavailable Worker
   and errors write nothing to stdout, report on stderr and exit 0.
-- `[adapters].claude_hook_display` (default `summary`) controls the line Claude
-  Code shows per injected prompt, separately from Codex's `hook_display`.
+- `[adapters].claude_hook_display` (default `summary`) controls what Claude Code
+  shows per injected prompt, separately from Codex's `hook_display`; `items` adds
+  one readable line per Memory (packs average about 1.2 items and 140 tokens).
 - The Project comes from `CLAUDE_PROJECT_DIR`, the directory Claude Code was
   started in, not from the event's cwd: Claude Code reports the shell's current
   directory, so a `cd` into a nested repository would otherwise switch the

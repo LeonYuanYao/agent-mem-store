@@ -190,9 +190,10 @@ timeout_ms = 1300
 
 ### Hook 注入内容的显示方式
 
-在机器本地 `<runtime>/config.toml` 的 `[adapters]` 段中，将 `hook_display` 设置为 `"off"`、`"summary"`（默认）或 `"full"`：
+在机器本地 `<runtime>/config.toml` 的 `[adapters]` 段中，将 `hook_display` 设置为 `"off"`、`"summary"`（默认）、`"items"` 或 `"full"`（Claude Code 用 `claude_hook_display`，取值相同）：
 
 - `summary`：显示事件、记忆条数、按顺序排列的引用和注入 token 数。
+- `items`：在摘要下每条记忆一行，显示编号、项目/全局、手写/自动沉淀和内容，不显示注入文本里的说明和标签。
 - `full`：额外显示实际传给模型的注入文本；不会展开为 Vault 中的完整笔记。
 - `off`：隐藏成功注入的提示，保留采集失败警告。
 

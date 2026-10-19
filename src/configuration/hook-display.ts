@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { parse } from "smol-toml";
 import { z } from "zod";
 
-export const hookDisplaySchema = z.enum(["off", "summary", "full"]);
+// items: the summary line plus one readable line per memory, without the pack's legend and tags.
+export const hookDisplaySchema = z.enum(["off", "summary", "items", "full"]);
 export type HookDisplay = z.infer<typeof hookDisplaySchema>;
 
 export const adapterDisplaySchema = z.object({
@@ -112,5 +113,17 @@ export function renderHookDisplay(
   const memoryCount = [...text.matchAll(/^\[M:([^\s\]]+)/gm)].length;
   if (memoryCount === 0) return undefined;
   const summary = `MemStore (${event}): ${String(memoryCount)} memories · ${String(tokens)} tokens`;
+  if (mode === "items") {
+    const scopes: Record<string, string> = { P: "项目", G: "全局" };
+    const authorities: Record<string, string> = { H: "手写", A: "自动沉淀" };
+    const lines = [...text.matchAll(/^\[M:([^\s\]]+)([^\]]*)\]\s*(.*)$/gmu)].map((match) => {
+      const tags = match[2] ?? "";
+      const scope = scopes[/\bS:(\w)/u.exec(tags)?.[1] ?? ""];
+      const authority = authorities[/\bA:(\w)/u.exec(tags)?.[1] ?? ""];
+      const label = [scope, authority].filter((value) => value !== undefined).join("·");
+      return `  M:${match[1] ?? ""}${label === "" ? "" : ` ${label}`}｜${(match[3] ?? "").trim()}`;
+    });
+    return [summary, ...lines].join("\n");
+  }
   return mode === "full" ? `${summary}\n${text}` : summary;
 }

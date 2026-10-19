@@ -307,9 +307,12 @@ No additional raw prompt/response logs are created.
 ### Hook visibility
 
 Set `hook_display` in the `[adapters]` section of the machine-local
-`<runtime>/config.toml` to `"off"`, `"summary"` (default), or `"full"`.
+`<runtime>/config.toml` to `"off"`, `"summary"` (default), `"items"` or `"full"`.
 `summary` shows the event, Memory count, ordered references, and injected token
-count. `full` adds the exact model-facing injection text, not the full Vault notes.
+count. `items` adds one line per Memory (reference, scope, authority and text)
+without the pack's legend and tags. `full` adds the exact model-facing injection
+text, not the full Vault notes. `claude_hook_display` takes the same values for
+Claude Code.
 `off` hides successful injection notices but preserves capture failure warnings.
 Empty retrievals stay silent. Both SessionStart and UserPromptSubmit use the same
 setting, which is read on each successful retrieval without a Worker restart.

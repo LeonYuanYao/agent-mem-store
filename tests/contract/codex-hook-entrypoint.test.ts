@@ -23,6 +23,10 @@ test("display omits summary IDs, preserves body ordering, stays silent without m
     .toBe("MemStore (UserPromptSubmit): 2 memories · 42 tokens");
   expect(renderHookDisplay("full", "UserPromptSubmit", body, 42))
     .toBe(`MemStore (UserPromptSubmit): 2 memories · 42 tokens\n${body}`);
+  // items keeps one readable line per memory and drops the legend and tags.
+  const pack = "<memstore-context>policy</memstore-context>\nLegend: M=memory ref\n[M:8582 S:P A:A R:S] 截图按钮不会唤醒 worker。\n[M:7 S:G A:H R:C] 用 Bits 提 MR。";
+  expect(renderHookDisplay("items", "UserPromptSubmit", pack, 30))
+    .toBe("MemStore (UserPromptSubmit): 2 memories · 30 tokens\n  M:8582 项目·自动沉淀｜截图按钮不会唤醒 worker。\n  M:7 全局·手写｜用 Bits 提 MR。");
   expect(renderHookDisplay("full", "UserPromptSubmit", "", 0)).toBeUndefined();
   expect(renderHookDisplay("full", "UserPromptSubmit", "<memstore-context>legend only</memstore-context>", 10)).toBeUndefined();
   expect(adapterDisplaySchema.safeParse({ hook_display: "invalid" }).success).toBe(false);
