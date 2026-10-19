@@ -22,6 +22,9 @@ export const dreamingConfigurationSchema = z.object({
   fresh_days: z.number().int().min(1).max(90).default(7),
   // Machine-local agent skill directories searched as auto-loaded guidance ("~" expands to the home directory).
   host_skill_roots: z.array(z.string().min(1)).max(10).default([]),
+  // User-wide instruction files every session loads (for example the agents' global AGENTS.md or
+  // CLAUDE.md): knowledge they state is already known, and apply treats them as Human-authored.
+  host_instruction_files: z.array(z.string().min(1)).max(10).default([]),
   // Codex home for dreaming's model calls. Independent of MEMSTORE_LUNA_CODEX_HOME so enabling
   // dreaming does not also restart legacy Luna governance and quality work.
   codex_home: z.string().min(1).default("~/.codex")

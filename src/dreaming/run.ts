@@ -56,6 +56,10 @@ function parseJson<T>(value: unknown, fallback: T): T {
   }
 }
 
+function expandHome(path: string): string {
+  return path.replace(/^~(?=\/|$)/u, homedir());
+}
+
 function runDirectory(runtimeRoot: string, runId: string): string {
   return join(runtimeRoot, "state", "dreaming", runId);
 }
@@ -302,7 +306,7 @@ async function stepRun(
       const sessions = eligibleSessions(database, run.projectId, run.windowEnd, configuration);
       await mkdir(runDirectory(runtimeRoot, run.runId), { recursive: true, mode: 0o700 });
       const map = kind === "git" && roots.length > 0 ? await buildRepoMap(roots, now,
-        configuration.host_skill_roots.map((root) => root.replace(/^~(?=\/|$)/u, homedir()))) : undefined;
+        [...configuration.host_skill_roots, ...configuration.host_instruction_files].map(expandHome)) : undefined;
       if (map !== undefined) {
         await writeFile(join(runDirectory(runtimeRoot, run.runId), "repomap.json"), json(map), { mode: 0o600 });
         await writeToolWrapper(runtimeRoot, run.runId);
@@ -602,7 +606,8 @@ async function stepRun(
         const pending = loadApplyItems(database, "i.run_id = ? AND i.apply_state = 'pending'", run.runId).slice(0, applyBatchSize);
         if (pending.length > 0) {
           const { outcomes, usage } = await applyBatch({
-            database, vaultRoot: request.vaultRoot, runtimeRoot, items: pending, model: request.model, now, preview: false
+            database, vaultRoot: request.vaultRoot, runtimeRoot, items: pending, model: request.model, now, preview: false,
+            instructionFiles: configuration.host_instruction_files.map(expandHome)
           });
           const counts: Record<string, number> = { apply_calls: usage === undefined ? 0 : 1, apply_tokens: usage?.tokens ?? 0 };
           for (const outcome of outcomes) counts[`apply_${outcome.state}`] = (counts[`apply_${outcome.state}`] ?? 0) + 1;
@@ -694,6 +699,7 @@ export async function applyCompletedRuns(request: {
   readonly from?: string;
   readonly runId?: string;
   readonly timeZone: string;
+  readonly instructionFiles?: readonly string[];
 }): Promise<{ readonly outcomes: readonly (ApplyOutcome & { readonly text: string; readonly projectId: string; readonly runId: string })[]; readonly tokens: number }> {
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
@@ -708,7 +714,10 @@ export async function applyCompletedRuns(request: {
     for (const group of byProject.values()) {
       for (let start = 0; start < group.length; start += applyBatchSize) {
         const batch = group.slice(start, start + applyBatchSize);
-        const result = await applyBatch({ database, vaultRoot: request.vaultRoot, runtimeRoot: request.runtimeRoot, items: batch, model: request.model, now: request.now, preview: request.preview });
+        const result = await applyBatch({
+          database, vaultRoot: request.vaultRoot, runtimeRoot: request.runtimeRoot, items: batch, model: request.model, now: request.now,
+          preview: request.preview, instructionFiles: (request.instructionFiles ?? []).map(expandHome)
+        });
         tokens += result.usage?.tokens ?? 0;
         for (const outcome of result.outcomes) {
           const item = batch.find((candidate) => candidate.itemId === outcome.itemId);

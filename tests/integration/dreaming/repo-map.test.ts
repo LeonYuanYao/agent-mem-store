@@ -87,6 +87,11 @@ test("the repository map reads every repository at its baseline, never the check
   const guidance = (await reader.grep("uiDrag", { autoload: true })).join("\n");
   expect(guidance).toContain("tools/ui/.ai/skills/ui-dsl/SKILL.md:1");
   expect(guidance).not.toContain("docs/notes.md");
+  // A user-wide instruction file given as a host root is searched like a skill.
+  const instructions = join(clone, "..", "CLAUDE.md");
+  await writeFile(instructions, "- Run evaluations with Codex, never Claude.\n");
+  expect((await new EvidenceReader({ ...map, hostSkillRoots: [instructions] }).grep("never Claude", { autoload: true })).join("\n"))
+    .toContain("CLAUDE.md:1:- Run evaluations with Codex, never Claude.");
   const [fact] = await presearch(map, "树形重排使用 `uiDrag`", new Date().toISOString());
   expect(fact).toMatchObject({ identifier: "uiDrag", autoload: ["tools/ui/.ai/skills/ui-dsl/SKILL.md"] });
 

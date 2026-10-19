@@ -13,7 +13,7 @@ Turns a day's captured Sessions into verified, tiered knowledge: session-level e
 - [msverify.ts](msverify.ts) / [msverify-cli.ts](msverify-cli.ts) — read-only evidence commands the verifier runs in its sandbox.
 - [repo-map.ts](repo-map.ts) — repositories that count as evidence for a Project.
 - [tier.ts](tier.ts) — admission rules.
-- [apply.ts](apply.ts) — apply mode: compares inject items with existing Memory and writes, revises or marks dreaming Memory (ADR-0148).
+- [apply.ts](apply.ts) — apply mode: compares inject items with existing Memory and user-wide instruction files (`host_instruction_files`), and writes, revises or marks dreaming Memory (ADR-0148).
 
 ## Flow and collaborators
 

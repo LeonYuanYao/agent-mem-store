@@ -969,7 +969,7 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       const configuration = await readDreamingConfiguration(location.runtimeRoot);
       const result = await applyCompletedRuns({
         runtimeRoot: location.runtimeRoot, vaultRoot: location.vaultRoot, now, model: factory(configuration), preview: parsed.values.preview,
-        timeZone: configuration.timezone,
+        timeZone: configuration.timezone, instructionFiles: configuration.host_instruction_files,
         ...(from === undefined ? {} : { from: new Date(`${from}T00:00:00+08:00`).toISOString() }), ...(runId === undefined ? {} : { runId })
       });
       const note = await writeApplyNote({ runtimeRoot: location.runtimeRoot, vaultRoot: location.vaultRoot, now, timeZone: configuration.timezone, preview: parsed.values.preview, outcomes: result.outcomes });

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { DatabaseSync } from "node:sqlite";
 
 import type { MemoryCategory } from "../memories/categories.js";
@@ -49,6 +50,24 @@ interface ActiveMemory {
   readonly human: boolean;
   readonly text: string;
   readonly grams: ReadonlySet<string>;
+  /** Set for a passage of a user-wide instruction file, which counts as Human-authored guidance. */
+  readonly source?: string;
+}
+
+/** Passages of user-wide instruction files: paragraphs, with each list item on its own. */
+async function instructionPassages(files: readonly string[]): Promise<ActiveMemory[]> {
+  const passages: ActiveMemory[] = [];
+  for (const file of files) {
+    const text = await readFile(file, "utf8").catch(() => "");
+    for (const block of text.split(/\n\s*\n/u)) {
+      const lines = block.split("\n").map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#"));
+      const items = lines.some((line) => /^[-*] /u.test(line)) ? lines.map((line) => line.replace(/^[-*] /u, "")) : [lines.join(" ")];
+      for (const item of items) {
+        if (item.length >= 8 && passages.length < 400) passages.push({ memoryId: "", human: true, text: item, grams: bigrams(item), source: file });
+      }
+    }
+  }
+  return passages;
 }
 
 /** Case-, space- and punctuation-insensitive form used to find the same statement again. */
@@ -204,10 +223,14 @@ export async function applyBatch(request: {
   readonly model: DreamModel;
   readonly now: string;
   readonly preview: boolean;
+  readonly instructionFiles?: readonly string[];
 }): Promise<{ readonly outcomes: ApplyOutcome[]; readonly usage?: ModelUsage }> {
   const { database } = request;
   const projectId = request.items[0]?.projectId ?? "";
-  const memories = await activeMemories(database, { vaultRoot: request.vaultRoot, runtimeRoot: request.runtimeRoot, projectId });
+  const memories = [
+    ...await activeMemories(database, { vaultRoot: request.vaultRoot, runtimeRoot: request.runtimeRoot, projectId }),
+    ...await instructionPassages(request.instructionFiles ?? [])
+  ];
   const byKey = new Map<string, { memoryId: string; active: boolean }>();
   for (const row of database.prepare(
     `SELECT d.memory_id, d.statement_key, c.lifecycle FROM dream_memories d LEFT JOIN memory_catalog c USING (memory_id)
@@ -241,7 +264,7 @@ export async function applyBatch(request: {
     const existing = memories.map((memory) => ({ memory, score: similarity(grams, memory.grams) }))
       .filter((entry) => entry.score >= 0.08).sort((left, right) => right.score - left.score).slice(0, comparisonCandidates)
       .map(({ memory }) => {
-        let alias = [...aliases].find(([, value]) => value.memoryId === memory.memoryId)?.[0];
+        let alias = [...aliases].find(([, value]) => value === memory)?.[0];
         if (alias === undefined) {
           alias = `${memory.human ? "H" : "D"}${String(aliases.size + 1)}`;
           aliases.set(alias, memory);
@@ -266,10 +289,16 @@ export async function applyBatch(request: {
     const decision = decisions.get(alias) ?? { id: alias, decision: "new" as const, target: "", reason: "no_close_memory" };
     const targetMemory = aliases.get(decision.target);
     const targetItemMemory = written.get(decision.target);
-    const targetId = targetMemory?.memoryId ?? targetItemMemory;
+    const targetId = targetMemory === undefined ? targetItemMemory : targetMemory.memoryId;
     const humanTarget = targetMemory?.human === true;
     let outcome: ApplyOutcome;
-    if (decision.decision === "new" || targetId === undefined) {
+    if (decision.decision !== "new" && targetMemory?.source !== undefined) {
+      // Guidance every session already loads; nothing to write, and the user owns it.
+      outcome = {
+        itemId: item.itemId, state: decision.decision === "conflicts" ? "conflict_human" : "duplicate_human",
+        reason: `${decision.reason}（${targetMemory.source}）`
+      };
+    } else if (decision.decision === "new" || targetId === undefined) {
       outcome = { itemId: item.itemId, state: "written", reason: decision.reason };
     } else if (humanTarget) {
       // Human-authored Memory is never revised by dreaming.

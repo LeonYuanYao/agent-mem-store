@@ -101,7 +101,14 @@ export class EvidenceReader {
           else if (entry.name.endsWith(".md")) files.push({ path, lines: (await readFile(path, "utf8").catch(() => "")).split("\n") });
         }
       };
-      for (const root of this.#map.hostSkillRoots) await visit(root, 0);
+      for (const root of this.#map.hostSkillRoots) {
+        // A root may also be a single instruction file.
+        if (root.endsWith(".md") && (await stat(root).catch(() => undefined))?.isFile() === true) {
+          files.push({ path: root, lines: (await readFile(root, "utf8").catch(() => "")).split("\n") });
+        } else {
+          await visit(root, 0);
+        }
+      }
       return files;
     })();
     return this.#hostSkills;

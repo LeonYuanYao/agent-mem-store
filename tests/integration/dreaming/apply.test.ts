@@ -32,6 +32,8 @@ function fakeModel(calls: ReconcileItem[][]): DreamModel {
     reconcile(request) {
       calls.push([...request.items]);
       return Promise.resolve({ usage: { tokens: 7, seconds: 1 }, results: request.items.map((item) => {
+        const same = item.candidates.find((candidate) => candidate.id.startsWith("H") && statementKey(candidate.text) === statementKey(item.text));
+        if (same !== undefined) return { id: item.id, decision: "duplicate" as const, target: same.id, reason: "already stated" };
         const human = item.candidates.find((candidate) => candidate.id.startsWith("H") && candidate.text.includes("Bits"));
         const earlier = item.candidates.find((candidate) => candidate.id.startsWith("N") && statementKey(candidate.text) === statementKey(item.text));
         if (human !== undefined && item.text.includes("Bits")) return { id: item.id, decision: item.text.includes("不要") ? "conflicts" as const : "duplicate" as const, target: human.id, reason: "test" };
@@ -192,4 +194,19 @@ test("a later, more precise statement revises the dreaming Memory it corrects", 
   } finally {
     database.close();
   }
+});
+
+test("knowledge a user-wide instruction file already states is not written", async () => {
+  const { runtimeRoot, vaultRoot, projectId } = await fixture();
+  const instructions = join(vaultRoot, "..", "CLAUDE.md");
+  await writeFile(instructions, "# 全局规则\n\n## Subagent\n\n- 评测类 subagent 一律用 Codex，不允许用 Claude。\n- 其他规则。\n");
+  await addRun(runtimeRoot, projectId, "msdream_00000006-0000-4000-8000-000000000006", "2026-10-16T19:00:00.000Z", [
+    { id: "msdi_rule", text: "评测类 subagent 一律用 Codex，不允许用 Claude。", scope: "global", claimType: "preference", explicit: true, userSupport: "user_stated_rule" }
+  ]);
+  const [outcome] = (await applyCompletedRuns({ runtimeRoot, vaultRoot, now: "2026-10-17T00:00:00.000Z", model: fakeModel([]), timeZone: "Asia/Shanghai",
+    preview: false, runId: "msdream_00000006-0000-4000-8000-000000000006", instructionFiles: [instructions] })).outcomes;
+  expect(outcome?.state).toBe("duplicate_human");
+  expect(outcome?.reason).toContain("CLAUDE.md");
+  expect(outcome?.memoryId).toBeUndefined();
+  expect(Object.values(await catalog(runtimeRoot)).filter((value) => value.startsWith("agent_derived"))).toEqual([]);
 });
