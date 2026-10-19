@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
@@ -232,18 +233,31 @@ export function codexArguments(request: {
 
 /**
  * Failures of the connection or account rather than of the call itself. Offline,
- * Codex keeps "waiting for network" and resumes when it returns, so an outage
- * usually ends in `timeout`.
+ * Codex keeps "waiting for network" or gives up after its own retries; either way
+ * the call says nothing about the chunk or claims it was given.
  */
 export const transientModelErrors: readonly string[] = ["timeout", "network", "rate_limited", "authentication"];
 
+/** Classifies a failed `codex exec` from the end of its output. */
+export function failureCode(stdout: string, stderr: string): string {
+  const tail = `${stdout.slice(-2_000)}\n${stderr.slice(-8_000)}`.toLowerCase();
+  // Connection failures first: their output also mentions rate-limit and account endpoints.
+  if (/waiting for network|error sending request|connection (?:refused|reset|closed)|stream disconnected|failed to connect|dns error|network is unreachable|timed out/u.test(tail)) return "network";
+  if (/\b429\b|usage limit|rate limit (?:reached|exceeded)|too many requests/u.test(tail)) return "rate_limited";
+  if (/\b401\b|unauthorized|not logged in|log in again|login required|token (?:has )?expired/u.test(tail)) return "authentication";
+  return "process_failed";
+}
+
 export class DreamModelError extends Error {
   public readonly code: string;
+  /** The end of the model process output, for the run's error log. */
+  public readonly detail: string;
 
-  public constructor(code: string, message: string) {
+  public constructor(code: string, message: string, detail = "") {
     super(message);
     this.name = "DreamModelError";
     this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -296,14 +310,10 @@ export class CodexDreamModel implements DreamModel {
         });
         child.stdin.end(prompt);
       });
-      if (result.timedOut) throw new DreamModelError("timeout", "Dream model call timed out.");
+      const detail = `${result.stdout.slice(-300)}\n${result.stderr.slice(-900)}`.replaceAll(homedir(), "~").trim();
+      if (result.timedOut) throw new DreamModelError("timeout", "Dream model call timed out.", detail);
       if (result.code !== 0) {
-        const tail = result.stderr.toLowerCase();
-        const code = /rate.?limit|429|usage limit/u.test(tail) ? "rate_limited"
-          : /waiting for network|error sending request|connection refused|stream disconnected|failed to connect|dns error|network is unreachable/u.test(tail) ? "network"
-          : /401|403|log ?in|auth/u.test(tail) ? "authentication"
-          : "process_failed";
-        throw new DreamModelError(code, "Dream model call failed.");
+        throw new DreamModelError(failureCode(result.stdout, result.stderr), "Dream model call failed.", detail);
       }
       const decoded: unknown = JSON.parse(await readFile(outputPath, "utf8").catch(() => {
         throw new DreamModelError("missing_output", "Dream model returned no final message.");

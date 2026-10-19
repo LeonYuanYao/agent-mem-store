@@ -302,7 +302,7 @@ test("connection failures cost a chunk less than failures of the call itself", a
   }
   // The outage Session's chunk times out; the broken one's model output is invalid.
   const model: DreamModel = {
-    extract: (request) => Promise.reject(new DreamModelError(request.chunk.includes("outage") ? "timeout" : "schema_invalid", "failed")),
+    extract: (request) => Promise.reject(new DreamModelError(request.chunk.includes("outage") ? "timeout" : "schema_invalid", "failed", "ERROR: Reconnecting... waiting for network")),
     merge: () => Promise.reject(new Error("unexpected merge")),
     verify: () => Promise.reject(new Error("unexpected verify")),
     defend: () => Promise.reject(new Error("unexpected defend"))
@@ -319,14 +319,22 @@ test("connection failures cost a chunk less than failures of the call itself", a
       db.close();
     }
   }
-  // Steps past the retry backoff each time. Step 0 selects; the broken chunk is tried first (session order) until it fails.
-  for (let step = 0; step < 16; step += 1) {
-    clock += 6 * 60_000;
+  // Each step comes after the longest retry backoff. Step 0 selects; the broken chunk is tried first (session order).
+  for (let step = 0; step < 52; step += 1) {
+    clock += 61 * 60_000;
     await runNextDreamStep({ runtimeRoot, vaultRoot, now: new Date(clock).toISOString(), configuration, model, allowTemporaryRoots: true });
-    if (step === 3) expect(await chunks()).toEqual({ broken: "failed:12", outage: "pending:0" });
-    if (step === 14) expect((await chunks()).outage).toBe("pending:11");
+    if (step === 2) {
+      // After two failures in a row the run waits ten minutes, not five.
+      const early = await runNextDreamStep({ runtimeRoot, vaultRoot, now: new Date(clock + 6 * 60_000).toISOString(), configuration, model, allowTemporaryRoots: true });
+      expect(early.state).toBe("idle");
+    }
+    if (step === 3) expect(await chunks()).toEqual({ broken: "failed:48", outage: "pending:0" });
+    if (step === 50) expect((await chunks()).outage).toBe("pending:47");
   }
-  expect((await chunks()).outage).toBe("failed:12");
+  expect((await chunks()).outage).toBe("failed:48");
+  const [run] = await inspectDreams(runtimeRoot, 1);
+  expect(run?.stats).toMatchObject({ errors: 51 });
+  expect(await readFile(join(runtimeRoot, "state", "dreaming", String(run?.run_id), "errors.log"), "utf8")).toContain("extract model_timeout");
 });
 
 test("dreaming is disabled by default and never schedules without configuration", async () => {

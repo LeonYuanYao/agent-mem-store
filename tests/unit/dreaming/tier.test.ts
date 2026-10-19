@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 
 import { isCatchAllRoot, relevantRepositories, tierOf, type TierInput } from "../../../src/dreaming/tier.js";
 import { identifiersOf } from "../../../src/dreaming/presearch.js";
-import { codexArguments } from "../../../src/dreaming/model.js";
+import { codexArguments, failureCode } from "../../../src/dreaming/model.js";
 
 const base: TierInput = {
   verdict: "inconclusive", durability: "long_term", branch: "", explicitUser: false, sessionCount: 1, sourceBranches: []
@@ -95,4 +95,19 @@ test("only the branches of repositories the item is about scope it", () => {
   expect(tierOf({ ...base, explicitUser: true, sourceBranches, relevantRepos })).toEqual({ tier: "inject", reason: "explicit_user" });
   expect(tierOf({ ...base, explicitUser: true, sourceBranches }).tier).toBe("branch");
   expect(tierOf({ ...base, explicitUser: true, sourceBranches, relevantRepos: ["."] }).tier).toBe("branch");
+});
+
+test("a failed Codex call is classified by its output, connection failures first", () => {
+  // Recorded while offline: Codex reconnects, waits for the network, and mentions account endpoints on the way.
+  const offline = [
+    "ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: Connection refused (os error 61)",
+    "ERROR rmcp::transport::worker: http/request failed: error sending request for url (https://chatgpt.com/backend-api/ps/mcp)",
+    "account/rateLimits/read failed", "ERROR: Reconnecting... waiting for network"
+  ].join("\n");
+  expect(failureCode("", offline)).toBe("network");
+  expect(failureCode("", "ERROR: You've hit your usage limit. Try again later.")).toBe("rate_limited");
+  expect(failureCode("", "unexpected status 401 Unauthorized")).toBe("authentication");
+  expect(failureCode("", "error: failed to parse output schema")).toBe("process_failed");
+  // A path or a tool name containing "auth" is not an authentication failure.
+  expect(failureCode("", "reading src/auth/session.ts failed: invalid JSON")).toBe("process_failed");
 });

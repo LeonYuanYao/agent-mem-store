@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,12 +19,15 @@ import { readSessionStream, userWordsFor } from "./stream.js";
 import { isCatchAllRoot, relevantRepositories, tierOf } from "./tier.js";
 import { routePath } from "./repo-map.js";
 
+// A failing run waits 5, 10, 20, 40, then at most 60 minutes between attempts, so
+// an outage of hours costs a few dozen cheap attempts rather than every chunk.
 const retryBackoffMilliseconds = 5 * 60_000;
-// A chunk fails for good after three failures of the call itself, or after twelve
-// connection failures (about seven hours offline at a 30-minute timeout and the
-// 5-minute retry backoff), so an outage does not cost a Session its knowledge.
-const chunkFailureBudget = 12;
-const hardFailureWeight = 4;
+const maximumRetryBackoffMilliseconds = 60 * 60_000;
+// A chunk fails for good after three failures of the call itself, or after 48
+// connection failures: about two days offline with the backoff above, so an
+// outage does not cost a claimed Session its knowledge.
+const chunkFailureBudget = 48;
+const hardFailureWeight = 16;
 const mergeGroupSize = 120;
 const prepareBatchSize = 10;
 const defenseBatchSize = 4;
@@ -190,13 +193,17 @@ interface RunRow {
   readonly stats: Record<string, number>;
 }
 
+/** `attempt_count` counts failures since the run last made progress. */
+function retryBackoff(failures: number): number {
+  return Math.min(maximumRetryBackoffMilliseconds, retryBackoffMilliseconds * 2 ** Math.max(0, Math.min(failures - 1, 4)));
+}
+
 function nextOpenRun(database: DatabaseSync, now: string): RunRow | undefined {
   const row = database.prepare(
-    `SELECT run_id, project_id, stage, scheduled_for, window_end, stats_json FROM dream_runs
-     WHERE stage NOT IN ('completed', 'failed')
-       AND (last_error_code IS NULL OR updated_at <= ?)
-     ORDER BY created_at LIMIT 1`
-  ).get(new Date(Date.parse(now) - retryBackoffMilliseconds).toISOString());
+    `SELECT run_id, project_id, stage, scheduled_for, window_end, stats_json, last_error_code, attempt_count, updated_at FROM dream_runs
+     WHERE stage NOT IN ('completed', 'failed') ORDER BY created_at`
+  ).all().find((candidate) => candidate.last_error_code === null ||
+    Date.parse(now) - Date.parse(String(candidate.updated_at)) >= retryBackoff(Number(candidate.attempt_count)));
   return row === undefined ? undefined : {
     runId: String(row.run_id),
     projectId: String(row.project_id),
@@ -209,7 +216,7 @@ function nextOpenRun(database: DatabaseSync, now: string): RunRow | undefined {
 
 function advance(database: DatabaseSync, run: RunRow, stage: Stage, now: string, stats?: Record<string, number>): void {
   database.prepare(
-    `UPDATE dream_runs SET stage = ?, updated_at = ?, last_error_code = NULL, stats_json = ?,
+    `UPDATE dream_runs SET stage = ?, updated_at = ?, last_error_code = NULL, attempt_count = 0, stats_json = ?,
        completed_at = CASE WHEN ? IN ('completed', 'failed') THEN ? ELSE completed_at END
      WHERE run_id = ?`
   ).run(stage, now, json(stats ?? run.stats), stage, now, run.runId);
@@ -221,9 +228,21 @@ function addStats(run: RunRow, additions: Record<string, number>): Record<string
   return stats;
 }
 
-function recordError(database: DatabaseSync, run: RunRow, code: string, now: string): void {
-  database.prepare("UPDATE dream_runs SET last_error_code = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE run_id = ?")
-    .run(code.slice(0, 64), now, run.runId);
+/** Counts the failure (stats `errors` keeps the total) and appends its output to the run's errors.log. */
+async function recordError(database: DatabaseSync, run: RunRow, code: string, now: string, runtimeRoot: string, detail: string): Promise<void> {
+  database.prepare(
+    `UPDATE dream_runs SET last_error_code = ?, attempt_count = attempt_count + 1, updated_at = ?,
+       stats_json = json_set(stats_json, '$.errors', COALESCE(json_extract(stats_json, '$.errors'), 0) + 1)
+     WHERE run_id = ?`
+  ).run(code.slice(0, 64), now, run.runId);
+  const log = join(runDirectory(runtimeRoot, run.runId), "errors.log");
+  try {
+    if (((await stat(log).catch(() => undefined))?.size ?? 0) < 1_000_000) {
+      await appendFile(log, `${now} ${run.stage} ${code}\n${detail.replace(/^/gmu, "  ")}\n`, { mode: 0o600 });
+    }
+  } catch {
+    // The log is a diagnostic aid; a missing run directory must not hide the failure itself.
+  }
 }
 
 async function loadMap(runtimeRoot: string, runId: string): Promise<RepoMap | undefined> {
@@ -260,7 +279,8 @@ export async function runNextDreamStep(request: {
       return { state: "worked", runId: run.runId, stage: run.stage, ...(detail === undefined ? {} : { detail }) };
     } catch (error) {
       const code = error instanceof DreamModelError ? `model_${error.code}` : "local_failure";
-      recordError(database, run, code, request.now);
+      const detail = error instanceof DreamModelError ? error.detail : error instanceof Error ? `${error.name}: ${error.message}` : "";
+      await recordError(database, run, code, request.now, request.runtimeRoot, detail);
       return { state: "failed", runId: run.runId, stage: run.stage, detail: code };
     }
   } finally {
