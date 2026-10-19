@@ -28,8 +28,10 @@ Memory. Branch, pool, review and drop tiers stay in runtime tables and reports.
 - Before writing, each item is compared with the six textually closest active
   Human-authored and dreaming Memories in its scope, passages of the user-wide
   instruction files every session loads (`[dreaming].host_instruction_files`,
-  treated as Human-authored), and earlier items of its batch; the dreaming model (no tools) decides new, duplicate, refines or
-  conflicts. Human-authored Memory always wins: a duplicate is skipped and a
+  treated as Human-authored), and earlier items of its batch; the dreaming model
+  (no tools) decides new, duplicate, refines or conflicts. A refinement replaces
+  the earlier statement rather than merging both. Human-authored Memory always
+  wins: a duplicate is skipped and a
   contradiction is listed for review, never written. A duplicate of dreaming
   Memory counts an observation; a refinement or contradiction revises it. The
   same statement found again counts an observation without a model call, and a
