@@ -21,6 +21,7 @@ Claude Code's SessionStart, UserPromptSubmit, PostToolUse, Stop and SessionEnd h
 - Stdout carries only a completed pack as `hookSpecificOutput.additionalContext`: Claude Code adds SessionStart/UserPromptSubmit stdout to the model context, so diagnostics go to stderr.
 - Always exits 0 and stops itself after 1.7 s: exit code 2 would block the prompt or the stop. The UserPromptSubmit hook must be synchronous to inject; the others can stay asynchronous.
 - `[adapters].claude_hook_display` (default `summary`) sets the line shown per injection.
+- The Project is resolved from `CLAUDE_PROJECT_DIR` (the launch directory) when Claude Code sets it, so a `cd` during the Session does not change it; tool payloads keep the real cwd.
 - The transcript read is bounded to the last 1 MiB and to records of the hook's session.
 
 ## Verification

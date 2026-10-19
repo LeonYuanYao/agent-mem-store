@@ -47,6 +47,12 @@ export interface CodexHookRequest {
   readonly captureEnabled?: boolean;
   /** Host agent; Claude Code hooks share this mapping for capture. */
   readonly agent?: "codex" | "claude";
+  /**
+   * Directory that decides the Project, when it differs from the event's cwd:
+   * Claude Code reports the shell's current directory, but a Session belongs to
+   * the directory it was started in. Tool payloads keep the real cwd.
+   */
+  readonly projectPath?: string;
 }
 
 export type CodexHookResult =
@@ -211,9 +217,10 @@ export async function handleCodexHook(
     progress.enter("project_lookup");
     const projectBudgetMs = eventKind === "Stop" ? 200 : 500;
     const projectSignal = AbortSignal.timeout(Math.max(1, Math.floor(Math.min(projectBudgetMs, progress.remaining()))));
+    const projectPath = request.projectPath ?? input.cwd;
     const inspectedProject = await inspectProject({
       sessionId: input.session_id,
-      path: input.cwd,
+      path: projectPath,
       runtimeRoot: request.runtimeRoot,
       busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds,
       signal: projectSignal
@@ -223,7 +230,7 @@ export async function handleCodexHook(
       : eventKind === "Stop" || projectSignal.aborted ? undefined
       : await resolveProject({
           sessionId: input.session_id,
-          path: input.cwd,
+          path: projectPath,
           runtimeRoot: request.runtimeRoot,
           busyTimeoutMilliseconds: hookSqliteBusyTimeoutMilliseconds,
           signal: projectSignal
@@ -254,7 +261,7 @@ export async function handleCodexHook(
     });
     const captured = await appendCaptureDisposition({
       runtimeRoot: request.runtimeRoot,
-      projectPath: input.cwd,
+      projectPath,
       capturedAt: occurredAt,
       disposition,
       progress

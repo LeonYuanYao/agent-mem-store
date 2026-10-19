@@ -22,6 +22,10 @@ Code Session identifiers are UUIDs, so they share the Codex keys.
   and errors write nothing to stdout, report on stderr and exit 0.
 - `[adapters].claude_hook_display` (default `summary`) controls the line Claude
   Code shows per injected prompt, separately from Codex's `hook_display`.
+- The Project comes from `CLAUDE_PROJECT_DIR`, the directory Claude Code was
+  started in, not from the event's cwd: Claude Code reports the shell's current
+  directory, so a `cd` into a nested repository would otherwise switch the
+  Session's Project for injection and capture. Tool payloads keep the real cwd.
 - Injection does not need dreaming; without `[dreaming].enabled` the Hook
   resolves the Project but captures nothing.
 - SessionStart, SessionEnd and sensitive prompts clear the conversation context

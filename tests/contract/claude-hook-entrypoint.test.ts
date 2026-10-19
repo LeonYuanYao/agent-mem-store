@@ -8,6 +8,8 @@ import { afterEach, expect, test } from "vitest";
 
 import { readLastAssistantMessage } from "../../src/adapters/claude/transcript.js";
 import { importCaptureInboxBatch } from "../../src/capture/inbox.js";
+import { readCapturedEvent } from "../../src/capture/index.js";
+import { resolveProject } from "../../src/projects/index.js";
 import { foregroundRetrievalSocketPath } from "../../src/retrieval/foreground-protocol.js";
 import { openRuntimeDatabase } from "../../src/runtime/database.js";
 
@@ -187,4 +189,34 @@ test("Claude injection works without dreaming and fails open when the Worker is 
   const unavailable = await runHook(runtimeRoot, "UserPromptSubmit", input, { MEMSTORE_INJECTION_MODE: "active" });
   expect(unavailable).toMatchObject({ status: 0, stdout: "" });
   expect(performance.now() - started).toBeLessThan(2_500);
+});
+
+test("a Claude Code Session keeps the Project of its launch directory after a cd", async () => {
+  const { root, runtimeRoot, project } = await fixture(true);
+  const elsewhere = join(root, "elsewhere");
+  await mkdir(elsewhere, { recursive: true });
+  const launch = { CLAUDE_PROJECT_DIR: project };
+  for (const [event, extra] of [
+    ["UserPromptSubmit", { prompt: "看看 MemStore" }],
+    ["PostToolUse", { tool_name: "Bash", tool_use_id: "toolu_cd", tool_input: { command: "cd elsewhere && ls" }, tool_response: { stdout: "ok" } }]
+  ] as const) {
+    const result = await runHook(runtimeRoot, event, { session_id: "claude-cd", cwd: elsewhere, ...extra, hook_event_name: event }, launch);
+    expect(result.status, result.stderr).toBe(0);
+  }
+  await importCaptureInboxBatch({ runtimeRoot, importedAt: new Date().toISOString(), maximumEntries: 64, maximumMilliseconds: 5_000 });
+  const launched = await resolveProject({ sessionId: "expected", path: project, runtimeRoot });
+  if (launched.status !== "resolved") throw new Error("Project did not resolve.");
+  const database = await openRuntimeDatabase(runtimeRoot);
+  let rows: Record<string, unknown>[];
+  try {
+    rows = database.prepare("SELECT event_id, event_kind, project_id FROM capture_events WHERE session_id = 'claude-cd' ORDER BY created_at").all();
+  } finally {
+    database.close();
+  }
+  expect(rows.map((row) => `${String(row.event_kind)}:${String(row.project_id)}`)).toEqual([
+    `UserPromptSubmit:${launched.projectId}`, `PostToolUse:${launched.projectId}`
+  ]);
+  // The tool payload still records where the command actually ran.
+  const tool = await readCapturedEvent(runtimeRoot, String(rows[1]?.event_id));
+  expect(tool?.payload).toMatchObject({ cwd: elsewhere });
 });

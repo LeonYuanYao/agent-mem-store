@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { text as consumeText } from "node:stream/consumers";
 import { z } from "zod";
 
@@ -45,10 +45,13 @@ export async function runClaudeHook(eventSource: unknown): Promise<void> {
       const reply = await readLastAssistantMessage(input.transcript_path, input.session_id);
       if (reply !== undefined) enriched = { ...enriched, last_assistant_message: reply };
     }
+    // Claude Code passes the directory it was started in; a `cd` during the Session must not change its Project.
+    const launchDirectory = process.env.CLAUDE_PROJECT_DIR;
     const result = await handleCodexHook({
       runtimeRoot: root,
       input: enriched,
       agent: "claude",
+      ...(launchDirectory !== undefined && isAbsolute(launchDirectory) ? { projectPath: launchDirectory } : {}),
       captureEnabled: capturing,
       progress: new CaptureProgress(hookBudgetMilliseconds - 200)
     });
