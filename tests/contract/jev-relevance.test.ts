@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, test, vi } from "vitest";
 
-import { readJevApiKey, readJevConfiguration } from "../../src/configuration/jev.js";
+import { jevConfigurationSchema, readJevApiKey, readJevConfiguration } from "../../src/configuration/jev.js";
 import { JevAutomaticRelevanceFilter, jevModel, jevTelemetrySchema } from "../../src/retrieval/jev.js";
 
 const roots: string[] = [];
@@ -301,3 +301,33 @@ test("context sensitivity is checked before paragraph selection", async () => {
   expect(result.telemetry).toMatchObject({ state: "fallback", reason: "sensitive_input" });
   expect(fetcher).not.toHaveBeenCalled();
 });
+
+test("a configured proxy carries Jev requests through a CONNECT tunnel, and a refused tunnel falls back", async () => {
+  const { createServer } = await import("node:http");
+  const targets: string[] = [];
+  const proxy = createServer();
+  proxy.on("connect", (request, socket) => {
+    targets.push(String(request.url));
+    socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+  });
+  await new Promise<void>((resolveListen) => proxy.listen(0, "127.0.0.1", resolveListen));
+  const address = proxy.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  try {
+    const proxied = new JevAutomaticRelevanceFilter({ runtimeRoot: "unused",
+      readConfiguration: () => Promise.resolve({ ...configuration, proxy: `http://127.0.0.1:${String(port)}` }),
+      readApiKey: () => Promise.resolve("synthetic-test-key") });
+    const result = await proxied.filter(input());
+    expect(result.scores).toBeUndefined();
+    expect(result.telemetry).toMatchObject({ state: "fallback", reason: "network_error", httpStarted: true });
+    expect(targets).toEqual(["api.typesafe.ai:443"]);
+  } finally {
+    await new Promise<void>((resolveClose) => proxy.close(() => { resolveClose(); }));
+  }
+  expect(readJevConfigurationProxy("http://127.0.0.1:7897")).toBe("http://127.0.0.1:7897");
+  expect(() => readJevConfigurationProxy("socks5://127.0.0.1:7897")).toThrow();
+});
+
+function readJevConfigurationProxy(proxy: string): string | undefined {
+  return jevConfigurationSchema.parse({ proxy }).proxy;
+}

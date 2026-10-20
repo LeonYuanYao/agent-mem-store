@@ -9,7 +9,9 @@ export const maximumJevTimeoutMilliseconds = 1_300;
 export const jevConfigurationSchema = z.object({
   enabled: z.boolean().default(false),
   threshold: z.number().min(0).max(1).default(0.5),
-  timeout_ms: z.number().int().min(50).max(maximumJevTimeoutMilliseconds).default(maximumJevTimeoutMilliseconds)
+  timeout_ms: z.number().int().min(50).max(maximumJevTimeoutMilliseconds).default(maximumJevTimeoutMilliseconds),
+  // Optional http:// proxy for the Jev API, which rejects some regions (HTTP 451).
+  proxy: z.url({ protocol: /^http$/u }).optional()
 }).strict();
 
 export type JevConfiguration = z.infer<typeof jevConfigurationSchema>;

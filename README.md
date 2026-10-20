@@ -268,6 +268,11 @@ up to six selected memory representations to TypeSafe. Identity headers are
 removed and detected credential patterns skip transmission; this is not complete
 anonymization. Only enable it for content you may send to that provider.
 
+TypeSafe rejects some regions with HTTP 451 (`http_error` in receipts). Set
+`proxy = "http://127.0.0.1:PORT"` in `[jev]` to send only Jev requests through an
+HTTP proxy (CONNECT tunnel); connections stay alive between requests and resume
+their TLS session, because the handshake through a proxy costs most of the budget.
+
 To restrict automatic injection to Human-authored knowledge, set
 `human_authored_only_injection = true` in the existing `[adapters]` section of
 `<runtime>/config.toml`. SessionStart and UserPromptSubmit filter authority before

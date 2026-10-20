@@ -4,6 +4,7 @@ import { contextTokenCount, selectConversationContext } from "./conversation-con
 
 import { maximumJevTimeoutMilliseconds, readJevApiKey, readJevConfiguration, type JevConfiguration } from "../configuration/jev.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
+import { proxiedFetch } from "./proxy-fetch.js";
 
 export const jevModel = "jev-1.13.0";
 const endpoint = "https://api.typesafe.ai/v1/systemone";
@@ -211,7 +212,8 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
       try {
         stage = "response_headers";
         httpStarted = true;
-        response = await (this.options.fetch ?? fetch)(endpoint, {
+        const send = this.options.fetch ?? (config.proxy === undefined ? fetch : proxiedFetch(config.proxy));
+        response = await send(endpoint, {
           method: "POST", redirect: "error", signal: controller.signal,
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: payload
         });
