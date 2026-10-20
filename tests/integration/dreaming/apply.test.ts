@@ -210,3 +210,27 @@ test("knowledge a user-wide instruction file already states is not written", asy
   expect(outcome?.memoryId).toBeUndefined();
   expect(Object.values(await catalog(runtimeRoot)).filter((value) => value.startsWith("agent_derived"))).toEqual([]);
 });
+
+test("apply waits while the configuration is not current, and a later apply retries failed items", async () => {
+  const { runtimeRoot, vaultRoot, projectId } = await fixture();
+  await addRun(runtimeRoot, projectId, "msdream_00000007-0000-4000-8000-000000000007", "2026-10-16T19:00:00.000Z", [{ id: "msdi_wait", text: texts.code }]);
+  const request = { runtimeRoot, vaultRoot, now: "2026-10-17T00:00:00.000Z", model: fakeModel([]), timeZone: "Asia/Shanghai", preview: false,
+    runId: "msdream_00000007-0000-4000-8000-000000000007" };
+  // An unreadable configuration defers the whole batch before anything is written.
+  await mkdir(join(vaultRoot, "_MemStore"), { recursive: true });
+  await writeFile(join(vaultRoot, "_MemStore", "policy.toml"), "schema_version = 1\n");
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n[adapters]\nhook_display = \"not-a-mode\"\n");
+  await expect(applyCompletedRuns(request)).rejects.toThrow(/apply waits/u);
+  expect(Object.values(await catalog(runtimeRoot)).filter((value) => value.startsWith("agent_derived"))).toEqual([]);
+  // Without configuration documents there is no policy to honour, so apply proceeds.
+  await rm(join(vaultRoot, "_MemStore", "policy.toml"));
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n");
+  // An item recorded as failed is retried.
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare("UPDATE dream_items SET apply_state = 'failed', apply_reason = 'earlier failure' WHERE item_id = 'msdi_wait'").run();
+  } finally {
+    database.close();
+  }
+  expect((await applyCompletedRuns(request)).outcomes).toEqual([expect.objectContaining({ itemId: "msdi_wait", state: "written" })]);
+});

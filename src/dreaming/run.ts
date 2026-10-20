@@ -704,7 +704,7 @@ export async function applyCompletedRuns(request: {
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     const items = loadApplyItems(database,
-      `r.stage = 'completed' AND i.tier = 'inject' AND (i.apply_state IS NULL OR i.apply_state = 'pending')
+      `r.stage = 'completed' AND i.tier = 'inject' AND (i.apply_state IS NULL OR i.apply_state IN ('pending', 'failed'))
        AND (? IS NULL OR r.created_at >= ?) AND (? IS NULL OR r.run_id = ?)`,
       request.from ?? null, request.from ?? null, request.runId ?? null, request.runId ?? null);
     const outcomes: (ApplyOutcome & { text: string; projectId: string; runId: string })[] = [];

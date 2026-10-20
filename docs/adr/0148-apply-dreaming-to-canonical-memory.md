@@ -53,7 +53,9 @@ at write time (needs the embedding adapter in the dreaming step and still needs 
 model to tell refinement from duplication).
 
 Consequences: dreaming Memory is subject to agent-derived governance and
-capacity. With Luna distillation disabled while dreaming is enabled, dreaming is
+capacity. Canonical writes refuse while the configuration runs on its
+last-known-good copy, so apply checks first and leaves the batch pending until
+the configuration is current; failed items are retried by `memstore dream apply`. With Luna distillation disabled while dreaming is enabled, dreaming is
 the only source of new agent-derived Memory. A global fact first seen in one
 Project is not promoted when other Projects confirm it; that needs a later
 decision. Long statements (over 96 estimated tokens) have no validated compact

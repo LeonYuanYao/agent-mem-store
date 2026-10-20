@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { DatabaseSync } from "node:sqlite";
 
+import { loadConfiguration } from "../configuration/index.js";
 import type { MemoryCategory } from "../memories/categories.js";
 import { dreamingPolicyVersion } from "../memories/origins.js";
 import { assessExactCompact } from "../memories/representations.js";
@@ -226,6 +227,7 @@ export async function applyBatch(request: {
   readonly instructionFiles?: readonly string[];
 }): Promise<{ readonly outcomes: ApplyOutcome[]; readonly usage?: ModelUsage }> {
   const { database } = request;
+  if (!request.preview) await requireCurrentConfiguration(request);
   const projectId = request.items[0]?.projectId ?? "";
   const memories = [
     ...await activeMemories(database, { vaultRoot: request.vaultRoot, runtimeRoot: request.runtimeRoot, projectId }),
@@ -355,6 +357,34 @@ export async function applyBatch(request: {
     }
   }
   return { outcomes: request.items.map((item) => outcomes.get(item.itemId) ?? { itemId: item.itemId, state: "failed", reason: "no_outcome" }), ...(usage === undefined ? {} : { usage }) };
+}
+
+/**
+ * Canonical writes refuse while the configuration runs on its last-known-good copy
+ * (for example right after an edit the running code cannot read yet). That is not
+ * the items' fault: stop before writing anything, so they stay pending and the run
+ * retries after its backoff.
+ */
+export class ApplyDeferredError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "ApplyDeferredError";
+  }
+}
+
+async function requireCurrentConfiguration(paths: { readonly vaultRoot: string; readonly runtimeRoot: string }): Promise<void> {
+  let current: boolean;
+  try {
+    const configuration = await loadConfiguration(paths);
+    current = configuration.mode === "read_write" && configuration.recovery === undefined;
+  } catch (error) {
+    // Like active admission, a missing configuration document means no policy to honour; but a
+    // missing last-known-good copy means the current document is invalid and has no fallback.
+    const missing = typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+    const path = typeof error === "object" && error !== null && "path" in error ? String(error.path) : "";
+    current = missing && !path.includes("config-last-known-good");
+  }
+  if (!current) throw new ApplyDeferredError("Configuration is not current (invalid, unreadable or on its last-known-good copy); apply waits.");
 }
 
 function errorReason(error: unknown): string {
