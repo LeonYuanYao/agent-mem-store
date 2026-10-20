@@ -106,7 +106,11 @@ export interface VerifyClaim {
 }
 
 export interface DreamModel {
-  extract(request: { readonly projectLabel: string; readonly chunk: string; readonly index: number; readonly total: number }):
+  extract(request: {
+    readonly projectLabel: string; readonly chunk: string; readonly index: number; readonly total: number;
+    /** The user asked to remember this material (`remember extract`). */
+    readonly requested?: boolean;
+  }):
     Promise<{ readonly candidates: ExtractedCandidate[]; readonly usage: ModelUsage }>;
   merge(request: { readonly candidates: readonly { id: string; statement: string; claim_type: string; scope: string }[] }):
     Promise<{ readonly items: z.infer<typeof mergedItemSchema>[]; readonly usage: ModelUsage }>;
@@ -125,6 +129,10 @@ export interface ReconcileItem {
 }
 
 // ------------------------------------------------------------------ prompts
+
+// A requested extraction keeps what the user chose to preserve; the nightly prompt stays conservative.
+const requestedPreface = `用户明确要求把下面这段内容存为长期记忆（memstore remember extract）。提炼其中所有长期有用的知识：身份与别名、文件和资源的位置、约定、规则和用户的决定，即使它们写成任务说明的样子也要保留；仍然不要提炼凭证、密钥、token 的具体值和只对这一次成立的状态。
+`;
 
 const extractPrompt = (projectLabel: string, index: number, total: number): string => `你是记忆提炼器。下面是 coding agent 会话的一段（第 ${String(index)}/${String(total)} 段），项目：${projectLabel}。
 内容包括用户输入、助手回复和工具调用结果。提炼「在未来新的、任务未知的会话里仍然有用」的知识；工具结果中读到的仓库文档、代码、命令输出同样可以作为来源，但只提炼稳定有用的部分。
@@ -356,8 +364,9 @@ export class CodexDreamModel implements DreamModel {
     }
   }
 
-  public async extract(request: { projectLabel: string; chunk: string; index: number; total: number }) {
-    const { output, usage } = await this.#invoke(extractPrompt(request.projectLabel, request.index, request.total) + request.chunk,
+  public async extract(request: { projectLabel: string; chunk: string; index: number; total: number; requested?: boolean }) {
+    const { output, usage } = await this.#invoke((request.requested === true ? requestedPreface : "") +
+      extractPrompt(request.projectLabel, request.index, request.total) + request.chunk,
       extractionSchema, this.#options.extractEffort, false);
     return { candidates: output.candidates, usage };
   }

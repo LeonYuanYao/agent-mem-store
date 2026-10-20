@@ -46,6 +46,9 @@ test("material the user asked to remember is injected once it survives verificat
   expect(tierOf({ ...base, verdict: "contradicted", userRequested: true }).tier).toBe("review");
   expect(tierOf({ ...base, verdict: "documented", userRequested: true }).tier).toBe("drop");
   expect(tierOf({ ...base, verdict: "branch_scoped", branch: "feat/x", userRequested: true }).tier).toBe("branch");
+  // Asked to keep it, the user's own instruction counts as their rule.
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "user_task_instruction", userRequested: true }))
+    .toEqual({ tier: "inject", reason: "user_requested" });
 });
 
 test("a catch-all home-directory Project keeps global knowledge only", () => {

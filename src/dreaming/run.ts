@@ -434,7 +434,8 @@ async function stepRun(
       const { roots } = await projectRoots(database, run.projectId, request.allowTemporaryRoots);
       try {
         const { candidates, usage } = await request.model.extract({
-          projectLabel: roots.join(", ") || run.projectId, chunk: text, index, total: stream?.chunks.length ?? index
+          projectLabel: roots.join(", ") || run.projectId, chunk: text, index, total: stream?.chunks.length ?? index,
+          ...(run.request === undefined ? {} : { requested: true })
         });
         const source = text.replace(/\s+/gu, "").toLowerCase();
         for (const candidate of candidates) {

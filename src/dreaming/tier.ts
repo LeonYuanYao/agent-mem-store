@@ -53,8 +53,10 @@ export function tierOf(input: TierInput): { readonly tier: DreamTier; readonly r
   if (input.catchAllProject === true && input.scope !== "global") return { tier: "drop", reason: "catch_all_project" };
   if (input.verdict === "contradicted" || input.verdict === "stale") return { tier: "review", reason: input.verdict };
   if (input.verdict === "documented" || (input.documentedAt ?? "") !== "") return { tier: "drop", reason: "already_in_autoloaded_docs" };
-  // Repeated across Sessions, it reads as a lasting preference after all.
-  if (userTaskInstruction) return input.sessionCount >= 2 ? { tier: "inject", reason: "recurring" } : { tier: "pool", reason: "user_task_instruction" };
+  // Repeated across Sessions, it reads as a lasting preference after all; and the user may ask to keep it.
+  if (userTaskInstruction && input.userRequested !== true) {
+    return input.sessionCount >= 2 ? { tier: "inject", reason: "recurring" } : { tier: "pool", reason: "user_task_instruction" };
+  }
   const relevant = input.scope === "global" ? []
     : input.relevantRepos !== undefined && input.relevantRepos.length > 0
       ? input.sourceBranches.filter((source) => input.relevantRepos?.includes(source.repo) === true)
