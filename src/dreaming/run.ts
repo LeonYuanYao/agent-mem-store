@@ -56,6 +56,11 @@ function parseJson<T>(value: unknown, fallback: T): T {
   }
 }
 
+/** A requested run applies when its request says so; other runs follow `[dreaming].mode`. */
+function appliesRun(run: RunRow, configuration: DreamingConfiguration): boolean {
+  return run.request === undefined ? configuration.mode === "apply" : run.request.apply;
+}
+
 function expandHome(path: string): string {
   return path.replace(/^~(?=\/|$)/u, homedir());
 }
@@ -163,7 +168,7 @@ export async function scheduleDueDreams(request: {
       if (already !== undefined) continue;
       if ((await projectRoots(database, projectId, request.allowTemporaryRoots)).roots.length === 0) continue;
       if (eligibleSessions(database, projectId, request.now, request.configuration).length === 0) continue;
-      created.push(createRun(database, projectId, scheduledFor, request.now));
+      created.push(createRun(database, projectId, scheduledFor, request.now, request.configuration.mode));
     }
   } finally {
     database.close();
@@ -171,13 +176,39 @@ export async function scheduleDueDreams(request: {
   return { created };
 }
 
-function createRun(database: DatabaseSync, projectId: string, scheduledFor: string, now: string): string {
+function createRun(database: DatabaseSync, projectId: string, scheduledFor: string, now: string, mode: "shadow" | "apply" = "shadow"): string {
   const runId = `msdream_${randomUUID()}`;
   database.prepare(
     `INSERT INTO dream_runs(run_id, project_id, scheduled_for, mode, stage, window_end, created_at, updated_at)
-     VALUES (?, ?, ?, 'shadow', 'select', ?, ?, ?)`
-  ).run(runId, projectId, scheduledFor, now, now, now);
+     VALUES (?, ?, ?, ?, 'select', ?, ?, ?)`
+  ).run(runId, projectId, scheduledFor, mode, now, now, now);
   return runId;
+}
+
+/**
+ * A run over exactly the capture events a user asked to remember from
+ * (`memstore remember extract` while dreaming is enabled). The Worker runs it on
+ * its next idle iteration; items that survive verification are injected as
+ * user-requested knowledge.
+ */
+export async function startRequestedDreamRun(request: {
+  readonly runtimeRoot: string;
+  readonly projectId: string;
+  readonly now: string;
+  readonly request: DreamRequest;
+}): Promise<string> {
+  const database = await openRuntimeDatabase(request.runtimeRoot);
+  try {
+    const runId = `msdream_${randomUUID()}`;
+    database.prepare(
+      `INSERT INTO dream_runs(run_id, project_id, scheduled_for, mode, stage, window_end, created_at, updated_at, request_json)
+       VALUES (?, ?, ?, ?, 'select', ?, ?, ?, ?)`
+    ).run(runId, request.projectId, `requested:${request.now}:${runId.slice(8, 16)}`, request.request.apply ? "apply" : "shadow", request.now, request.now, request.now,
+      json(request.request));
+    return runId;
+  } finally {
+    database.close();
+  }
 }
 
 /** Manual trigger used by `memstore dream run`; ignores the schedule but not eligibility. */
@@ -190,6 +221,15 @@ export async function startDreamRun(request: { readonly runtimeRoot: string; rea
   }
 }
 
+/** What `memstore remember extract` asked dreaming to read (ADR-0150). */
+export interface DreamRequest {
+  readonly eventIds: readonly string[];
+  readonly selector: string;
+  readonly scope: "project" | "global";
+  /** Write the inject tier when the run completes; false previews in the report only. */
+  readonly apply: boolean;
+}
+
 interface RunRow {
   readonly runId: string;
   readonly projectId: string;
@@ -197,6 +237,19 @@ interface RunRow {
   readonly scheduledFor: string;
   readonly windowEnd: string;
   readonly stats: Record<string, number>;
+  readonly request?: DreamRequest;
+}
+
+function requestOf(value: unknown): { readonly request?: DreamRequest } {
+  const request = parseRequest(value);
+  return request === undefined ? {} : { request };
+}
+
+function parseRequest(value: unknown): DreamRequest | undefined {
+  if (typeof value !== "string") return undefined;
+  const parsed = parseJson<Partial<DreamRequest>>(value, {});
+  if (!Array.isArray(parsed.eventIds) || typeof parsed.selector !== "string") return undefined;
+  return { eventIds: parsed.eventIds.map(String), selector: parsed.selector, scope: parsed.scope === "global" ? "global" : "project", apply: parsed.apply === true };
 }
 
 /** `attempt_count` counts failures since the run last made progress. */
@@ -206,7 +259,7 @@ function retryBackoff(failures: number): number {
 
 function nextOpenRun(database: DatabaseSync, now: string): RunRow | undefined {
   const row = database.prepare(
-    `SELECT run_id, project_id, stage, scheduled_for, window_end, stats_json, last_error_code, attempt_count, updated_at FROM dream_runs
+    `SELECT run_id, project_id, stage, scheduled_for, window_end, stats_json, last_error_code, attempt_count, updated_at, request_json FROM dream_runs
      WHERE stage NOT IN ('completed', 'failed') ORDER BY created_at`
   ).all().find((candidate) => candidate.last_error_code === null ||
     Date.parse(now) - Date.parse(String(candidate.updated_at)) >= retryBackoff(Number(candidate.attempt_count)));
@@ -216,7 +269,8 @@ function nextOpenRun(database: DatabaseSync, now: string): RunRow | undefined {
     stage: row.stage as Stage,
     scheduledFor: String(row.scheduled_for),
     windowEnd: String(row.window_end),
-    stats: parseJson<Record<string, number>>(row.stats_json, {})
+    stats: parseJson<Record<string, number>>(row.stats_json, {}),
+    ...requestOf(row.request_json)
   };
 }
 
@@ -303,7 +357,7 @@ async function stepRun(
   switch (run.stage) {
     case "select": {
       const { roots, kind } = await projectRoots(database, run.projectId, request.allowTemporaryRoots);
-      const sessions = eligibleSessions(database, run.projectId, run.windowEnd, configuration);
+      const sessions = run.request === undefined ? eligibleSessions(database, run.projectId, run.windowEnd, configuration) : [];
       await mkdir(runDirectory(runtimeRoot, run.runId), { recursive: true, mode: 0o700 });
       const map = kind === "git" && roots.length > 0 ? await buildRepoMap(roots, now,
         [...configuration.host_skill_roots, ...configuration.host_instruction_files].map(expandHome)) : undefined;
@@ -312,6 +366,21 @@ async function stepRun(
         await writeToolWrapper(runtimeRoot, run.runId);
       }
       let chunks = 0;
+      if (run.request !== undefined) {
+        // The requested events form one pseudo-Session of this run; nightly claims of real Sessions are untouched.
+        const stream = readSessionStream(database, { sessionId: "", until: now, chunkCharacters: configuration.chunk_characters, eventIds: run.request.eventIds });
+        const sessionId = `requested:${run.runId}`;
+        database.prepare(
+          `INSERT INTO dream_sessions(session_id, project_id, run_id, first_event_at, last_event_at, chunk_count, branch_json)
+           VALUES (?, ?, ?, ?, ?, ?, '[]')`
+        ).run(sessionId, run.projectId, run.runId, stream?.firstEventAt ?? now, stream?.lastEventAt ?? now, stream?.chunks.length ?? 0);
+        for (let index = 0; index < (stream?.chunks.length ?? 0); index += 1) {
+          database.prepare("INSERT INTO dream_chunks(run_id, session_id, chunk_index, state) VALUES (?, ?, ?, 'pending')").run(run.runId, sessionId, index + 1);
+          chunks += 1;
+        }
+        advance(database, run, chunks === 0 ? "report" : "extract", now, { sessions: 1, chunks, repositories: map?.repos.length ?? 0 });
+        return `requested chunks:${String(chunks)}`;
+      }
       for (const session of sessions) {
         const stream = readSessionStream(database, {
           sessionId: session.session_id, after: session.after, until: session.last_at, chunkCharacters: configuration.chunk_characters
@@ -348,7 +417,9 @@ async function stepRun(
       const index = Number(chunk.chunk_index);
       const segment = database.prepare("SELECT segment_after, last_event_at FROM dream_sessions WHERE session_id = ? AND run_id = ?")
         .get(sessionId, run.runId);
-      const stream = segment === undefined ? undefined : readSessionStream(database, {
+      const stream = run.request !== undefined
+        ? readSessionStream(database, { sessionId, until: now, chunkCharacters: configuration.chunk_characters, eventIds: run.request.eventIds })
+        : segment === undefined ? undefined : readSessionStream(database, {
         sessionId,
         after: typeof segment.segment_after === "string" ? segment.segment_after : undefined,
         until: String(segment.last_event_at),
@@ -576,6 +647,7 @@ async function stepRun(
         const { tier, reason } = tierOf({
           scope,
           catchAllProject,
+          userRequested: run.request !== undefined,
           verdict: finalVerdict,
           durability: verdict?.durability ?? "long_term",
           branch: defense?.branch || verdict?.branch || "",
@@ -596,12 +668,12 @@ async function stepRun(
       }
       // Re-tiering replaces earlier tier counts instead of accumulating them.
       const previous = Object.fromEntries(Object.entries(run.stats).filter(([key]) => !key.startsWith("tier_")));
-      if (configuration.mode === "apply") markApplyPending(database, run.runId);
+      if (appliesRun(run, configuration)) markApplyPending(database, run.runId);
       advance(database, run, "report", now, { ...previous, items: items.length, ...counts });
       return `tiered ${String(items.length)}`;
     }
     case "report": {
-      if (configuration.mode === "apply") {
+      if (appliesRun(run, configuration)) {
         // Apply pending items one batch per step before reporting them.
         const pending = loadApplyItems(database, "i.run_id = ? AND i.apply_state = 'pending'", run.runId).slice(0, applyBatchSize);
         if (pending.length > 0) {

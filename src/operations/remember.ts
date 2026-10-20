@@ -8,6 +8,8 @@ import {
   recordHumanGlobalAuthorization
 } from "../candidates/human.js";
 import { captureEvent } from "../capture/index.js";
+import { readDreamingConfiguration } from "../dreaming/config.js";
+import { startRequestedDreamRun } from "../dreaming/run.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { inspectProject, resolveProject } from "../projects/index.js";
@@ -171,6 +173,8 @@ async function selectCaptureEventIds(request: {
   readonly selector: ReturnType<typeof parseExtractionSelector>;
   readonly projectId?: string;
   readonly now: string;
+  /** Dreaming takes captured events over (state completed) half a minute after capture; they still count. */
+  readonly includeHandedOff?: boolean;
 }): Promise<{ readonly eventIds: readonly string[]; readonly sessionId: string }> {
   if (request.selector.kind === "file") {
     const eventId = await captureExplicitFile({
@@ -187,18 +191,19 @@ async function selectCaptureEventIds(request: {
       ? ""
       : " AND project_id = ?";
     const projectArguments = request.projectId === undefined ? [] : [request.projectId];
+    const stateClause = request.includeHandedOff === true ? "state IN ('pending', 'completed')" : "state = 'pending'";
     let rows: readonly Record<string, unknown>[];
     if (request.selector.kind === "turn") {
       rows = database.prepare(
         `SELECT event_id, session_id FROM capture_events
-         WHERE turn_id = ? AND state = 'pending'${projectClause}
+         WHERE turn_id = ? AND ${stateClause}${projectClause}
          ORDER BY created_at ASC`
       ).all(request.selector.turnId, ...projectArguments);
     } else {
       const column = request.selector.kind === "current_turn" ? "turn_id" : "session_id";
       const latest = database.prepare(
         `SELECT ${column} AS identity FROM capture_events
-         WHERE ${column} IS NOT NULL AND state = 'pending'${projectClause}
+         WHERE ${column} IS NOT NULL AND ${stateClause}${projectClause}
          ORDER BY created_at DESC LIMIT 1`
       ).get(...projectArguments);
       if (typeof latest?.identity !== "string") {
@@ -206,7 +211,7 @@ async function selectCaptureEventIds(request: {
       }
       rows = database.prepare(
         `SELECT event_id, session_id FROM capture_events
-         WHERE ${column} = ? AND state = 'pending'${projectClause}
+         WHERE ${column} = ? AND ${stateClause}${projectClause}
          ORDER BY created_at ASC`
       ).all(latest.identity, ...projectArguments);
     }
@@ -304,6 +309,7 @@ export async function rememberExtract(request: {
   if (selector.kind === "file") {
     await realpath(resolve(request.path, selector.path));
   }
+  const dreaming = (await readDreamingConfiguration(request.runtimeRoot)).enabled;
   if (request.preview) {
     const inspected = request.scope === "global"
       ? undefined
@@ -327,9 +333,7 @@ export async function rememberExtract(request: {
         ? []
         : [
             ...(inspected?.status === "unresolved" ? ["project_registry_entry"] : []),
-            "luna_operation",
-            "distillation_batch",
-            "agent_candidate"
+            ...(dreaming ? ["dream_run"] : ["luna_operation", "distillation_batch", "agent_candidate"])
           ],
       warnings: projectBlocked
         ? [{ code: "project_unresolved", reason: inspected.reason }]
@@ -353,8 +357,30 @@ export async function rememberExtract(request: {
     runtimeRoot: request.runtimeRoot,
     selector,
     ...(evidenceProjectId === undefined ? {} : { projectId: evidenceProjectId }),
-    now: request.requestedAt
+    now: request.requestedAt,
+    includeHandedOff: dreaming
   });
+  if (dreaming) {
+    // Luna distillation does not run while dreaming is enabled (ADR-0150): dreaming reads the selection now.
+    if (evidenceProjectId === undefined) {
+      throw new MemStoreCommandError("project_required", "Dreaming needs a resolved Project to verify the extraction against.");
+    }
+    const configuration = await readDreamingConfiguration(request.runtimeRoot);
+    const runId = await startRequestedDreamRun({
+      runtimeRoot: request.runtimeRoot, projectId: evidenceProjectId, now: request.requestedAt,
+      request: { eventIds: selected.eventIds, selector: request.source, scope: request.scope, apply: configuration.mode === "apply" }
+    });
+    return {
+      dry_run: false,
+      authority: "agent_derived",
+      scope,
+      state: "queued",
+      pipeline: "dreaming",
+      run_id: runId,
+      applies: configuration.mode === "apply",
+      next: "memstore dream status --json"
+    };
+  }
   const queued = await queueExplicitBatch({
     runtimeRoot: request.runtimeRoot,
     eventIds: selected.eventIds,

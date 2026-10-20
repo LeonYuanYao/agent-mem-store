@@ -9,6 +9,7 @@ import { dreamingConfigurationSchema } from "../../../src/dreaming/config.js";
 import { handOffCaptureToDreaming } from "../../../src/dreaming/handoff.js";
 import { DreamModelError, type DreamModel, type Verdict } from "../../../src/dreaming/model.js";
 import { inspectDreams, renderDreamReports, runNextDreamStep, scheduleDueDreams, startDreamRun } from "../../../src/dreaming/run.js";
+import { rememberExtract } from "../../../src/operations/remember.js";
 import { resolveProject } from "../../../src/projects/index.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 
@@ -387,6 +388,86 @@ test("connection failures cost a chunk less than failures of the call itself", a
   const [run] = await inspectDreams(runtimeRoot, 1);
   expect(run?.stats).toMatchObject({ errors: 51 });
   expect(await readFile(join(runtimeRoot, "state", "dreaming", String(run?.run_id), "errors.log"), "utf8")).toContain("extract model_timeout");
+});
+
+test("remember extract hands its selection to dreaming, which verifies and writes what survives", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-requested-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await mkdir(vaultRoot, { recursive: true });
+  const clone = await workspace(root);
+  await mkdir(runtimeRoot, { recursive: true });
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n\n[dreaming]\nenabled = true\nmode = \"apply\"\n");
+  const project = await resolveProject({ sessionId: "requested-session", path: clone, runtimeRoot });
+  if (project.status !== "resolved") throw new Error("Project did not resolve.");
+  const notes = join(root, "notes.md");
+  await writeFile(notes, "奥德赛的归航奖励只在成功归航时发放。\n");
+  for (const [index, event] of [
+    { eventKind: "UserPromptSubmit", turnId: "t1", payload: { prompt: "这局奥德赛归航后才拿到资源奖励" } },
+    { eventKind: "Stop", turnId: "t1", payload: { assistantMessage: "记下了：归航资源奖励只在归航成功时发放。" } }
+  ].entries()) {
+    await captureEvent({ runtimeRoot, event: {
+      schemaVersion: 1, eventId: `msevent_requested_${String(index)}`, deduplicationKey: `requested:${String(index)}`, agent: "codex",
+      eventKind: event.eventKind as "UserPromptSubmit" | "Stop", occurredAt: new Date().toISOString(), projectId: project.projectId,
+      sessionId: "requested-session", turnId: event.turnId, payload: event.payload
+    } });
+  }
+  const now = new Date().toISOString();
+  const chunks: string[] = [];
+  const model: DreamModel = {
+    extract(request) {
+      chunks.push(request.chunk);
+      const statement = request.chunk.includes("### T01 FILE") ? "奥德赛的商港先补食物再补木料。" : "奥德赛的归航资源奖励只在归航成功时发放。";
+      return Promise.resolve({ usage: { tokens: 1, seconds: 1 }, candidates: [{ statement,
+        claim_type: "external_system", scope: "project", explicit_user: false, turn_refs: ["T01"], quote: "", check_hints: [] }] });
+    },
+    merge: () => Promise.reject(new Error("unexpected merge")),
+    verify: (request) => Promise.resolve({ usage: { tokens: 1, seconds: 1 }, results: request.claims.map((claim): Verdict => ({
+      id: claim.id, claim_type: "external_system", durability: "long_term", scope: "project", subsystem: "Odyssey", verdict: "not_repo_verifiable",
+      branch: "", evidence: [], reason: "external game rule", refined_statement: "", documented_at: "", user_support: "not_applicable" })) }),
+    defend: () => Promise.reject(new Error("unexpected defend")),
+    reconcile: (request) => Promise.resolve({ usage: { tokens: 1, seconds: 1 },
+      results: request.items.map((item) => ({ id: item.id, decision: "new" as const, target: "", reason: "different fact" })) })
+  };
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true, mode: "apply" });
+  const drain = async () => {
+    for (let step = 0; step < 50; step += 1) {
+      if ((await runNextDreamStep({ runtimeRoot, vaultRoot, now, configuration, model, allowTemporaryRoots: true })).state === "idle") return;
+    }
+  };
+  // The current Session is selected even after dreaming took its events over.
+  expect(await handOffCaptureToDreaming({ runtimeRoot, now: new Date(Date.now() + 60_000).toISOString(), minimumAgeMilliseconds: 0 })).toBe(2);
+  const accepted = await rememberExtract({ runtimeRoot, vaultRoot, path: clone, source: "current-session", scope: "project", startup: "auto",
+    preview: false, requestedAt: now }) as Record<string, unknown>;
+  expect(accepted).toMatchObject({ state: "queued", pipeline: "dreaming", applies: true });
+  expect(String(accepted.run_id)).toMatch(/^msdream_/u);
+  await drain();
+  expect(chunks[0]).toContain("这局奥德赛归航后才拿到资源奖励");
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(database.prepare("SELECT tier, tier_reason, apply_state FROM dream_items").get())
+      .toMatchObject({ tier: "inject", tier_reason: "user_requested", apply_state: "written" });
+    expect(database.prepare("SELECT authority, scope_kind FROM memory_catalog").all()).toEqual([{ authority: "agent_derived", scope_kind: "project" }]);
+    // No Luna operation is queued while dreaming is enabled.
+    expect(database.prepare("SELECT COUNT(*) AS n FROM luna_operations").get()).toMatchObject({ n: 0 });
+  } finally {
+    database.close();
+  }
+  // A file can be requested too, and a global request writes globally; the file body is material the extractor reads.
+  const global = await rememberExtract({ runtimeRoot, vaultRoot, path: clone, source: `file:${notes}`, scope: "global", startup: "auto",
+    preview: false, requestedAt: now }) as Record<string, unknown>;
+  expect(global).toMatchObject({ pipeline: "dreaming" });
+  await drain();
+  expect(chunks[1]).toContain("### T01 FILE");
+  expect(chunks[1]).toContain("奥德赛的归航奖励只在成功归航时发放。");
+  const after = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(after.prepare("SELECT scope_kind, COUNT(*) AS n FROM memory_catalog GROUP BY scope_kind ORDER BY scope_kind").all())
+      .toEqual([{ scope_kind: "global", n: 1 }, { scope_kind: "project", n: 1 }]);
+  } finally {
+    after.close();
+  }
 });
 
 test("dreaming is disabled by default and never schedules without configuration", async () => {

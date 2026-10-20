@@ -36,6 +36,7 @@ const reasonLabels: Record<string, string> = {
   episodic: "一次性信息",
   already_in_autoloaded_docs: "已写在自动加载的文档/skill 中",
   catch_all_project: "主目录兜底项目只保留全局知识",
+  user_requested: "按你的要求提炼并通过验证",
   user_task_instruction: "用户对当次任务的要求，只进可搜索池"
 };
 
@@ -178,7 +179,8 @@ export async function writeDreamReport(request: {
   readonly projectId: string;
   readonly timeZone: string;
 }): Promise<string> {
-  const run = request.database.prepare("SELECT scheduled_for, created_at, stats_json, mode FROM dream_runs WHERE run_id = ?").get(request.runId);
+  const run = request.database.prepare("SELECT scheduled_for, created_at, stats_json, mode, request_json FROM dream_runs WHERE run_id = ?").get(request.runId);
+  const requested = parse<{ selector?: string; scope?: string } | undefined>(run?.request_json, undefined);
   const stats = parse<Record<string, number>>(run?.stats_json, {});
   const project = projectDisplay(request.database, request.projectId);
   const date = runDate(run?.scheduled_for, run?.created_at, request.timeZone);
@@ -189,6 +191,7 @@ export async function writeDreamReport(request: {
     `# Dreams · ${date} · ${project.label}`,
     "",
     `- Project: ${project.label} (\`${request.projectId}\`)`,
+    ...(requested === undefined ? [] : [`- 来源：按你的要求提炼（\`memstore remember extract --from ${requested.selector ?? "?"}\`，范围 ${requested.scope ?? "project"}）；验证通过的知识直接进注入层`]),
     `- Run: \`${request.runId}\` · mode: ${String(run?.mode ?? "shadow")}（影子模式不写正式记忆、不改变注入）· 跨项目汇总见 [[${basename(overviewFileName, ".md")}]]`,
     `- Sessions: ${String(stats.sessions ?? 0)} · chunks: ${String(stats.chunks ?? 0)} · candidates: ${String(stats.candidates ?? 0)} · items: ${String(items.length)}` +
       ` (global: ${String(items.filter((item) => item.scope === "global").length)})`,

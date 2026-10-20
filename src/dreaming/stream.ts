@@ -101,16 +101,25 @@ function boundedResult(value: string): string {
 /**
  * Reads one segment of a Session: every event after `after` (exclusive) up to
  * `until` (inclusive), whichever Project each event resolved to. The bounds keep
- * chunking stable while the Session continues.
+ * chunking stable while the Session continues. With `eventIds`, reads exactly
+ * those events instead (a requested extraction).
  */
 export function readSessionStream(
   database: DatabaseSync,
-  request: { readonly sessionId: string; readonly after?: string | undefined; readonly until: string; readonly chunkCharacters: number }
+  request: {
+    readonly sessionId: string; readonly after?: string | undefined; readonly until: string; readonly chunkCharacters: number;
+    readonly eventIds?: readonly string[];
+  }
 ): SessionStream | undefined {
-  const events = database.prepare(
-    `SELECT event_id, event_kind, created_at FROM capture_events
-     WHERE session_id = ? AND (? IS NULL OR created_at > ?) AND created_at <= ? ORDER BY created_at, event_id`
-  ).all(request.sessionId, request.after ?? null, request.after ?? null, request.until);
+  const events = request.eventIds === undefined
+    ? database.prepare(
+      `SELECT event_id, event_kind, created_at FROM capture_events
+       WHERE session_id = ? AND (? IS NULL OR created_at > ?) AND created_at <= ? ORDER BY created_at, event_id`
+    ).all(request.sessionId, request.after ?? null, request.after ?? null, request.until)
+    : database.prepare(
+      `SELECT event_id, event_kind, created_at FROM capture_events
+       WHERE event_id IN (SELECT value FROM json_each(?)) ORDER BY created_at, event_id`
+    ).all(JSON.stringify(request.eventIds));
   if (events.length === 0) return undefined;
   const segments = database.prepare(
     "SELECT payload FROM capture_segments WHERE event_id = ? ORDER BY segment_index"
@@ -122,7 +131,11 @@ export function readSessionStream(
   const label = (): string => `T${String(turn).padStart(2, "0")}`;
   for (const event of events) {
     const payload = record(decodePayload(segments.all(String(event.event_id))));
-    if (event.event_kind === "UserPromptSubmit") {
+    if (event.event_kind === "UserPromptSubmit" && payload.explicitExtraction === true && typeof payload.body === "string") {
+      // A file the user asked to remember from (`remember extract --from file:`): material, not the user's words.
+      turn += 1;
+      lines.push(`\n### ${label()} FILE ${text(payload.path)}\n${payload.body}`);
+    } else if (event.event_kind === "UserPromptSubmit") {
       turn += 1;
       lines.push(`\n### ${label()} USER\n${userPromptText(text(payload.prompt))}`);
     } else if (event.event_kind === "Stop") {

@@ -40,6 +40,14 @@ test("a user-stated item is injected only when the user's own words support it",
   expect(tierOf({ ...base, explicitUser: true }).tier).toBe("inject");
 });
 
+test("material the user asked to remember is injected once it survives verification", () => {
+  expect(tierOf({ ...base, verdict: "not_repo_verifiable", userRequested: true })).toEqual({ tier: "inject", reason: "user_requested" });
+  expect(tierOf({ ...base, durability: "episodic", userRequested: true }).tier).toBe("drop");
+  expect(tierOf({ ...base, verdict: "contradicted", userRequested: true }).tier).toBe("review");
+  expect(tierOf({ ...base, verdict: "documented", userRequested: true }).tier).toBe("drop");
+  expect(tierOf({ ...base, verdict: "branch_scoped", branch: "feat/x", userRequested: true }).tier).toBe("branch");
+});
+
 test("a catch-all home-directory Project keeps global knowledge only", () => {
   expect(tierOf({ ...base, verdict: "confirmed", catchAllProject: true })).toEqual({ tier: "drop", reason: "catch_all_project" });
   expect(tierOf({ ...base, explicitUser: true, catchAllProject: true }).tier).toBe("drop");

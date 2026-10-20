@@ -37,6 +37,8 @@ export interface ApplyItem {
   readonly explicitUser: boolean;
   readonly sessionIds: readonly string[];
   readonly verdict: Partial<Verdict>;
+  /** Scope the user asked for with `remember extract --scope`, for requested runs. */
+  readonly requestedScope?: "project" | "global";
 }
 
 export interface ApplyOutcome {
@@ -97,13 +99,14 @@ export function categoryFor(claimType: string): MemoryCategory {
 }
 
 /**
- * Global Memory needs global intent (ADR-0006): only the user's own lasting rule
- * is written globally. Other global items stay with the Project they came from.
+ * Global Memory needs global intent (ADR-0006): the user's own lasting rule, or a
+ * `remember extract --scope global` request, is written globally. Other global
+ * items stay with the Project they came from.
  */
 export function memoryScopeFor(item: ApplyItem): CanonicalMemory["scope"] {
-  return item.scope === "global" && item.explicitUser && item.verdict.user_support === "user_stated_rule"
-    ? { kind: "global" }
-    : { kind: "project", projectId: item.projectId };
+  const intended = item.requestedScope === "global" ||
+    (item.scope === "global" && item.explicitUser && item.verdict.user_support === "user_stated_rule");
+  return intended ? { kind: "global" } : { kind: "project", projectId: item.projectId };
 }
 
 function representationsFor(text: string, revisionId: string): CanonicalMemory["representations"] {
@@ -395,7 +398,7 @@ function errorReason(error: unknown): string {
 export function loadApplyItems(database: DatabaseSync, where: string, ...parameters: (string | null)[]): ApplyItem[] {
   return database.prepare(
     `SELECT i.item_id, i.run_id, r.project_id, i.tier, COALESCE(i.refined_statement, i.statement) AS text, i.claim_type, i.scope,
-            i.explicit_user, i.session_ids_json, i.verdict_json, i.defense_json
+            i.explicit_user, i.session_ids_json, i.verdict_json, i.defense_json, r.request_json
      FROM dream_items i JOIN dream_runs r USING (run_id)
      WHERE ${where} ORDER BY r.created_at, i.item_id`
   ).all(...parameters).map((row) => {
@@ -403,10 +406,13 @@ export function loadApplyItems(database: DatabaseSync, where: string, ...paramet
     try { verdict = JSON.parse(String(row.verdict_json ?? "{}")) as Partial<Verdict>; } catch { /* keep empty */ }
     let sessions: string[] = [];
     try { sessions = JSON.parse(String(row.session_ids_json ?? "[]")) as string[]; } catch { /* keep empty */ }
+    let requestedScope: unknown;
+    try { requestedScope = (JSON.parse(String(row.request_json ?? "{}")) as { scope?: unknown }).scope; } catch { /* not requested */ }
     return {
       itemId: String(row.item_id), runId: String(row.run_id), projectId: String(row.project_id), tier: String(row.tier),
       text: String(row.text), claimType: String(row.claim_type), scope: row.scope === "global" ? "global" : "project",
-      explicitUser: row.explicit_user === 1, sessionIds: sessions, verdict
+      explicitUser: row.explicit_user === 1, sessionIds: sessions, verdict,
+      ...(requestedScope === "global" || requestedScope === "project" ? { requestedScope } : {})
     };
   });
 }

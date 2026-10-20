@@ -26,6 +26,8 @@ export interface TierInput {
   readonly userSupport?: string;
   /** Where guidance the agent already reads states the item, judged apart from its truth ("" or absent when nowhere). */
   readonly documentedAt?: string;
+  /** The user asked to remember this material (`remember extract`): what survives verification is kept. */
+  readonly userRequested?: boolean;
   /** The Project is a catch-all root (see `isCatchAllRoot`): it keeps global knowledge only. */
   readonly catchAllProject?: boolean;
 }
@@ -61,6 +63,7 @@ export function tierOf(input: TierInput): { readonly tier: DreamTier; readonly r
   if (input.verdict === "branch_scoped") return { tier: "branch", reason: input.branch || unmerged[0]?.branch || "unknown_branch" };
   if (unmerged.length > 0 && input.verdict !== "confirmed") return { tier: "branch", reason: unmerged[0]?.branch ?? "unknown_branch" };
   if (input.verdict === "confirmed") return { tier: "inject", reason: "confirmed" };
+  if (input.userRequested === true) return { tier: "inject", reason: "user_requested" };
   // Only the user's own lasting rule is admitted; an instruction for one task, a pasted task text or words the user never said are not.
   const userStated = input.explicitUser &&
     !["user_task_instruction", "pasted_task_instruction", "not_user_stated"].includes(input.userSupport ?? "");
