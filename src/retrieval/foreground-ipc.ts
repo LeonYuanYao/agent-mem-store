@@ -28,6 +28,7 @@ import {
 import { loadRetrievalSnapshot, type RetrievalSnapshot } from "./snapshot.js";
 import { validateRetrievalSnapshot } from "./snapshot.js";
 import { JevAutomaticRelevanceFilter, type AutomaticRelevanceFilter } from "./jev.js";
+import { JevConnectionWarmer } from "./jev-warm.js";
 import { ConversationCache, type ConversationView } from "./conversation-cache.js";
 
 const maximumRecentPromptSessions = 128;
@@ -152,6 +153,7 @@ function serveConnection(socket: Socket, options: {
     ForegroundWireResponse
   >>;
   readonly onPressure?: () => void;
+  readonly onActivity?: (options: { readonly warmNow: boolean }) => void;
 }): void {
   let source = Buffer.alloc(0);
   let handled = false;
@@ -187,6 +189,8 @@ function serveConnection(socket: Socket, options: {
     const update = foregroundContextUpdateSchema.safeParse(document);
     if (update.success) {
       const message = update.data;
+      // A cleared conversation marks a Session boundary; its first prompt usually follows.
+      options.onActivity?.({ warmNow: message.action === "clear" });
       let accepted = false;
       if (Date.parse(message.deadlineAt) > Date.now()) {
         if (message.action === "clear") {
@@ -210,6 +214,7 @@ function serveConnection(socket: Socket, options: {
       return;
     }
     options.onPressure?.();
+    options.onActivity?.({ warmNow: false });
     void options.lane.run(parsed.data, { signal: disconnect.signal }).then((response) => {
       if (response.state === "cancelled") return;
       if (response.state === "busy" || response.state === "deadline_exceeded") {
@@ -290,6 +295,7 @@ export async function startForegroundRetrievalServer(request: {
   const requestSnapshotIds = new Map<string, string>();
   const requestReceiptCommitMs = new Map<string, number>();
   const relevanceFilter = new JevAutomaticRelevanceFilter({ runtimeRoot: request.runtimeRoot });
+  const warmer = new JevConnectionWarmer({ warm: (options) => relevanceFilter.warm(options) });
   const conversations = new ConversationCache();
   const recentPromptsBySession = new Map<string, readonly string[]>();
   const lane = createForegroundRetrievalLane<ForegroundRequest, ForegroundWireResponse>({
@@ -375,6 +381,7 @@ export async function startForegroundRetrievalServer(request: {
     serveConnection(socket, {
       lane,
       conversations,
+      onActivity: (options) => { warmer.noteActivity(options); },
       ...(request.onPressure === undefined ? {} : { onPressure: request.onPressure })
     });
   });
@@ -396,6 +403,7 @@ export async function startForegroundRetrievalServer(request: {
     close: async () => {
       if (closed) return;
       closed = true;
+      warmer.close();
       await closeServer(server);
       await rm(socketPath, { force: true });
     }

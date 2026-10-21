@@ -13,8 +13,12 @@ import { connect as tlsConnect, type ConnectionOptions } from "node:tls";
  *
  * The TLS handshake through a proxy costs most of a request, so connections
  * are kept alive between requests and new ones resume the previous TLS session.
+ * An idle connection is closed after `idleSocketMilliseconds`, before the proxy
+ * path is known to drop it silently; the Jev client keeps it in use with
+ * `JevAutomaticRelevanceFilter.warm` (ADR-0151).
  */
 
+export const idleSocketMilliseconds = 240_000;
 const agents = new Map<string, Agent>();
 
 class TunnelAgent extends Agent {
@@ -22,7 +26,7 @@ class TunnelAgent extends Agent {
   readonly #sessions = new Map<string, Buffer>();
 
   public constructor(proxy: URL) {
-    super({ keepAlive: true, keepAliveMsecs: 30_000, maxSockets: 4, maxFreeSockets: 2, timeout: 60_000 });
+    super({ keepAlive: true, keepAliveMsecs: 30_000, maxSockets: 4, maxFreeSockets: 2, timeout: idleSocketMilliseconds });
     this.#proxy = proxy;
   }
 
@@ -54,7 +58,7 @@ class TunnelAgent extends Agent {
   }
 }
 
-export function proxiedFetch(proxyUrl: string): typeof fetch {
+function agentFor(proxyUrl: string): Agent {
   const proxy = new URL(proxyUrl);
   if (proxy.protocol !== "http:") throw new TypeError("Only http:// proxies are supported.");
   let agent = agents.get(proxy.href);
@@ -62,7 +66,30 @@ export function proxiedFetch(proxyUrl: string): typeof fetch {
     agent = new TunnelAgent(proxy);
     agents.set(proxy.href, agent);
   }
-  const tunnelAgent = agent;
+  return agent;
+}
+
+/**
+ * Closes the idle connections kept for a proxy, for example after a request on
+ * one of them failed: a connection the proxy dropped silently would otherwise
+ * make the next request wait for its full timeout. Requests in flight keep theirs.
+ */
+export function resetProxiedConnections(proxyUrl: string): void {
+  const agent = agents.get(new URL(proxyUrl).href);
+  if (agent === undefined) return;
+  for (const sockets of Object.values(agent.freeSockets)) {
+    for (const socket of sockets ?? []) socket.destroy();
+  }
+}
+
+/** Whether an open, idle connection through the proxy is ready for the next request. */
+export function hasIdleProxiedConnection(proxyUrl: string): boolean {
+  const agent = agents.get(new URL(proxyUrl).href);
+  return agent !== undefined && Object.values(agent.freeSockets).some(sockets => sockets?.some(socket => !socket.destroyed) === true);
+}
+
+export function proxiedFetch(proxyUrl: string): typeof fetch {
+  const tunnelAgent = agentFor(proxyUrl);
   return async (input, init) => {
     const target = new URL(input instanceof Request ? input.url : String(input));
     if (target.protocol !== "https:") throw new TypeError("proxiedFetch only fetches https:// URLs.");

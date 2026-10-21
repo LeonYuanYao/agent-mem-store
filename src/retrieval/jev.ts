@@ -4,10 +4,13 @@ import { contextTokenCount, selectConversationContext } from "./conversation-con
 
 import { maximumJevTimeoutMilliseconds, readJevApiKey, readJevConfiguration, type JevConfiguration } from "../configuration/jev.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
-import { proxiedFetch } from "./proxy-fetch.js";
+import { hasIdleProxiedConnection, proxiedFetch, resetProxiedConnections } from "./proxy-fetch.js";
 
 export const jevModel = "jev-1.13.0";
 const endpoint = "https://api.typesafe.ai/v1/systemone";
+// Free, unauthenticated and outside the model API: only keeps the proxied connection open.
+const warmEndpoint = "https://api.typesafe.ai/cdn-cgi/trace";
+const warmTimeoutMilliseconds = 5_000;
 const maximumResponseBytes = 32 * 1024;
 const maximumRequestBytes = 48 * 1024;
 const receiptReserveMilliseconds = 200;
@@ -67,6 +70,8 @@ export interface AutomaticRelevanceFilter {
   filter(request: AutomaticRelevanceRequest): Promise<AutomaticRelevanceResult>;
 }
 
+export type JevWarmOutcome = "disabled" | "direct" | "recent" | "busy" | "backoff" | "warmed" | "failed";
+
 const responseSchema = z.object({
   model: z.literal(jevModel),
   answers: z.record(z.string(), z.object({ type: z.literal("noul"), noul: z.number().min(0).max(1) })),
@@ -106,12 +111,17 @@ async function readBoundedResponse(response: Response, signal: AbortSignal): Pro
 
 export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
   #cooldownUntil = 0;
+  #lastSentAt = Number.NEGATIVE_INFINITY;
+  #lastWarmFailedAt = Number.NEGATIVE_INFINITY;
+  #inFlight = 0;
 
   constructor(private readonly options: {
     readonly runtimeRoot: string;
     readonly fetch?: typeof fetch;
     readonly readConfiguration?: () => Promise<JevConfiguration>;
     readonly readApiKey?: () => Promise<string | undefined>;
+    // Replaces the connection pool check together with `fetch` in tests.
+    readonly hasIdleConnection?: (proxy: string) => boolean;
   }) {}
 
   async filter(request: AutomaticRelevanceRequest): Promise<AutomaticRelevanceResult> {
@@ -126,6 +136,8 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
     let stage: NonNullable<JevTelemetry["stage"]> = "admission";
     let threshold = 0.5;
     let contextTelemetry: Partial<JevTelemetry> = {};
+    // Written inside `execute`; read after it settles.
+    const network: { proxy?: string; sending: boolean } = { sending: false };
     const result = (state: JevTelemetry["state"], reason?: JevTelemetry["reason"]): AutomaticRelevanceResult => ({
       telemetry: { state, model: jevModel, threshold, elapsedMs: Math.max(0, performance.now() - started),
         deadlineRemainingMs, budgetMs, budgetSource, httpStarted, stage, ...contextTelemetry,
@@ -213,6 +225,10 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
         stage = "response_headers";
         httpStarted = true;
         const send = this.options.fetch ?? (config.proxy === undefined ? fetch : proxiedFetch(config.proxy));
+        if (config.proxy !== undefined) network.proxy = config.proxy;
+        this.#lastSentAt = performance.now();
+        this.#inFlight += 1;
+        network.sending = true;
         response = await send(endpoint, {
           method: "POST", redirect: "error", signal: controller.signal,
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: payload
@@ -245,14 +261,58 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
     try { return await Promise.race([execute(), interrupted]); }
     catch (error) {
       const reason = error instanceof JevFailure ? error.reason : "configuration_unavailable";
+      // A pooled connection the proxy dropped silently must not stall the next request too.
+      if (network.proxy !== undefined && this.options.fetch === undefined && (reason === "timeout" || reason === "network_error")) {
+        resetProxiedConnections(network.proxy);
+      }
       if (reason !== "cancelled" && reason !== "configuration_unavailable") {
         this.#cooldownUntil = Date.now() + (reason === "unauthorized" ? 300_000 : reason === "rate_limited" ? 60_000 : 15_000);
       }
       return result("fallback", reason);
     } finally {
+      if (network.sending) this.#inFlight -= 1;
       clearTimeout(timer);
       if (abortListener !== undefined) controller.signal.removeEventListener("abort", abortListener);
       request.signal?.removeEventListener("abort", abortFromCaller);
+    }
+  }
+
+  /**
+   * Keeps the proxied connection to Jev open between prompts (ADR-0151): opening one
+   * through the proxy costs a TLS handshake of 0.5-1 s, often more than the
+   * foreground budget leaves. Sends no prompt, memory or credential. Without a
+   * proxy Node's own fetch keeps connections only a few seconds, so nothing is sent.
+   * An open connection is reused after `reuseAfterMs` idle; a closed one is
+   * reopened at once, but not sooner than `reuseAfterMs` after a failed attempt.
+   */
+  async warm(options: { readonly reuseAfterMs: number }): Promise<JevWarmOutcome> {
+    let config: JevConfiguration;
+    try {
+      config = await (this.options.readConfiguration?.() ?? readJevConfiguration(this.options.runtimeRoot));
+    } catch { return "disabled"; }
+    if (!config.enabled) return "disabled";
+    if (config.proxy === undefined) return "direct";
+    if (this.#inFlight > 0) return "busy";
+    const now = performance.now();
+    if ((this.options.hasIdleConnection ?? hasIdleProxiedConnection)(config.proxy)) {
+      if (now - this.#lastSentAt < options.reuseAfterMs) return "recent";
+    } else if (now - this.#lastWarmFailedAt < options.reuseAfterMs) {
+      return "backoff";
+    }
+    const send = this.options.fetch ?? proxiedFetch(config.proxy);
+    this.#lastSentAt = performance.now();
+    this.#inFlight += 1;
+    try {
+      const response = await send(warmEndpoint, { method: "GET", redirect: "error", signal: AbortSignal.timeout(warmTimeoutMilliseconds) });
+      // Any HTTP response proves the connection works; the body only has to be drained.
+      await response.arrayBuffer();
+      return "warmed";
+    } catch {
+      this.#lastWarmFailedAt = performance.now();
+      if (this.options.fetch === undefined) resetProxiedConnections(config.proxy);
+      return "failed";
+    } finally {
+      this.#inFlight -= 1;
     }
   }
 }

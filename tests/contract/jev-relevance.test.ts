@@ -331,3 +331,66 @@ test("a configured proxy carries Jev requests through a CONNECT tunnel, and a re
 function readJevConfigurationProxy(proxy: string): string | undefined {
   return jevConfigurationSchema.parse({ proxy }).proxy;
 }
+
+test("warming keeps the proxied connection open without sending prompts, memories or credentials", async () => {
+  const proxied = { ...configuration, proxy: "http://127.0.0.1:7897" };
+  const readApiKey = vi.fn(() => Promise.resolve("synthetic-test-key"));
+  const judge = (fetcher: typeof fetch, overrides: Partial<typeof proxied> & { proxy?: string } = {}) =>
+    new JevAutomaticRelevanceFilter({ runtimeRoot: "unused", fetch: fetcher, readApiKey, hasIdleConnection: () => true,
+      readConfiguration: () => Promise.resolve({ ...proxied, ...overrides }) });
+
+  const idle = vi.fn<typeof fetch>();
+  expect(await judge(idle, { enabled: false }).warm({ reuseAfterMs: 0 })).toBe("disabled");
+  expect(await new JevAutomaticRelevanceFilter({ runtimeRoot: "unused", fetch: idle, readApiKey,
+    readConfiguration: () => Promise.resolve(configuration) }).warm({ reuseAfterMs: 0 })).toBe("direct");
+  expect(idle).not.toHaveBeenCalled();
+
+  const fetcher = vi.fn<typeof fetch>((url) => Promise.resolve(url === "https://api.typesafe.ai/cdn-cgi/trace"
+    ? new Response("fl=1\n") : response()));
+  const subject = judge(fetcher);
+  expect(await subject.warm({ reuseAfterMs: 60_000 })).toBe("warmed");
+  const [url, init] = fetcher.mock.calls[0] ?? [];
+  expect(url).toBe("https://api.typesafe.ai/cdn-cgi/trace");
+  expect(init?.method).toBe("GET");
+  expect(init?.body).toBeUndefined();
+  expect(JSON.stringify(init?.headers ?? {})).not.toContain("synthetic-test-key");
+  expect(readApiKey).not.toHaveBeenCalled();
+  // A fresh connection, from a warm-up or a real request, needs no warm-up.
+  expect(await subject.warm({ reuseAfterMs: 60_000 })).toBe("recent");
+  expect((await subject.filter(input())).telemetry.state).toBe("filtered");
+  expect(await subject.warm({ reuseAfterMs: 60_000 })).toBe("recent");
+  expect(fetcher).toHaveBeenCalledTimes(2);
+
+  expect(await judge(vi.fn<typeof fetch>(() => Promise.reject(new TypeError("offline")))).warm({ reuseAfterMs: 0 })).toBe("failed");
+});
+
+test("a connection closed early is reopened at once, and a failed reopening backs off", async () => {
+  let open = true;
+  let online = true;
+  const fetcher = vi.fn<typeof fetch>(() => online ? Promise.resolve(new Response("fl=1\n")) : Promise.reject(new TypeError("offline")));
+  const subject = new JevAutomaticRelevanceFilter({ runtimeRoot: "unused", fetch: fetcher, hasIdleConnection: () => open,
+    readConfiguration: () => Promise.resolve({ ...configuration, proxy: "http://127.0.0.1:7897" }),
+    readApiKey: () => Promise.resolve("synthetic-test-key") });
+  expect(await subject.warm({ reuseAfterMs: 60_000 })).toBe("warmed");
+  expect(await subject.warm({ reuseAfterMs: 60_000 })).toBe("recent");
+  open = false;
+  expect(await subject.warm({ reuseAfterMs: 60_000 })).toBe("warmed");
+  online = false;
+  expect(await subject.warm({ reuseAfterMs: 60_000 })).toBe("failed");
+  expect(await subject.warm({ reuseAfterMs: 60_000 })).toBe("backoff");
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+test("warming waits while a Jev request is in flight", async () => {
+  let answer: ((value: Response) => void) | undefined;
+  const fetcher = vi.fn<typeof fetch>(() => new Promise<Response>((resolveFetch) => { answer = resolveFetch; }));
+  const subject = new JevAutomaticRelevanceFilter({ runtimeRoot: "unused", fetch: fetcher,
+    readConfiguration: () => Promise.resolve({ ...configuration, proxy: "http://127.0.0.1:7897" }),
+    readApiKey: () => Promise.resolve("synthetic-test-key") });
+  const pending = subject.filter(input());
+  await vi.waitFor(() => { expect(fetcher).toHaveBeenCalledTimes(1); });
+  expect(await subject.warm({ reuseAfterMs: 0 })).toBe("busy");
+  answer?.(response());
+  expect((await pending).telemetry.state).toBe("filtered");
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
