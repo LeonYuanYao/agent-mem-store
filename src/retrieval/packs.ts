@@ -8,7 +8,6 @@ import { openRuntimeDatabase } from "../runtime/database.js";
 import { readInjectionAuthorityGate, readSessionStartInjection, type InjectionAuthorityGate } from "../configuration/hook-display.js";
 import { dreamingPolicyVersion } from "../memories/origins.js";
 import type { EmbeddingAdapter } from "./index.js";
-import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
 import { jevTelemetrySchema, type JevTelemetry, type AutomaticRelevanceFilter } from "./jev.js";
 import {
   ForegroundExecutionAborted,
@@ -54,6 +53,21 @@ const AUTOMATIC_GENERIC_SINGLETON_TERMS = new Set(`
   state status local default config configuration setup setting set change update
   modify create check test result example first last only start end use run output input
 `.trim().split(/\s+/u));
+// Prompt semantic evidence is measured against the prompt's own median similarity
+// to the Memories in scope: multilingual-e5 places almost every pair between 0.80
+// and 0.87, so absolute similarity says little. Calibrated on 1,537 labeled pairs
+// from real prompts (ADR-0152).
+const PROMPT_SEMANTIC_STRONG_LIFT = 0.02;
+const PROMPT_SEMANTIC_WEAK_LIFT = 0.01;
+const PROMPT_SEMANTIC_STANDALONE_LIFT = 0.03;
+// Without Jev's judgment only near-certain items are injected.
+const PROMPT_UNFILTERED_MINIMUM_LIFT = 0.05;
+// A median of a handful of Memories says nothing about the prompt; such scopes are
+// measured against the typical prompt median of real prompts instead.
+const PROMPT_SEMANTIC_MEDIAN_MINIMUM_SCOPE = 8;
+const PROMPT_SEMANTIC_TYPICAL_MEDIAN = 0.83;
+const LEXICAL_CORROBORATION_COVERAGE = 0.3;
+const LEXICAL_CORROBORATION_MINIMUM_TERMS = 2;
 const AUTOMATIC_STRONG_EXACT_COVERAGE = 0.5;
 const AUTOMATIC_STRONG_APPLICABILITY_COVERAGE = 0.25;
 const AUTOMATIC_RARE_APPLICABILITY_COVERAGE = 0.15;
@@ -80,6 +94,24 @@ interface ScoredMemory {
   readonly reasons: readonly string[];
   readonly similarity: number;
   readonly rankingSimilarity: number;
+  readonly features: PromptMemoryFeatures;
+}
+
+/** Raw local evidence behind a prompt score, kept for receipts-free calibration. */
+export interface PromptMemoryFeatures {
+  readonly similarity: number;
+  // Similarity minus the prompt's median similarity to the Memories in scope.
+  readonly semanticLift: number;
+  readonly semanticRank: number | undefined;
+  readonly lexicalRank: number | undefined;
+  readonly lexicalCoverage: number;
+  readonly lexicalMatchedCount: number;
+  readonly exact: boolean;
+  readonly applicability: boolean;
+  readonly signalMatch: boolean;
+  readonly directIdentity: boolean;
+  readonly standaloneSemantic: boolean;
+  readonly contextualSemanticCorroboration: boolean;
 }
 
 interface TermEvidence {
@@ -1439,72 +1471,24 @@ export interface UserPromptShadowPackRequest {
   };
 }
 
-async function prepareUserPromptShadowPackCore(
-  request: UserPromptShadowPackRequest
-): Promise<ShadowPack> {
-  const started = performance.now();
-  const requestedAt = z.iso.datetime().parse(request.requestedAt);
-  const normalizedPrompt = request.prompt.trim().replace(/\s+/gu, " ");
-  const epochLoadStarted = performance.now();
-  const epoch = await loadEpoch(request.runtimeRoot, request.sessionId, request.projectId, requestedAt);
-  const includeMemoryLegend = epoch.memoryLegendVersion < MEMORY_LEGEND_VERSION;
-  await request.foregroundControl?.checkpoint("prompt_epoch_loaded");
-  const epochLoadMs = Math.max(0, performance.now() - epochLoadStarted);
-  let loaded: Awaited<ReturnType<typeof loadActiveScope>>;
-  const scopeLoadStarted = performance.now();
-  try {
-    loaded = await loadActiveScope({ ...request, requestedAt });
-  } catch {
-    const scopeLoadMs = Math.max(0, performance.now() - scopeLoadStarted);
-    const receipt = await recordAutomaticReceipt({
-      runtimeRoot: request.runtimeRoot,
-      callerKind: "user_prompt",
-      callerIdentity: `session:${request.sessionId}`,
-      normalizedQuery: normalizedPrompt,
-      projectId: request.projectId,
-      epochId: epoch.epochId,
-      items: [],
-      renderedTokenCount: 0,
-      budgetTier: "normal",
-      semanticStage: "not_applicable",
-      emptyReason: "index_unavailable",
-      latencyMs: Math.max(0, performance.now() - started),
-      timingStartedAt: started,
-      preReceiptTimings: {
-        epochLoadMs,
-        scopeLoadMs,
-        embeddingMs: 0,
-        vectorScanMs: 0,
-        rankingAndRelationshipMs: 0
-      },
-      requestedAt,
-      ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
-      ...(request.foregroundControl === undefined
-        ? {}
-        : { foregroundControl: request.foregroundControl })
-    });
-    return {
-      mode: "shadow",
-      injected: false,
-      kind: "user_prompt",
-      text: "",
-      items: [],
-      renderedTokenCount: 0,
-      receiptId: receipt.receiptId,
-      receiptCommitMs: receipt.receiptCommitMs,
-      epochId: epoch.epochId,
-      emptyReason: "index_unavailable",
-      semanticStage: "not_applicable"
-    };
-  }
-  const scopeLoadMs = Math.max(0, performance.now() - scopeLoadStarted);
-  const { active, memories } = loaded;
-  await request.foregroundControl?.checkpoint("prompt_scope_loaded");
-  const softTarget = z.number().int().positive().parse(request.policy?.epochSoftTarget ?? 8192);
-  const hardLimit = z.number().int().positive().parse(request.policy?.epochHardLimit ?? 12288);
-  const postSoft = epoch.tokenTotal >= softTarget;
-  const query = [normalizedPrompt, ...request.signals.files, ...request.signals.symbols,
-    ...request.signals.errors, ...request.signals.commands].join("\n");
+/**
+ * Scores every recalled Memory for a prompt from local evidence: semantic
+ * similarity, lexical coverage, exact metadata and applicability terms. Shared by
+ * injection and by threshold calibration (`inspectUserPromptScoring`).
+ */
+async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest,
+  "recentPrompts" | "signals" | "adapter" | "snapshot" | "foregroundControl">, scope: {
+  readonly active: Awaited<ReturnType<typeof loadActiveScope>>["active"];
+  readonly memories: Awaited<ReturnType<typeof loadActiveScope>>["memories"];
+  readonly normalizedPrompt: string;
+  readonly started: number;
+}): Promise<{
+  readonly semantic: Awaited<ReturnType<typeof semanticScores>>;
+  readonly recentPromptContext: readonly string[];
+  readonly rankingAndRelationshipStarted: number;
+  readonly baseScored: ScoredMemory[];
+}> {
+  const { active, memories, normalizedPrompt, started } = scope;
   const recentPromptContext = boundedRecentPrompts(request.recentPrompts ?? []);
   const contextualHistoryAvailable = recentPromptContext.length > 0 &&
     isContextDependentPrompt(normalizedPrompt);
@@ -1578,7 +1562,10 @@ async function prepareUserPromptShadowPackCore(
   const semanticRanking = [...semantic.scores.entries()]
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
   const semanticRank = new Map(semanticRanking.map(([memoryId], index) => [memoryId, index + 1]));
-  const secondSemanticScore = semanticRanking[1]?.[1] ?? 0;
+  // Upper median: `semanticRanking` is sorted from most to least similar.
+  const medianSimilarity = semanticRanking.length < PROMPT_SEMANTIC_MEDIAN_MINIMUM_SCOPE
+    ? PROMPT_SEMANTIC_TYPICAL_MEDIAN
+    : semanticRanking[semanticRanking.length - 1 - Math.floor(semanticRanking.length / 2)]?.[1] ?? PROMPT_SEMANTIC_TYPICAL_MEDIAN;
   const normalizedSignalValues = signalValues.map((signal) =>
     signal.normalize("NFKC").toLocaleLowerCase("en-US")
   );
@@ -1624,34 +1611,39 @@ async function prepareUserPromptShadowPackCore(
     const rank = lexicalRank.get(memory.memoryId);
     const lexicalEvidence = lexicalEvidenceByMemoryId.get(memory.memoryId) ?? EMPTY_TERM_EVIDENCE;
     const coverage = lexicalEvidence.weightedCoverage;
+    // One shared word covers much of a short prompt; corroboration needs two.
+    const lexicalSupport = rank !== undefined && lexicalEvidence.matchedCount >= LEXICAL_CORROBORATION_MINIMUM_TERMS;
+    const lexicalCorroboration = lexicalSupport && coverage >= LEXICAL_CORROBORATION_COVERAGE;
+    const semanticLift = semantic.scores.has(memory.memoryId)
+      ? similarity - medianSimilarity
+      : Number.NEGATIVE_INFINITY;
+    const strongSemantic = semanticLift >= PROMPT_SEMANTIC_STRONG_LIFT;
     const contextualSemanticCorroboration = contextualHistoryAvailable &&
-      lexicalEvidence.matchedCount >= 2 && similarity >= 0.82;
-    const corroborated = exact || applicability || coverage >= 0.3 ||
+      lexicalEvidence.matchedCount >= 2 && strongSemantic;
+    const corroborated = exact || applicability || lexicalCorroboration ||
       contextualSemanticCorroboration;
     const standaloneSemantic = semanticRank.get(memory.memoryId) === 1 &&
-      similarity >= approvedShadowEmbeddingProfile.semanticOnlyMinimumScore &&
-      similarity - secondSemanticScore >=
-        approvedShadowEmbeddingProfile.semanticOnlyMinimumTop1Margin;
+      semanticLift >= PROMPT_SEMANTIC_STANDALONE_LIFT;
     let score = directIdentity ? 5 : 0;
     if (exact) score += 4;
     if (standaloneSemantic) score += 4;
-    else if (similarity >= 0.82 && corroborated) score += 2;
-    else if (similarity >= 0.58 && corroborated) score += 1;
-    if (rank !== undefined && rank <= 3 && coverage >= 0.6) score += 2;
-    else if (rank !== undefined && rank <= 10 && coverage >= 0.3) score += 1;
+    else if (strongSemantic && corroborated) score += 2;
+    else if (semanticLift >= PROMPT_SEMANTIC_WEAK_LIFT && corroborated) score += 1;
+    if (lexicalSupport && rank <= 3 && coverage >= 0.6) score += 2;
+    else if (lexicalSupport && rank <= 10 && coverage >= LEXICAL_CORROBORATION_COVERAGE) score += 1;
     if (signalMatch) score += 1;
     if (applicability) score += 1;
     const band: RelevanceBand = score >= 4 ? "high" : score >= 2 ? "probable" : "weak";
     const primaryAnchor = directIdentity || exact || standaloneSemantic ||
-      (similarity >= 0.82 && (applicability || coverage >= 0.3));
+      (strongSemantic && (applicability || lexicalCorroboration));
     const reasons = [
       ...(directIdentity ? ["memory_identity"] : []),
       ...(exact ? ["exact_metadata"] : []),
-      ...(standaloneSemantic ? ["semantic_top1_margin"]
-        : similarity >= 0.82 && corroborated ? ["semantic_very_strong_corroborated"]
-          : similarity >= 0.58 && corroborated ? ["semantic_corroborated"] : []),
+      ...(standaloneSemantic ? ["semantic_top1_lift"]
+        : strongSemantic && corroborated ? ["semantic_strong_lift_corroborated"]
+          : semanticLift >= PROMPT_SEMANTIC_WEAK_LIFT && corroborated ? ["semantic_lift_corroborated"] : []),
       ...(contextualSemanticCorroboration ? ["recent_prompt_context"] : []),
-      ...(rank === undefined || coverage < 0.3
+      ...(!lexicalCorroboration
         ? []
         : [coverage >= 0.6 ? "lexical_strong" : "lexical_moderate"]),
       ...(signalMatch ? ["session_signal"] : []),
@@ -1666,9 +1658,94 @@ async function prepareUserPromptShadowPackCore(
       directIdentity,
       reasons,
       similarity,
-      rankingSimilarity
+      rankingSimilarity,
+      features: {
+        similarity,
+        semanticLift,
+        semanticRank: semanticRank.get(memory.memoryId),
+        lexicalRank: rank,
+        lexicalCoverage: coverage,
+        lexicalMatchedCount: lexicalEvidence.matchedCount,
+        exact,
+        applicability,
+        signalMatch,
+        directIdentity,
+        standaloneSemantic,
+        contextualSemanticCorroboration
+      }
     });
   }
+  return { semantic, recentPromptContext, rankingAndRelationshipStarted, baseScored };
+}
+
+async function prepareUserPromptShadowPackCore(
+  request: UserPromptShadowPackRequest
+): Promise<ShadowPack> {
+  const started = performance.now();
+  const requestedAt = z.iso.datetime().parse(request.requestedAt);
+  const normalizedPrompt = request.prompt.trim().replace(/\s+/gu, " ");
+  const epochLoadStarted = performance.now();
+  const epoch = await loadEpoch(request.runtimeRoot, request.sessionId, request.projectId, requestedAt);
+  const includeMemoryLegend = epoch.memoryLegendVersion < MEMORY_LEGEND_VERSION;
+  await request.foregroundControl?.checkpoint("prompt_epoch_loaded");
+  const epochLoadMs = Math.max(0, performance.now() - epochLoadStarted);
+  let loaded: Awaited<ReturnType<typeof loadActiveScope>>;
+  const scopeLoadStarted = performance.now();
+  try {
+    loaded = await loadActiveScope({ ...request, requestedAt });
+  } catch {
+    const scopeLoadMs = Math.max(0, performance.now() - scopeLoadStarted);
+    const receipt = await recordAutomaticReceipt({
+      runtimeRoot: request.runtimeRoot,
+      callerKind: "user_prompt",
+      callerIdentity: `session:${request.sessionId}`,
+      normalizedQuery: normalizedPrompt,
+      projectId: request.projectId,
+      epochId: epoch.epochId,
+      items: [],
+      renderedTokenCount: 0,
+      budgetTier: "normal",
+      semanticStage: "not_applicable",
+      emptyReason: "index_unavailable",
+      latencyMs: Math.max(0, performance.now() - started),
+      timingStartedAt: started,
+      preReceiptTimings: {
+        epochLoadMs,
+        scopeLoadMs,
+        embeddingMs: 0,
+        vectorScanMs: 0,
+        rankingAndRelationshipMs: 0
+      },
+      requestedAt,
+      ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
+      ...(request.foregroundControl === undefined
+        ? {}
+        : { foregroundControl: request.foregroundControl })
+    });
+    return {
+      mode: "shadow",
+      injected: false,
+      kind: "user_prompt",
+      text: "",
+      items: [],
+      renderedTokenCount: 0,
+      receiptId: receipt.receiptId,
+      receiptCommitMs: receipt.receiptCommitMs,
+      epochId: epoch.epochId,
+      emptyReason: "index_unavailable",
+      semanticStage: "not_applicable"
+    };
+  }
+  const scopeLoadMs = Math.max(0, performance.now() - scopeLoadStarted);
+  const { active, memories } = loaded;
+  await request.foregroundControl?.checkpoint("prompt_scope_loaded");
+  const softTarget = z.number().int().positive().parse(request.policy?.epochSoftTarget ?? 8192);
+  const hardLimit = z.number().int().positive().parse(request.policy?.epochHardLimit ?? 12288);
+  const postSoft = epoch.tokenTotal >= softTarget;
+  const query = [normalizedPrompt, ...request.signals.files, ...request.signals.symbols,
+    ...request.signals.errors, ...request.signals.commands].join("\n");
+  const { semantic, recentPromptContext, rankingAndRelationshipStarted, baseScored } =
+    await scoreUserPromptMemories(request, { active, memories, normalizedPrompt, started });
   const boostedMemoryIds = await relationshipBoosts(
     request.runtimeRoot,
     baseScored.filter((item) => item.score >= 4).map((item) => item.memory.memoryId),
@@ -1799,6 +1876,23 @@ async function prepareUserPromptShadowPackCore(
       selected.splice(0, selected.length, ...retained);
     }
   }
+  // Local evidence alone admits mostly noise. When Jev is enabled but gave no
+  // judgment (timeout, network, cooldown, sensitive input), only near-certain
+  // items are injected (ADR-0152). With Jev disabled or unconfigured the local
+  // selection stands.
+  let unfilteredWithheld = false;
+  if (jev?.state === "fallback" && jev.reason !== "configuration_unavailable" && selected.length > 0) {
+    const scoredById = new Map(scored.map((item) => [item.memory.memoryId, item]));
+    const confident = selected.filter((item) => {
+      const scoredItem = scoredById.get(item.memoryId);
+      const keep = scoredItem !== undefined && (scoredItem.directIdentity || (scoredItem.band === "high" &&
+        (scoredItem.features.semanticLift >= PROMPT_UNFILTERED_MINIMUM_LIFT || scoredItem.features.applicability)));
+      if (!keep) promptOmissionReasons.set(item.memoryId, "unfiltered_low_confidence");
+      return keep;
+    });
+    unfilteredWithheld = confident.length === 0;
+    selected.splice(0, selected.length, ...confident);
+  }
   const rendered = renderPack(
     selected,
     selected.length > 0 && selected.every((item) => item.relevanceBand === "probable")
@@ -1827,6 +1921,7 @@ async function prepareUserPromptShadowPackCore(
   const emptyReason = selected.length > 0
     ? undefined
     : jev?.state === "filtered" ? "jev_no_relevant_memory"
+    : unfilteredWithheld ? "unfiltered_low_confidence"
     : isContinuationOnly(normalizedPrompt)
       ? "continuation_only"
       : epoch.tokenTotal >= hardLimit
@@ -1926,6 +2021,54 @@ export async function prepareUserPromptShadowPack(
     if (error instanceof ForegroundExecutionAborted) throw error;
     return failOpenPack("user_prompt", "runtime_unavailable");
   }
+}
+
+/**
+ * Local scores and raw features for every Memory recalled for a prompt, exactly
+ * as injection computes them, without a receipt, Session state or Jev. For
+ * offline threshold calibration (ADR-0152).
+ */
+export async function inspectUserPromptScoring(request: {
+  readonly runtimeRoot: string;
+  readonly projectId: string;
+  readonly prompt: string;
+  readonly recentPrompts?: readonly string[];
+  readonly adapter: EmbeddingAdapter;
+  readonly requestedAt: string;
+  readonly snapshot?: RetrievalSnapshot;
+}): Promise<{
+  readonly semanticStage: "complete" | "lexical_only";
+  readonly similarities: readonly number[];
+  readonly items: readonly {
+    readonly memoryId: string;
+    readonly memoryRef: number | undefined;
+    readonly authority: string;
+    readonly score: number;
+    readonly band: RelevanceBand;
+    readonly reasons: readonly string[];
+    readonly features: PromptMemoryFeatures;
+  }[];
+}> {
+  const normalizedPrompt = request.prompt.trim().replace(/\s+/gu, " ");
+  const requestedAt = z.iso.datetime().parse(request.requestedAt);
+  const { active, memories } = await loadActiveScope({ ...request, requestedAt });
+  const { semantic, baseScored } = await scoreUserPromptMemories({
+    ...request,
+    signals: { files: [], symbols: [], errors: [], commands: [] }
+  }, { active, memories, normalizedPrompt, started: performance.now() });
+  return {
+    semanticStage: semantic.stage,
+    similarities: [...semantic.scores.values()],
+    items: baseScored.map((item) => ({
+      memoryId: item.memory.memoryId,
+      memoryRef: item.memory.memoryRef,
+      authority: item.memory.authority,
+      score: item.score,
+      band: item.band,
+      reasons: item.reasons,
+      features: item.features
+    }))
+  };
 }
 
 export async function inspectRetrievalReceipt(

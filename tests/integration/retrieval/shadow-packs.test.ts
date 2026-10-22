@@ -1005,8 +1005,9 @@ test("probable-only automatic recall remains compact and admits at most two item
     memoryId: `msmem_123e4567-e89b-42d3-a456-42661417444${String(ordinal)}`,
     revisionId: `msrev_123e4567-e89b-42d3-a456-42661417445${String(ordinal)}`,
     scope: { kind: "project", projectId },
-    body: `设计 probable note ${String(ordinal)}.`,
-    compact: `设计 probable note ${String(ordinal)}.`,
+    // Probable needs two shared terms; one shared word is not corroboration.
+    body: `设计 讨论 probable note ${String(ordinal)}.`,
+    compact: `设计 讨论 probable note ${String(ordinal)}.`,
     standard: `Probable design note ${String(ordinal)} with more details.`,
     startup: "never"
   }));
@@ -1117,8 +1118,8 @@ test("one-hop expansion still requires the adjacent Memory to reach a relevance 
     memoryId: relatedId,
     revisionId: "msrev_123e4567-e89b-42d3-a456-426614174492",
     scope: { kind: "project", projectId },
-    body: "恢复 Related recovery procedure.",
-    compact: "恢复 Related recovery procedure.",
+    body: "恢复 流程 Related recovery procedure.",
+    compact: "恢复 流程 Related recovery procedure.",
     startup: "never"
   });
   await writeAll(roots, [seed, adjacent]);
@@ -1133,7 +1134,8 @@ test("one-hop expansion still requires the adjacent Memory to reach a relevance 
     ...roots,
     projectId,
     sessionId: "relationship-pack",
-    prompt: `${seed.memoryId} 恢复`,
+    // The adjacent Memory shares two terms with the prompt, enough for probable on its own.
+    prompt: `${seed.memoryId} 恢复 流程`,
     signals: { files: [], symbols: [], errors: [], commands: [] },
     adapter,
     requestedAt: "2026-08-07T12:05:01.000Z"

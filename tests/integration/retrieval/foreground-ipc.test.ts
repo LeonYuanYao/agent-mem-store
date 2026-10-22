@@ -337,10 +337,13 @@ async function corroboratedHistoryFixture() {
     embedDocuments: (texts) => Promise.resolve(texts.map((text) =>
       /top-n/iu.test(text) ? [1, 0] : [0.999, 0.045]
     )),
+    // Only the history makes the follow-up strongly similar; alone it is no closer
+    // to either Memory than an ordinary prompt (ADR-0152 measures similarity
+    // against a typical prompt median).
     embedQuery: (texts) => Promise.resolve(texts.map((text) =>
       /history-topic/iu.test(text) && /门禁/u.test(text)
         ? [0.999, 0.045]
-        : /门禁/u.test(text) ? [1, 0] : [0, 1]
+        : /门禁/u.test(text) ? [0.8, 0.6] : [0, 1]
     ))
   };
   await buildRetrievalIndex({
@@ -495,8 +498,10 @@ test("context-dependent prompts admit strong history semantics only with current
     const contextualText = contextual.state === "completed" ? contextual.text : "";
     expect(contextualText).toContain("检索系统的 Top-N");
     expect(contextualText).toContain("健康诊断中的相关记忆统计");
-    expect(contextualText.indexOf("检索系统的 Top-N")).toBeLessThan(
-      contextualText.indexOf("健康诊断中的相关记忆统计")
+    // The semantic top-1 stands out on its own without a margin over rank 2
+    // (ADR-0152), so the history-led top-1 comes first; Top-N follows as probable.
+    expect(contextualText.indexOf("健康诊断中的相关记忆统计")).toBeLessThan(
+      contextualText.indexOf("检索系统的 Top-N")
     );
 
     await requestForegroundRetrieval({
