@@ -429,7 +429,7 @@ test("remember extract hands its selection to dreaming, which verifies and write
       branch: "", evidence: [], reason: "external game rule", refined_statement: "", documented_at: "", user_support: "not_applicable" })) }),
     defend: () => Promise.reject(new Error("unexpected defend")),
     reconcile: (request) => Promise.resolve({ usage: { tokens: 1, seconds: 1 },
-      results: request.items.map((item) => ({ id: item.id, decision: "new" as const, target: "", reason: "different fact" })) })
+      results: request.items.map((item) => ({ id: item.id, decision: "new" as const, target: "", merged_statement: "", reason: "different fact" })) })
   };
   const configuration = dreamingConfigurationSchema.parse({ enabled: true, mode: "apply" });
   const drain = async () => {

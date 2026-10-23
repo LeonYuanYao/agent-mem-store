@@ -60,6 +60,8 @@ export const reconciliationSchema = z.object({
   id: z.string(),
   decision: z.enum(["new", "duplicate", "refines", "conflicts"]),
   target: z.string(),
+  // For refines: the target and the new knowledge as one statement; otherwise empty.
+  merged_statement: z.string(),
   reason: z.string()
 });
 export type Reconciliation = z.infer<typeof reconciliationSchema>;
@@ -233,7 +235,9 @@ const reconcilePrompt = `下面是准备写入记忆库的新知识（N 开头�
 - duplicate：与某一条（target）表达同一事实，没有新的信息；
 - refines：与某一条（target）是同一事实，但新知识更准确、更完整，或纠正了它的细节；
 - conflicts：与某一条（target）直接矛盾。
-只比较事实本身：措辞、语言、详略不同不算不同事实；同一主题下的不同事实是 new。target 填对应编号，new 时填空字符串；reason 一句话。
+只比较事实本身：措辞、语言、详略不同不算不同事实。同一主题下的不同事实是 new，例如一条讲 A 模式、一条讲 B 模式，一条讲排查步骤、一条讲原因，一条讲规则、一条讲规则的另一个条件：这些都要判 new，不能判 refines。
+refines 时 merged_statement 写合并后的完整陈述：target 里仍然正确的事实、条件、数值和例外全部保留，再加入新知识补充或纠正的部分；用 target 的语言；不加入两者之外的信息。其他 decision 的 merged_statement 填空字符串。
+target 填对应编号，new 时填空字符串；reason 一句话。
 新知识（JSON）：
 `;
 

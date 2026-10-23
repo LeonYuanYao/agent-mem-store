@@ -289,9 +289,24 @@ export async function applyBatch(request: {
     decisions = new Map(reconciled.results.map((result) => [result.id, result]));
   }
 
+  const writeNew = async (item: ApplyItem, outcome: ApplyOutcome): Promise<ApplyOutcome> => {
+    const memory = newMemory(item, request.now);
+    try {
+      await writeCanonicalMemory({ vaultRoot: request.vaultRoot, runtimeRoot: request.runtimeRoot, actor: "agent", memory });
+      recordDreamMemory(database, item, memory.memoryId, request.now, true);
+      return { ...outcome, memoryId: memory.memoryId };
+    } catch (error) {
+      // Sensitivity checks reject secrets and uncertain sensitive content; such an item is never written.
+      const sensitive = error instanceof SecretContentError || /sensitive content/iu.test(String(error));
+      return { itemId: item.itemId, state: sensitive ? "skipped" : "failed", reason: sensitive ? "sensitive_content" : errorReason(error) };
+    }
+  };
   const written = new Map<string, string>();
+  // A refinement replaces its target with the model's merged statement, never with
+  // the new item alone, which would drop what only the target said (ADR-0153).
+  const mergedStatements = new Map<string, string>();
   for (const [alias, item] of itemAliases) {
-    const decision = decisions.get(alias) ?? { id: alias, decision: "new" as const, target: "", reason: "no_close_memory" };
+    const decision = decisions.get(alias) ?? { id: alias, decision: "new" as const, target: "", merged_statement: "", reason: "no_close_memory" };
     const targetMemory = aliases.get(decision.target);
     const targetItemMemory = written.get(decision.target);
     const targetId = targetMemory === undefined ? targetItemMemory : targetMemory.memoryId;
@@ -312,35 +327,38 @@ export async function applyBatch(request: {
         : { itemId: item.itemId, state: "duplicate_human", memoryId: targetId, reason: decision.reason };
     } else if (decision.decision === "duplicate") {
       outcome = { itemId: item.itemId, state: "observed", memoryId: targetId, reason: decision.reason };
+    } else if (decision.decision === "refines" && decision.merged_statement.trim() === "") {
+      // Without a merged statement a replacement could lose the target's facts; keep both.
+      outcome = { itemId: item.itemId, state: "written", reason: `${decision.reason}（未给出合并陈述，单独保存）` };
     } else {
+      // A conflict replaces the target with the verified new statement.
+      if (decision.decision === "refines") mergedStatements.set(item.itemId, decision.merged_statement.trim());
       outcome = { itemId: item.itemId, state: "revised", memoryId: targetId, reason: decision.reason };
     }
-    if (!request.preview && outcome.state === "written") {
-      const memory = newMemory(item, request.now);
-      try {
-        await writeCanonicalMemory({ vaultRoot: request.vaultRoot, runtimeRoot: request.runtimeRoot, actor: "agent", memory });
-        recordDreamMemory(database, item, memory.memoryId, request.now, true);
-        outcome = { ...outcome, memoryId: memory.memoryId };
-      } catch (error) {
-        // Sensitivity checks reject secrets and uncertain sensitive content; such an item is never written.
-        const sensitive = error instanceof SecretContentError || /sensitive content/iu.test(String(error));
-        outcome = { itemId: item.itemId, state: sensitive ? "skipped" : "failed", reason: sensitive ? "sensitive_content" : errorReason(error) };
-      }
-    }
+    if (!request.preview && outcome.state === "written") outcome = await writeNew(item, outcome);
     if (outcome.memoryId !== undefined) written.set(alias, outcome.memoryId);
     outcomes.set(item.itemId, outcome);
   }
 
   if (!request.preview) {
+    const revisedInBatch = new Set<string>();
     for (const item of request.items) {
       let outcome = outcomes.get(item.itemId);
       if (outcome === undefined || outcome.memoryId === undefined) continue;
       const memoryId = outcome.memoryId;
       try {
-        if (outcome.state === "revised") {
-          await revise({ ...request, memoryId, change: (memory, revisionId) => withStatement(memory, item, revisionId) });
+        if (outcome.state === "revised" && revisedInBatch.has(memoryId)) {
+          // Each merge was made against the target before this batch; a second one
+          // would overwrite the first, so this item is kept as its own Memory.
+          outcome = await writeNew(item, { itemId: item.itemId, state: "written",
+            reason: `${outcome.reason}（同批已修订该记忆，单独保存）` });
+          outcomes.set(item.itemId, outcome);
+        } else if (outcome.state === "revised") {
+          const text = mergedStatements.get(item.itemId) ?? item.text;
+          await revise({ ...request, memoryId, change: (memory, revisionId) => withStatement(memory, { ...item, text }, revisionId) });
+          revisedInBatch.add(memoryId);
           recordDreamMemory(database, item, memoryId, request.now, false);
-          database.prepare("UPDATE dream_memories SET statement_key = ? WHERE memory_id = ?").run(statementKey(item.text), memoryId);
+          database.prepare("UPDATE dream_memories SET statement_key = ? WHERE memory_id = ?").run(statementKey(text), memoryId);
         } else if (outcome.state === "observed") {
           recordDreamMemory(database, item, memoryId, request.now, false);
         } else if (outcome.state === "review_due") {

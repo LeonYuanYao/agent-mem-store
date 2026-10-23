@@ -33,14 +33,16 @@ function fakeModel(calls: ReconcileItem[][]): DreamModel {
       calls.push([...request.items]);
       return Promise.resolve({ usage: { tokens: 7, seconds: 1 }, results: request.items.map((item) => {
         const same = item.candidates.find((candidate) => candidate.id.startsWith("H") && statementKey(candidate.text) === statementKey(item.text));
-        if (same !== undefined) return { id: item.id, decision: "duplicate" as const, target: same.id, reason: "already stated" };
+        if (same !== undefined) return { id: item.id, decision: "duplicate" as const, target: same.id, merged_statement: "", reason: "already stated" };
         const human = item.candidates.find((candidate) => candidate.id.startsWith("H") && candidate.text.includes("Bits"));
         const earlier = item.candidates.find((candidate) => candidate.id.startsWith("N") && statementKey(candidate.text) === statementKey(item.text));
-        if (human !== undefined && item.text.includes("Bits")) return { id: item.id, decision: item.text.includes("不要") ? "conflicts" as const : "duplicate" as const, target: human.id, reason: "test" };
-        if (earlier !== undefined) return { id: item.id, decision: "duplicate" as const, target: earlier.id, reason: "same" };
+        if (human !== undefined && item.text.includes("Bits")) return { id: item.id, decision: item.text.includes("不要") ? "conflicts" as const : "duplicate" as const, target: human.id, merged_statement: "", reason: "test" };
+        if (earlier !== undefined) return { id: item.id, decision: "duplicate" as const, target: earlier.id, merged_statement: "", reason: "same" };
         const corrected = item.candidates.find((candidate) => candidate.id.startsWith("D"));
-        if (corrected !== undefined && item.text.includes("（更正）")) return { id: item.id, decision: "refines" as const, target: corrected.id, reason: "corrects" };
-        return { id: item.id, decision: "new" as const, target: "", reason: "new" };
+        // The merged statement keeps the target and adds the correction; "（无合并）" omits it.
+        if (corrected !== undefined && item.text.includes("（更正）")) return { id: item.id, decision: "refines" as const, target: corrected.id,
+          merged_statement: item.text.includes("（无合并）") ? "" : `${corrected.text} ${item.text}`, reason: "corrects" };
+        return { id: item.id, decision: "new" as const, target: "", merged_statement: "", reason: "new" };
       }) });
     }
   };
@@ -184,16 +186,42 @@ test("a later, more precise statement revises the dreaming Memory it corrects", 
   const [second] = (await applyCompletedRuns({ ...request, now: "2026-10-19T00:00:00.000Z", runId: "msdream_00000005-0000-4000-8000-000000000005" })).outcomes;
   expect(second).toMatchObject({ state: "revised", memoryId: first?.memoryId });
   const memory = (await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(first?.memoryId) }))?.memory;
-  expect(memory?.body).toBe(corrected);
+  // The revision is the merged statement, so what only the first statement said survives.
+  const merged = `${texts.code} ${corrected}`;
+  expect(memory?.body).toBe(merged);
   expect(memory?.provenance.slice(0, 1)).toEqual(["dream:msdream_00000005-0000-4000-8000-000000000005:msdi_second"]);
   expect(memory?.provenance).toContain("dream:msdream_00000004-0000-4000-8000-000000000004:msdi_first");
   // The corrected statement is what dreaming recognises from now on.
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
-    expect(database.prepare("SELECT statement_key, observation_count FROM dream_memories").get()).toMatchObject({ statement_key: statementKey(corrected), observation_count: 2 });
+    expect(database.prepare("SELECT statement_key, observation_count FROM dream_memories").get()).toMatchObject({ statement_key: statementKey(merged), observation_count: 2 });
   } finally {
     database.close();
   }
+});
+
+test("a refinement never overwrites facts it does not carry", async () => {
+  const { runtimeRoot, vaultRoot, projectId } = await fixture();
+  await addRun(runtimeRoot, projectId, "msdream_00000006-0000-4000-8000-000000000006", "2026-10-16T19:00:00.000Z", [{ id: "msdi_base", text: texts.code }]);
+  const request = { runtimeRoot, vaultRoot, now: "2026-10-17T00:00:00.000Z", model: fakeModel([]), timeZone: "Asia/Shanghai", preview: false };
+  const [base] = (await applyCompletedRuns({ ...request, runId: "msdream_00000006-0000-4000-8000-000000000006" })).outcomes;
+  const first = `${texts.code}（更正）只在 classic 预览路径成立。`;
+  const second = `${texts.code}（更正）PTC 路径保留运行时状态。`;
+  const unmerged = `${texts.code}（更正）（无合并）重载前会先保存工程。`;
+  await addRun(runtimeRoot, projectId, "msdream_00000007-0000-4000-8000-000000000007", "2026-10-18T19:00:00.000Z",
+    [{ id: "msdi_first", text: first }, { id: "msdi_second", text: second }, { id: "msdi_unmerged", text: unmerged }]);
+  const outcomes = (await applyCompletedRuns({ ...request, now: "2026-10-19T00:00:00.000Z", runId: "msdream_00000007-0000-4000-8000-000000000007" })).outcomes;
+  const byItem = new Map(outcomes.map((outcome) => [outcome.itemId, outcome]));
+  expect(byItem.get("msdi_first")).toMatchObject({ state: "revised", memoryId: base?.memoryId });
+  // A second merge against the same target would replace the first: kept as its own Memory.
+  expect(byItem.get("msdi_second")).toMatchObject({ state: "written" });
+  expect(byItem.get("msdi_second")?.memoryId).not.toBe(base?.memoryId);
+  // No merged statement: kept as its own Memory rather than replacing the target.
+  expect(byItem.get("msdi_unmerged")).toMatchObject({ state: "written" });
+  const body = async (memoryId: unknown) => (await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(memoryId) }))?.memory.body;
+  expect(await body(base?.memoryId)).toBe(`${texts.code} ${first}`);
+  expect(await body(byItem.get("msdi_second")?.memoryId)).toBe(second);
+  expect(await body(byItem.get("msdi_unmerged")?.memoryId)).toBe(unmerged);
 });
 
 test("knowledge a user-wide instruction file already states is not written", async () => {
