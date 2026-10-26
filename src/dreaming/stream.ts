@@ -1,3 +1,4 @@
+import { userPromptText } from "../contracts/prompt-text.js";
 import type { DatabaseSync } from "node:sqlite";
 
 /**
@@ -44,15 +45,7 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-/**
- * Chat bridges such as botmux wrap each prompt in routing rules, skill lists and
- * identity blocks around a `<user_message>` element. Only that element is the
- * user's own text; the wrapper would otherwise read as rules the user stated.
- */
-export function userPromptText(prompt: string): string {
-  const messages = [...prompt.matchAll(/<user_message>([\s\S]*?)<\/user_message>/gu)].map((match) => (match[1] ?? "").trim());
-  return messages.length === 0 ? prompt : messages.join("\n\n");
-}
+export { userPromptText } from "../contracts/prompt-text.js";
 
 const userWordsCharacters = 2_000;
 

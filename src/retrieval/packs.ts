@@ -8,6 +8,7 @@ import { openRuntimeDatabase } from "../runtime/database.js";
 import { readInjectionAuthorityGate, readSessionStartInjection, type InjectionAuthorityGate } from "../configuration/hook-display.js";
 import { dreamingPolicyVersion } from "../memories/origins.js";
 import type { EmbeddingAdapter } from "./index.js";
+import { isAgentNotification } from "../contracts/prompt-text.js";
 import { jevTelemetrySchema, type JevTelemetry, type AutomaticRelevanceFilter } from "./jev.js";
 import {
   ForegroundExecutionAborted,
@@ -1360,6 +1361,11 @@ async function semanticScores(request: {
   };
 }
 
+// Neither a bare continuation nor an agent's own notification names a task to recall for.
+function skipsPromptRetrieval(prompt: string): boolean {
+  return isContinuationOnly(prompt) || isAgentNotification(prompt);
+}
+
 function isContinuationOnly(prompt: string): boolean {
   const normalized = prompt.trim().toLocaleLowerCase("en-US");
   return normalized.length <= 12 && /^(ok|okay|yes|sure|continue|好的?|可以|同意|继续|行了?|没问题)[。.!！]?$/u.test(normalized);
@@ -1392,7 +1398,7 @@ function truncateHistoryPrompt(prompt: string, tokenLimit: number): string {
 function boundedRecentPrompts(prompts: readonly string[]): readonly string[] {
   const recent = prompts
     .map((prompt) => prompt.trim().replace(/\s+/gu, " "))
-    .filter((prompt) => prompt.length > 0 && !isContinuationOnly(prompt))
+    .filter((prompt) => prompt.length > 0 && !skipsPromptRetrieval(prompt))
     .slice(0, RECENT_PROMPT_HISTORY_LIMIT);
   const weights = RECENT_PROMPT_RECENCY_WEIGHTS.slice(0, recent.length);
   const totalWeight = weights.reduce((total, weight) => total + weight, 0);
@@ -1496,7 +1502,7 @@ async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest
     normalizedPrompt,
     ...(contextualHistoryAvailable ? recentPromptContext : [])
   ].join("\n");
-  const semantic = isContinuationOnly(normalizedPrompt)
+  const semantic = skipsPromptRetrieval(normalizedPrompt)
     ? {
         stage: "lexical_only" as const,
         scores: new Map<string, number>(),
@@ -1777,7 +1783,7 @@ async function prepareUserPromptShadowPackCore(
   const selected: ShadowPackItem[] = [];
   const promptOmissionReasons = new Map<string, string>();
   let probableCount = 0;
-  if (!isContinuationOnly(normalizedPrompt)) {
+  if (!skipsPromptRetrieval(normalizedPrompt)) {
     for (const item of ranked) {
       if (selected.length >= (postSoft ? 2 : PROMPT_ITEM_LIMIT)) break;
       if (item.band === "probable" && probableCount >= PROBABLE_ITEM_LIMIT) {
@@ -1922,6 +1928,7 @@ async function prepareUserPromptShadowPackCore(
     ? undefined
     : jev?.state === "filtered" ? "jev_no_relevant_memory"
     : unfilteredWithheld ? "unfiltered_low_confidence"
+    : isAgentNotification(normalizedPrompt) ? "agent_notification"
     : isContinuationOnly(normalizedPrompt)
       ? "continuation_only"
       : epoch.tokenTotal >= hardLimit

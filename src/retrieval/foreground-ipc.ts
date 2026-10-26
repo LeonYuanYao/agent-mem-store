@@ -30,6 +30,7 @@ import { validateRetrievalSnapshot } from "./snapshot.js";
 import { JevAutomaticRelevanceFilter, type AutomaticRelevanceFilter } from "./jev.js";
 import { JevConnectionWarmer } from "./jev-warm.js";
 import { ConversationCache, type ConversationView } from "./conversation-cache.js";
+import { isAgentNotification, userPromptText } from "../contracts/prompt-text.js";
 
 const maximumRecentPromptSessions = 128;
 const maximumStoredPromptCharacters = 16 * 1024;
@@ -299,13 +300,18 @@ export async function startForegroundRetrievalServer(request: {
   const conversations = new ConversationCache();
   const recentPromptsBySession = new Map<string, readonly string[]>();
   const lane = createForegroundRetrievalLane<ForegroundRequest, ForegroundWireResponse>({
-    execute: (foregroundRequest, control) => {
+    execute: (receivedRequest, control) => {
+      // Retrieval, history and Jev see only what the user wrote (ADR-0154).
+      const foregroundRequest: ForegroundRequest = receivedRequest.event === "UserPromptSubmit"
+        ? { ...receivedRequest, prompt: userPromptText(receivedRequest.prompt) }
+        : receivedRequest;
+      const notification = foregroundRequest.event === "UserPromptSubmit" && isAgentNotification(foregroundRequest.prompt);
       const snapshot = activeSnapshot;
       if (snapshot !== undefined) {
         requestSnapshotIds.set(foregroundRequest.requestId, snapshot.indexRevisionId);
       }
       const historyKey = `${foregroundRequest.projectId}\0${foregroundRequest.sessionId}`;
-      const conversation = foregroundRequest.event === "UserPromptSubmit"
+      const conversation = foregroundRequest.event === "UserPromptSubmit" && !notification
         ? conversations.beginUser(foregroundRequest.projectId, foregroundRequest.sessionId, foregroundRequest.turnId, foregroundRequest.prompt)
         : { messages: [], status: "missing" as const };
       let recentPrompts: readonly string[] = [];
@@ -315,7 +321,7 @@ export async function startForegroundRetrievalServer(request: {
       } else {
         recentPrompts = recentPromptsBySession.get(historyKey) ?? [];
         const normalizedPrompt = foregroundRequest.prompt.trim().replace(/\s+/gu, " ");
-        if (isMeaningfulHistoryPrompt(normalizedPrompt)) {
+        if (!notification && isMeaningfulHistoryPrompt(normalizedPrompt)) {
           recentPromptsBySession.delete(historyKey);
           recentPromptsBySession.set(
             historyKey,

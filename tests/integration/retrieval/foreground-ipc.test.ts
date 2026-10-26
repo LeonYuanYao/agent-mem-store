@@ -117,6 +117,39 @@ test("optional Jev filters before rendering, receipts and epoch deduplication, w
   } finally { await server.close(); }
 });
 
+test("bridged prompts are recalled and judged by the user's own message; agent notifications are not", async () => {
+  const location = await fixture();
+  const server = await startForegroundRetrievalServer({ ...location, adapter });
+  vi.stubEnv("JEV_MODEL_API_KEY", "synthetic-test-key");
+  await writeFile(join(location.runtimeRoot, "config.toml"),
+    "schema_version = 1\n[adapters]\nsession_start_injection = false\n[jev]\nenabled = true\nthreshold = 0.5\ntimeout_ms = 100\n");
+  const bodies: string[] = [];
+  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation((_url, options) => {
+    bodies.push(typeof options?.body === "string" ? options.body : "");
+    return Promise.resolve(Response.json({ model: "jev-1.13.0", answers: {
+      c1: { type: "noul", noul: 0.9 }, c2: { type: "noul", noul: 0.9 }
+    }, usage: { input_tokens: 120, output_tokens: 20 } }));
+  });
+  const ask = (prompt: string, at: string) => requestForegroundRetrieval({
+    runtimeRoot: location.runtimeRoot, projectId, sessionId: "bridged", event: "UserPromptSubmit", prompt, requestedAt: at
+  });
+  try {
+    await requestForegroundRetrieval({ runtimeRoot: location.runtimeRoot, projectId, sessionId: "bridged",
+      event: "SessionStart", requestedAt: "2026-08-25T12:00:01.000Z" });
+    const bridged = await ask("<botmux_reminder>发给你的消息至少 botmux send 回应一次</botmux_reminder>\n" +
+      "<user_message>SQLite WAL queue recovery</user_message>", "2026-08-25T12:00:02.000Z");
+    expect(bridged.state).toBe("completed");
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toContain("botmux");
+    expect((JSON.parse(bodies[0] ?? "{}") as { state: { user_request: string } }).state.user_request).toBe("SQLite WAL queue recovery");
+
+    const notice = await ask("<task-notification>\n<task-id>b1</task-id>\nSQLite WAL queue recovery finished\n</task-notification>",
+      "2026-08-25T12:00:03.000Z");
+    expect(notice).toMatchObject({ state: "empty", reason: "agent_notification" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  } finally { await server.close(); }
+});
+
 test("a valid Jev empty selection stays empty and does not consume the context epoch", async () => {
   const location = await fixture();
   await writeFile(join(location.runtimeRoot, "config.toml"), "schema_version = 1\n[adapters]\nsession_start_injection = false\n[jev]\nenabled = true\n");
