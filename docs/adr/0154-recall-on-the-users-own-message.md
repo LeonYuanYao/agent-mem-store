@@ -40,3 +40,7 @@ Decision:
 
 Rejected: lowering the threshold without unwrapping (0.4 doubled the prompts that
 received noise); dropping bridged prompts entirely (they carry most remote work).
+
+`scripts/evaluate-injection.ts` repeats this evaluation from receipts: Jev-scored
+candidates and a sample of prompts without candidates, labeled by Codex, with the
+threshold table and local-miss rate in `report.md`.
