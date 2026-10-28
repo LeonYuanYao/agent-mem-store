@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { fetchLarkDocument, rememberDocument } from "../operations/remember-document.js";
 import { readDreamingConfiguration, type DreamingConfiguration } from "../dreaming/config.js";
 import { CodexDreamModel, type DreamModel } from "../dreaming/model.js";
 import { applyCompletedRuns, inspectDreams, renderDreamReports, rollbackDreamMemories, runNextDreamStep, startDreamRun } from "../dreaming/run.js";
@@ -170,6 +171,10 @@ function parseCommon(arguments_: readonly string[]) {
       stdin: { type: "boolean", default: false },
       file: { type: "string" },
       from: { type: "string" },
+      lark: { type: "string" },
+      title: { type: "string" },
+      source: { type: "string" },
+      "confirm-sensitive": { type: "string" },
       revision: { type: "string" },
       detail: { type: "string" },
       limit: { type: "string" },
@@ -1465,6 +1470,29 @@ async function runRemember(arguments_: readonly string[]): Promise<unknown> {
       assertedAt: new Date().toISOString()
     });
   }
+  if (action === "doc") {
+    // A document as one Human-authored Memory: summary for recall, full text in the Vault (ADR-0156).
+    const inputs = [parsed.values.file, parsed.values.lark, parsed.values.stdin ? "stdin" : undefined].filter((value) => value !== undefined);
+    if (inputs.length !== 1) {
+      throw new MemStoreCommandError("invalid_content_input", "remember doc requires exactly one of --file, --lark, or --stdin.");
+    }
+    const document = parsed.values.lark !== undefined
+      ? await fetchLarkDocument(parsed.values.lark)
+      : parsed.values.file !== undefined
+        ? { content: await readFile(resolve(parsed.values.file), "utf8"), source: parsed.values.source ?? resolve(parsed.values.file) }
+        : parsed.values.source === undefined
+          ? (() => { throw new MemStoreCommandError("source_required", "remember doc --stdin requires --source URL-or-path."); })()
+          : { content: await readStandardInput(), source: parsed.values.source };
+    return rememberDocument({
+      ...location,
+      path: workingPath,
+      document: { ...document, ...(parsed.values.title === undefined ? {} : { title: parsed.values.title }) },
+      scope: scope(parsed.values.scope),
+      preview: parsed.values.preview,
+      importedAt: new Date().toISOString(),
+      ...(parsed.values["confirm-sensitive"] === undefined ? {} : { confirmSensitive: parsed.values["confirm-sensitive"] })
+    });
+  }
   if (action === "extract") {
     const source = parsed.values.from;
     if (source === undefined) {
@@ -1511,6 +1539,7 @@ Everyday use:
   memstore status
   memstore doctor --deep
   memstore remember assert --scope project|global --text TEXT
+  memstore remember doc --file DOC.md | --lark URL [--title TEXT] [--scope project|global]
   memstore recall search QUERY
   memstore archive M:123 [--reason TEXT] [--apply]
   memstore restore M:123 [--apply]

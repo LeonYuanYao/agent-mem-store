@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { documentHeadings, isDocumentMemory } from "../memories/documents.js";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -51,6 +52,21 @@ export interface ActiveRetrievalIndex {
  * Repeated texts (a body equal to its compact or standard text) appear once.
  */
 function searchableText(memory: CanonicalMemory): string {
+  // A document's full text would match countless prompts by shared words; its card,
+  // title and headings say what it is about (ADR-0156).
+  if (isDocumentMemory(memory)) {
+    // Until a summary exists the compact is the whole body; only a usable one belongs on the card.
+    const compact = memory.representations.compact;
+    const usableCompact = compact.validated && compact.sourceRevisionId === memory.revisionId &&
+      tokenizer.encode(compact.text).length <= 96 ? compact.text : "";
+    const card = [
+      usableCompact,
+      memory.applicability.summary,
+      ...documentHeadings(memory.body),
+      memory.primaryCategory
+    ].map((item) => item.trim()).filter((item) => item.length > 0);
+    return [...new Set(card)].join("\n");
+  }
   const parts = [
     memory.representations.compact.text,
     memory.representations.identity?.label ?? "",

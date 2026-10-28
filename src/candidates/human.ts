@@ -82,6 +82,7 @@ function createHumanMemory(request: {
     readonly conditions: readonly string[];
   };
   readonly predecessorMemoryId?: string;
+  readonly extraProvenance?: readonly string[];
 }): CanonicalMemory {
   const compact = assessExactCompact({
     body: request.body,
@@ -135,7 +136,8 @@ function createHumanMemory(request: {
     },
     provenance: [
       `operation:${request.operationId}`,
-      `source:${request.sourceIdentity}`
+      `source:${request.sourceIdentity}`,
+      ...(request.extraProvenance ?? [])
     ],
     injectionReceiptIds: [],
     relationships: [],
@@ -167,6 +169,10 @@ export async function assertHumanKnowledge(request: {
   readonly potentialConflictMemoryIds?: readonly string[];
   readonly conflictDetectedBy?: string;
   readonly replacesMemoryId?: string;
+  /** An uncertain-sensitivity match the Human reviewed and allowed (ADR-0156). */
+  readonly reviewedSensitiveValue?: string;
+  /** Provenance beyond the operation and source, such as a document's content hash. */
+  readonly extraProvenance?: readonly string[];
 }): Promise<HumanAssertionResult> {
   const assertedAt = z.iso.datetime().parse(request.assertedAt);
   const operationId = request.operationId ?? `mshumanop_${randomUUID()}`;
@@ -176,7 +182,7 @@ export async function assertHumanKnowledge(request: {
   if (sensitivity.state === "secret") {
     return { state: "blocked_secret", operationId, category: sensitivity.category };
   }
-  if (sensitivity.state === "uncertain") {
+  if (sensitivity.state === "uncertain" && sensitivity.matchedValue !== request.reviewedSensitiveValue) {
     return { state: "quarantined", operationId, category: sensitivity.category };
   }
   if (
@@ -278,7 +284,8 @@ export async function assertHumanKnowledge(request: {
       : { applicability: request.applicability }),
     ...(request.replacesMemoryId === undefined
       ? {}
-      : { predecessorMemoryId: request.replacesMemoryId })
+      : { predecessorMemoryId: request.replacesMemoryId }),
+    ...(request.extraProvenance === undefined ? {} : { extraProvenance: request.extraProvenance })
   });
 
   if (predecessor !== undefined) {
@@ -321,7 +328,8 @@ export async function assertHumanKnowledge(request: {
     vaultRoot: request.vaultRoot,
     runtimeRoot: request.runtimeRoot,
     actor: "human",
-    memory: successor
+    memory: successor,
+    ...(request.reviewedSensitiveValue === undefined ? {} : { reviewedSensitiveValue: request.reviewedSensitiveValue })
   });
   const completedDatabase = await openRuntimeDatabase(request.runtimeRoot);
   try {

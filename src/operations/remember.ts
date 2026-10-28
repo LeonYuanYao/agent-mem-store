@@ -22,7 +22,7 @@ type ResolvedScope =
   | { readonly kind: "project"; readonly projectId: string }
   | { readonly kind: "global" };
 
-async function resolveRememberScope(request: {
+export async function resolveRememberScope(request: {
   readonly scope: RememberScope;
   readonly path: string;
   readonly runtimeRoot: string;

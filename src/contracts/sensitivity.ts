@@ -52,7 +52,9 @@ export function classifyLocalSensitivity(value: string): LocalSensitivityFinding
     candidate !== undefined &&
     !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/iu.test(candidate) &&
     !/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(candidate) &&
-    !/^(?:test|example|dummy|placeholder)/iu.test(candidate)
+    !/^(?:test|example|dummy|placeholder)/iu.test(candidate) &&
+    // Words joined by "_" or "-" without digits are identifiers (config keys, names), not tokens.
+    !/^[_-]?[A-Za-z]+(?:[_-][A-Za-z]+)+[_-]?$/u.test(candidate)
   ) {
     return {
       state: "uncertain",

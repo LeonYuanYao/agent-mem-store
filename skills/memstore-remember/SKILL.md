@@ -1,6 +1,6 @@
 ---
 name: memstore-remember
-description: Save an exact Human-authored assertion or have MemStore distill durable knowledge (nightly dreaming when enabled, otherwise Luna) from the current turn, session, a recorded turn, or a file. Use when the user asks to remember, preserve, learn, or promote a decision, preference, constraint, repair, or other reusable knowledge at Project or Global scope.
+description: Save an exact Human-authored assertion, store a whole document (Markdown file or Feishu/Lark doc) for recall, or have MemStore distill durable knowledge (nightly dreaming when enabled, otherwise Luna) from the current turn, session, a recorded turn, or a file. Use when the user asks to remember, preserve, learn, or promote a decision, preference, constraint, repair, or other reusable knowledge, or to store a document in MemStore, at Project or Global scope.
 ---
 
 # MemStore Remember
@@ -14,6 +14,22 @@ Route explicit memory intent through the MemStore CLI. Do not edit the Obsidian 
 - When the user states the knowledge itself (“记住：…”, “以后都…”), prefer `assert` with their words; use `extract` when the knowledge must come out of material. When intent is otherwise ambiguous, use `extract`.
 
 Default to `--scope project` and `--startup auto`. Use `--scope global` only when the user explicitly requests Global knowledge. Pass `--startup always` or `never` only when explicitly requested or clearly established.
+
+## Store a document
+
+When the user hands over a document to keep (a Markdown file, or a Feishu/Lark doc link) rather than a statement, store it whole with `remember doc`. Its full text becomes the Memory body in the Obsidian Vault; MemStore writes a short index card for matching and injection, and agents read the full text with `memstore recall show M:<id> --detail full`.
+
+```text
+memstore remember doc --file <path.md> --scope project --json
+memstore remember doc --lark <feishu-doc-url> --scope project --json
+memstore remember doc --stdin --source <url-or-path> --title <title> --json
+```
+
+- `--lark` fetches the document as Markdown with the user's `lark-cli` login. For other sources, export to Markdown first and pass `--file` (or `--stdin` with `--source`).
+- The title defaults to the first heading; pass `--title` when that is not the document's name.
+- Importing the same source again updates the same Memory (`updated`, same M:id) or reports `unchanged`. Use this to refresh a document after it changes.
+- `needs_sensitivity_review`: show the user `matched_value` and ask whether it is a credential. Only if they confirm it is not, run again with `--confirm-sensitive '<matched_value>'`. `blocked_secret`: the document contains a secret; ask the user to remove it. Never confirm on the user's behalf.
+- A document is retrieved by its card, title and headings. Default to `--scope project`; use `--scope global` for documents that apply across projects.
 
 ## Run the command
 

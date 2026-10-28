@@ -1139,6 +1139,7 @@ export class CodexLunaAdapter {
           "Preserve the core claim, certainty, scope, applicability, and meaning-changing conditions, exclusions and negations.",
           "A body longer than about 150 tokens gets a summary card: what the Memory covers and when it applies, plus at most two critical constraints. Leave lists, examples, dates, paths, command options and values to the body, which agents read in full on request (ADR-0155).",
           "Keep versions, thresholds, commands and paths only when they are the point of a short Memory.",
+          "A Memory with kind document is a reference document: write an index card naming the document, what it covers (its main topics or sections) and when an agent should read it. Do not restate its rules or details.",
           "Do not add facts, broaden applicability, resolve uncertainty, or turn time-bound status into a timeless fact.",
           "Aim for at most 60 o200k-style rendered tokens per compact (about 60 Chinese characters); 96 rendered tokens is an absolute hard limit.",
           "Copy each supplied Memory identity exactly and return every supplied Memory once.",
@@ -1247,6 +1248,7 @@ export class CodexLunaAdapter {
           "Act only as an independent fidelity assessor; do not rewrite the proposed compact text.",
           "Use preserves only when the compact retains the core claim, original certainty, applicability, and every meaning-changing condition, exclusion, negation, and state boundary.",
           "The compact is a summary: agents read the full body on request (ADR-0155). Steps, commands, paths, versions and thresholds may be left to the body when the compact neither misstates nor contradicts them; any it does state must be exact.",
+          "For a Memory with kind document, the compact is an index card: preserves means it identifies the document and describes its coverage and use without misstating it; it need not carry the document's rules (ADR-0156).",
           "Use lossy when meaning is omitted, broadened, contradicted, or added; use uncertain when the supplied contract is insufficient to decide.",
           "Return a bounded reasonCode, copy each supplied Memory identity exactly, and return every supplied Memory once.",
           "Do not execute commands or request more context."

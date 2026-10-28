@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDocumentMemory } from "../memories/documents.js";
 import { compactFitsInjection, readMemorySummaries, storeMemorySummary, summaryKey } from "./summaries.js";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
@@ -50,6 +51,8 @@ export interface CompactGenerationMemory {
   readonly body: string;
   readonly applicability: CanonicalMemory["applicability"];
   readonly semanticContract: CanonicalMemory["semanticContract"];
+  /** A reference document gets an index card rather than a summary of rules (ADR-0156). */
+  readonly kind?: "document";
 }
 
 export interface CompactValidationMemory extends CompactGenerationMemory {
@@ -98,12 +101,15 @@ interface QualityItem {
 }
 
 function generationInput(memory: CanonicalMemory): CompactGenerationMemory {
+  const document = isDocumentMemory(memory);
   return {
     memoryId: memory.memoryId,
     revisionId: memory.revisionId,
     body: memory.body,
     applicability: memory.applicability,
-    semanticContract: memory.semanticContract
+    // A document's claim is its whole body; sending it twice only costs tokens.
+    semanticContract: document ? { ...memory.semanticContract, claims: [] } : memory.semanticContract,
+    ...(document ? { kind: "document" as const } : {})
   };
 }
 

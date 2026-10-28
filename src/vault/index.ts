@@ -198,6 +198,8 @@ export interface WriteCanonicalMemoryRequest {
   readonly actor: "human" | "agent";
   readonly memory: CanonicalMemory;
   readonly expectedContentIdentity?: string;
+  /** The uncertain-sensitivity match a Human reviewed and allowed; any other match still blocks. */
+  readonly reviewedSensitiveValue?: string;
 }
 
 export interface CanonicalWriteResult {
@@ -901,7 +903,7 @@ async function writeCanonicalMemoryWithAdmission(
   if (sensitivity.state === "secret") {
     throw new SecretContentError(sensitivity.category);
   }
-  if (sensitivity.state === "uncertain") {
+  if (sensitivity.state === "uncertain" && sensitivity.matchedValue !== request.reviewedSensitiveValue) {
     throw new Error("Uncertain sensitive content requires explicit review.");
   }
   const memoryRef = await reserveMemoryRef(
@@ -973,7 +975,7 @@ async function writeCanonicalMemoryWithAdmission(
     if (renderedSensitivity.state === "secret") {
       throw new SecretContentError(renderedSensitivity.category);
     }
-    if (renderedSensitivity.state === "uncertain") {
+    if (renderedSensitivity.state === "uncertain" && renderedSensitivity.matchedValue !== request.reviewedSensitiveValue) {
       throw new Error("Rendered Canonical Memory requires explicit review.");
     }
     const revisedIdentity = contentIdentity(revisedSource);
@@ -1124,7 +1126,7 @@ async function writeCanonicalMemoryWithAdmission(
   if (renderedSensitivity.state === "secret") {
     throw new SecretContentError(renderedSensitivity.category);
   }
-  if (renderedSensitivity.state === "uncertain") {
+  if (renderedSensitivity.state === "uncertain" && renderedSensitivity.matchedValue !== request.reviewedSensitiveValue) {
     throw new Error("Rendered Canonical Memory requires explicit review.");
   }
   const identity = contentIdentity(source);
