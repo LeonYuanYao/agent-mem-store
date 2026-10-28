@@ -13,6 +13,7 @@ import {
   scheduleCompactQuality,
   type MemoryQualityAdapter
 } from "../../../src/quality/pipeline.js";
+import { buildRetrievalIndex } from "../../../src/retrieval/index.js";
 import { readCanonicalMemory, writeCanonicalMemory } from "../../../src/vault/index.js";
 import { runWorkerOnce, type WorkerAdapters } from "../../../src/worker/main.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
@@ -121,6 +122,58 @@ test.each(["gpt-6-luna", "gpt-5.6-luna"])("compact backfill preserves its genera
     completedCount: 1,
     pendingCount: 0
   });
+});
+
+test("a Human-authored Memory too long to inject gets a summary for the index without being revised", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-quality-human-summary-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const memoryId = "msmem_123e4567-e89b-42d3-a456-426614174091";
+  const body = `用 botmux 往其他群发消息的方法：${"先查目标群 chat_id，再带 --session-id 和 --chat-id 发送，确认返回 success 后才算送达。".repeat(12)}`;
+  await writeCanonicalMemory({ runtimeRoot, vaultRoot, actor: "human", memory: makeCanonicalMemory({
+    memoryId, revisionId: "msrev_123e4567-e89b-42d3-a456-426614174091", authority: "human_authored",
+    body, compact: body, validatedCompact: false
+  }) });
+  const summary = "botmux 往当前会话以外的飞书群发消息：用 botmux send 指定 --session-id 与目标 --chat-id，以返回 success 为送达。";
+  const adapter: MemoryQualityAdapter = {
+    generateCompacts: (request) => Promise.resolve({ schemaVersion: 1, kind: "compact_generation",
+      items: request.memories.map((memory) => ({ memoryId: memory.memoryId, compactText: summary })) }),
+    validateCompacts: (request) => Promise.resolve({ schemaVersion: 1, kind: "compact_validation",
+      items: request.memories.map((memory) => ({ memoryId: memory.memoryId, state: "preserves" as const, reasonCode: "summary_preserves_core" })) })
+  };
+  const dirtyGeneration = async () => {
+    const database = await openRuntimeDatabase(runtimeRoot);
+    try { return Number(database.prepare("SELECT dirty_generation FROM retrieval_catalog_generations WHERE singleton = 1").get()?.dirty_generation); }
+    finally { database.close(); }
+  };
+  await expect(enqueueCompactBackfill({ runtimeRoot, vaultRoot, requestedAt: "2026-10-28T03:00:00.000Z", preview: false }))
+    .resolves.toMatchObject({ eligibleCount: 1, enqueuedCount: 1 });
+  const before = await dirtyGeneration();
+  const step = (now: string) => runNextMemoryQualityStep({ runtimeRoot, vaultRoot, workerId: "quality-worker", now, adapter });
+  await expect(step("2026-10-28T03:00:01.000Z")).resolves.toMatchObject({ state: "generated" });
+  await expect(step("2026-10-28T03:00:02.000Z")).resolves.toMatchObject({ state: "published", itemCount: 1 });
+
+  // The Human-authored Memory itself is untouched.
+  const current = await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId });
+  expect(current?.memory.revisionId).toBe("msrev_123e4567-e89b-42d3-a456-426614174091");
+  expect(current?.memory.body).toBe(body);
+  expect(await dirtyGeneration()).toBe(before + 1);
+  await expect(enqueueCompactBackfill({ runtimeRoot, vaultRoot, requestedAt: "2026-10-28T03:00:03.000Z", preview: true }))
+    .resolves.toMatchObject({ eligibleCount: 0 });
+
+  // The index injects the summary as compact; the body stays the full text.
+  await buildRetrievalIndex({ runtimeRoot, vaultRoot, builtAt: "2026-10-28T03:00:04.000Z", adapter: {
+    identity: { adapterVersion: "summary-fixture-v1", modelIdentity: "summary-fixture", artifactSha256: "d".repeat(64), dimensions: 2, normalization: "l2" },
+    embed: (texts) => Promise.resolve(texts.map(() => [1, 0]))
+  } });
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(database.prepare("SELECT compact_text, compact_validated FROM retrieval_documents WHERE memory_id = ?").get(memoryId))
+      .toMatchObject({ compact_text: summary, compact_validated: 1 });
+    expect(String(database.prepare("SELECT searchable_text FROM retrieval_documents WHERE memory_id = ?").get(memoryId)?.searchable_text))
+      .toMatch(new RegExp(`^${summary.slice(0, 20)}`, "u"));
+  } finally { database.close(); }
 });
 
 test("an Agent revision immediately queues its unvalidated compact when quality is enabled", async () => {

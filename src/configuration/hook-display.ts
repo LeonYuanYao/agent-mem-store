@@ -120,7 +120,8 @@ export function renderHookDisplay(
       const tags = match[2] ?? "";
       const scope = scopes[/\bS:(\w)/u.exec(tags)?.[1] ?? ""];
       const authority = authorities[/\bA:(\w)/u.exec(tags)?.[1] ?? ""];
-      const label = [scope, authority].filter((value) => value !== undefined).join("·");
+      const detail = /\bR:C\+/u.test(tags) ? "有详情" : undefined;
+      const label = [scope, authority, detail].filter((value) => value !== undefined).join("·");
       return `  M:${match[1] ?? ""}${label === "" ? "" : ` ${label}`}｜${(match[3] ?? "").trim()}`;
     });
     return [summary, ...lines].join("\n");

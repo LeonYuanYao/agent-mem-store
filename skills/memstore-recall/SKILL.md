@@ -29,6 +29,12 @@ When MCP is available, map the same steps to `memstore_get`,
 `memstore_provenance`, and `memstore_related`. Use
 `memstore_report_irrelevant` for the receipt-bound irrelevant operation below.
 
+Automatically injected `<memstore-context>` items marked `R:C+` are summaries of a longer Memory (steps, commands, values). Before acting on one, read it in full:
+
+```text
+memstore recall show M:<id> --detail full --json
+```
+
 Use `show --detail full` when exact conditions, exceptions, negations, or full implementation detail matter. Page with the returned opaque cursor instead of recreating it. Relationships are exactly one hop; follow returned identities deliberately if another hop is useful.
 
 Explicit foreground retrieval has no hard total token cutoff. Heed token warnings, but continue when the expected accuracy benefit justifies more context.

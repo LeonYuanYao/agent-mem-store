@@ -268,7 +268,7 @@ test("SessionStart prepares a bounded authority-labelled Core Memory Pack withou
     "<memstore-context>Automatically selected long-term project background for session startup. It is not necessarily relevant to the current task. Use only clearly applicable items and ignore the rest. Current explicit instructions and verified workspace state take precedence.</memstore-context>"
   );
   expect(pack.text).toContain(
-    "M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity)"
+    "M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/C+(summary; the full text has steps, commands or details)/S(standard)/I(identity)"
   );
   expect(pack.text).toContain("[M:1 S:P A:H R:C]");
   expect(pack.text).toContain("[M:2 S:G A:H R:C]");
@@ -358,7 +358,7 @@ test("UserPromptSubmit uses relevance bands, upgrades exact high matches, and su
     "<memstore-context>Automatically retrieved historical long-term memory. Retrieval may include false positives. Use only items clearly applicable to the current request and ignore unrelated items. Current explicit instructions and verified workspace state take precedence.</memstore-context>"
   );
   expect(first.text).toContain(
-    "M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity)"
+    "M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/C+(summary; the full text has steps, commands or details)/S(standard)/I(identity)"
   );
   expect(first.items).toEqual([
     expect.objectContaining({
@@ -1008,7 +1008,7 @@ test("probable-only automatic recall remains compact and admits at most two item
     // Probable needs two shared terms; one shared word is not corroboration.
     body: `设计 讨论 probable note ${String(ordinal)}.`,
     compact: `设计 讨论 probable note ${String(ordinal)}.`,
-    standard: `Probable design note ${String(ordinal)} with more details.`,
+    standard: `Probable design note ${String(ordinal)} with more details: the review checklist, the three design options, the trade-offs between them, and the exact steps to try each one.`,
     startup: "never"
   }));
   await writeAll(roots, memories);
@@ -1030,12 +1030,14 @@ test("probable-only automatic recall remains compact and admits at most two item
   });
 
   expect(pack.text.split("\n")[0]).toBe(
-    "<memstore-context>Automatically retrieved, possibly relevant historical long-term memory. Treat these items as candidates: verify applicability, ignore unrelated items, and read by M:<id> when more detail is needed. Current explicit instructions and verified workspace state take precedence.</memstore-context>"
+    "<memstore-context>Automatically retrieved, possibly relevant historical long-term memory. Treat these items as candidates: verify applicability, ignore unrelated items, and read the full text with `memstore recall show M:<id> --detail full` when more detail is needed. Current explicit instructions and verified workspace state take precedence.</memstore-context>"
   );
   expect(pack.items).toHaveLength(2);
   expect(pack.items.every((item) =>
     item.relevanceBand === "probable" && item.representationKind === "compact"
   )).toBe(true);
+  // The standard text says more than the compact: the item is marked as having detail (ADR-0155).
+  expect(pack.text).toMatch(/\[M:\d+ S:P A:H R:C\+\] 设计 讨论 probable note/u);
 });
 
 test("Context Epoch accounting applies post-soft authority gates and never crosses the hard limit", async () => {

@@ -68,7 +68,8 @@ async function fixture() {
 }
 
 async function addRun(runtimeRoot: string, projectId: string, runId: string, createdAt: string,
-  items: readonly { id: string; text: string; tier?: string; scope?: string; claimType?: string; explicit?: boolean; userSupport?: string }[]): Promise<void> {
+  items: readonly { id: string; text: string; tier?: string; scope?: string; claimType?: string; explicit?: boolean; userSupport?: string;
+    detail?: string; detailCheck?: string }[]): Promise<void> {
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     database.prepare(
@@ -78,11 +79,12 @@ async function addRun(runtimeRoot: string, projectId: string, runId: string, cre
     for (const item of items) {
       database.prepare(
         `INSERT INTO dream_items(item_id, run_id, statement, claim_type, scope, member_ids_json, session_ids_json, explicit_user,
-           first_seen_at, check_hints_json, source_paths_json, verdict_json, tier, tier_reason)
-         VALUES (?, ?, ?, ?, ?, '[]', '["session-1"]', ?, ?, '[]', '[]', ?, ?, 'confirmed')`
+           first_seen_at, check_hints_json, source_paths_json, verdict_json, tier, tier_reason, detail)
+         VALUES (?, ?, ?, ?, ?, '[]', '["session-1"]', ?, ?, '[]', '[]', ?, ?, 'confirmed', ?)`
       ).run(item.id, runId, item.text, item.claimType ?? "code_state", item.scope ?? "project", item.explicit === true ? 1 : 0, createdAt,
         JSON.stringify({ verdict: "confirmed", subsystem: "preview", evidence: ["tteh@abc1234567 [R1-implementation 2026-10-01] src/preview.ts:1 reload"],
-          user_support: item.userSupport ?? "not_applicable" }), item.tier ?? "inject");
+          user_support: item.userSupport ?? "not_applicable", detail_check: item.detailCheck ?? (item.detail === undefined ? "none" : "consistent") }),
+        item.tier ?? "inject", item.detail ?? null);
     }
   } finally {
     database.close();
@@ -222,6 +224,32 @@ test("a refinement never overwrites facts it does not carry", async () => {
   expect(await body(base?.memoryId)).toBe(`${texts.code} ${first}`);
   expect(await body(byItem.get("msdi_second")?.memoryId)).toBe(second);
   expect(await body(byItem.get("msdi_unmerged")?.memoryId)).toBe(unmerged);
+});
+
+test("detail goes into the body, survives a revision without detail, and is dropped when evidence contradicts it", async () => {
+  const { runtimeRoot, vaultRoot, projectId } = await fixture();
+  const detail = "1. 调用 setVideo\n2. 等待新帧后再截图";
+  await addRun(runtimeRoot, projectId, "msdream_00000008-0000-4000-8000-000000000008", "2026-10-16T19:00:00.000Z", [
+    { id: "msdi_detailed", text: texts.code, detail },
+    { id: "msdi_contradicted", text: texts.userRule, claimType: "preference", detail: "这条细节与证据矛盾。", detailCheck: "contradicted" }
+  ]);
+  const request = { runtimeRoot, vaultRoot, now: "2026-10-17T00:00:00.000Z", model: fakeModel([]), timeZone: "Asia/Shanghai", preview: false };
+  const outcomes = (await applyCompletedRuns({ ...request, runId: "msdream_00000008-0000-4000-8000-000000000008" })).outcomes;
+  const byItem = new Map(outcomes.map((outcome) => [outcome.itemId, outcome]));
+  const read = async (memoryId: unknown) => (await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(memoryId) }))?.memory;
+  const detailed = await read(byItem.get("msdi_detailed")?.memoryId);
+  expect(detailed?.representations.compact.text).toBe(texts.code);
+  expect(detailed?.body).toBe(`${texts.code}\n\n${detail}`);
+  expect(detailed?.representations.standard.text).toBe(detailed?.body);
+  expect((await read(byItem.get("msdi_contradicted")?.memoryId))?.body).toBe(texts.userRule);
+
+  // A later refinement without detail of its own keeps the Memory's detail.
+  const corrected = `${texts.code}（更正）只在 classic 预览路径成立。`;
+  await addRun(runtimeRoot, projectId, "msdream_00000009-0000-4000-8000-000000000009", "2026-10-18T19:00:00.000Z", [{ id: "msdi_refine", text: corrected }]);
+  const [revised] = (await applyCompletedRuns({ ...request, now: "2026-10-19T00:00:00.000Z", runId: "msdream_00000009-0000-4000-8000-000000000009" })).outcomes;
+  expect(revised).toMatchObject({ state: "revised", memoryId: byItem.get("msdi_detailed")?.memoryId });
+  const merged = `${texts.code} ${corrected}`;
+  expect((await read(revised?.memoryId))?.body).toBe(`${merged}\n\n${detail}`);
 });
 
 test("knowledge a user-wide instruction file already states is not written", async () => {

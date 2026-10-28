@@ -24,7 +24,9 @@ export const extractedCandidateSchema = z.object({
   explicit_user: z.boolean(),
   turn_refs: z.array(z.string()),
   quote: z.string(),
-  check_hints: z.array(z.string())
+  check_hints: z.array(z.string()),
+  // Steps, commands, values or criteria the statement cannot hold; "" when the statement suffices.
+  detail: z.string()
 });
 export type ExtractedCandidate = z.infer<typeof extractedCandidateSchema>;
 const extractionSchema = z.object({ candidates: z.array(extractedCandidateSchema) });
@@ -51,7 +53,9 @@ export const verdictSchema = z.object({
   refined_statement: z.string(),
   /** Where guidance the agent already reads states this claim ("" when nowhere), judged apart from its truth. */
   documented_at: z.string(),
-  user_support: z.enum(["user_stated_rule", "user_task_instruction", "pasted_task_instruction", "not_user_stated", "not_applicable"])
+  user_support: z.enum(["user_stated_rule", "user_task_instruction", "pasted_task_instruction", "not_user_stated", "not_applicable"]),
+  /** Whether the claim's supplementary detail contradicts the evidence; "none" without detail. */
+  detail_check: z.enum(["consistent", "contradicted", "none"])
 });
 export type Verdict = z.infer<typeof verdictSchema>;
 const verifySchema = z.object({ results: z.array(verdictSchema) });
@@ -148,7 +152,8 @@ const extractPrompt = (projectLabel: string, index: number, total: number): stri
 - 只对本次任务成立的结论；通用常识。
 
 要求：
-- statement 一句话、原子化、可独立理解，保留适用条件、子系统和否定表述；用会话原语言。
+- statement 一句话、原子化、可独立理解，保留适用条件、子系统和否定表述；用会话原语言。statement 要点明所属的系统、仓库或工具（例如「TTEH 的 PTC 预览」「botmux 的定时任务」），不要只写「预览」「脚本」「仓库」这类单独看不出指什么的说法。
+- detail：只有当这条知识是多步流程，或照做需要具体命令、参数、路径、取值、判断标准，而一句话装不下时才填写，用简短条目列出这些内容（不超过 400 字），只写本段会话里出现过的内容，不推测；statement 已经足够时填空字符串。
 - scope：只和飞书/lark-cli/git/Codex 等通用工具有关、与本项目无关的知识填 global，其余 project。
 - turn_refs 填段内的 T 编号；quote 逐字摘自本段（不超过 120 字）。
 - check_hints：可在仓库中搜索的符号、路径、配置键。
@@ -208,6 +213,7 @@ ${repoMap}
 6. 若说法后附有「预检索」：它是本地程序对标识符的确定性搜索结果。标识符只在未合入分支出现而基准中没有时，强烈提示 branch_scoped，需用 branch-grep / show 确认；若附有「来源线索」，优先查看这些文件。
 7. evidence 每条形如 "repo@sha [等级 日期] path:line 简短引用"；reason 一句话；branch 不适用时填空字符串。每条说法最多 6 次工具调用。
 8. refined_statement：若证据支持核心内容，但原说法过度概括（把推荐做法说成必须、漏掉适用条件、范围过宽，或个别细节与证据不符），给出按证据收窄后的完整改写：保留原语言、子系统、条件和否定表述，不加入证据之外的新事实；verdict 按改写后的说法判定。说法准确无需修改，或证据不足以改写时，填空字符串。
+9. 说法附有「补充细节」时，detail_check 判断细节是否与证据矛盾：明确矛盾填 contradicted，一致或无从核对填 consistent；没有补充细节填 none。只判断，不改写细节。
 
 待验证说法（JSON；created_at 是记忆形成时间）：
 ${claims}

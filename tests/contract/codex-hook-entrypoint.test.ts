@@ -27,6 +27,9 @@ test("display omits summary IDs, preserves body ordering, stays silent without m
   const pack = "<memstore-context>policy</memstore-context>\nLegend: M=memory ref\n[M:8582 S:P A:A R:S] 截图按钮不会唤醒 worker。\n[M:7 S:G A:H R:C] 用 Bits 提 MR。";
   expect(renderHookDisplay("items", "UserPromptSubmit", pack, 30))
     .toBe("MemStore (UserPromptSubmit): 2 memories · 30 tokens\n  M:8582 项目·自动沉淀｜截图按钮不会唤醒 worker。\n  M:7 全局·手写｜用 Bits 提 MR。");
+  // A summary whose Memory has more in its full text says so.
+  expect(renderHookDisplay("items", "UserPromptSubmit", "[M:8700 S:G A:H R:C+] botmux 跨群发消息的方法摘要。", 20))
+    .toBe("MemStore (UserPromptSubmit): 1 memories · 20 tokens\n  M:8700 全局·手写·有详情｜botmux 跨群发消息的方法摘要。");
   expect(renderHookDisplay("full", "UserPromptSubmit", "", 0)).toBeUndefined();
   expect(renderHookDisplay("full", "UserPromptSubmit", "<memstore-context>legend only</memstore-context>", 10)).toBeUndefined();
   expect(adapterDisplaySchema.safeParse({ hook_display: "invalid" }).success).toBe(false);

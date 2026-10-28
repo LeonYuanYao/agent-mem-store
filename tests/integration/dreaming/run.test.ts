@@ -12,6 +12,7 @@ import { inspectDreams, renderDreamReports, runNextDreamStep, scheduleDueDreams,
 import { rememberExtract } from "../../../src/operations/remember.js";
 import { resolveProject } from "../../../src/projects/index.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
+import { readCanonicalMemory } from "../../../src/vault/index.js";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -41,7 +42,8 @@ const statements = {
   code: "TTEH 的 `setVideo` 会调用 `reloadEffect` 重新加载特效。",
   preference: "用户要求创建 MR 时使用 Bits。",
   wrong: "`setVideo` 会保留运行时状态。",
-  oneOff: "本次运行的 case 0_125 得分 0.8。"
+  oneOff: "本次运行的 case 0_125 得分 0.8。",
+  codeDetail: "1. setVideo 先调用 reloadEffect\n2. 重新加载后运行时状态被重置"
 };
 
 function fakeModel(log: string[]): DreamModel {
@@ -51,11 +53,12 @@ function fakeModel(log: string[]): DreamModel {
       expect(request.chunk).toContain("reloadEffect");
       return Promise.resolve({ usage: { tokens: 100, seconds: 1 }, candidates: [
         { statement: statements.code, claim_type: "code_state", scope: "project", explicit_user: false, turn_refs: ["T01"],
-          quote: "setVideo() { reloadEffect(); }", check_hints: ["reloadEffect"] },
+          quote: "setVideo() { reloadEffect(); }", check_hints: ["reloadEffect"], detail: statements.codeDetail },
         { statement: statements.preference, claim_type: "preference", scope: "project", explicit_user: true, turn_refs: ["T01"],
-          quote: "以后提 MR 都用 Bits", check_hints: [] },
-        { statement: statements.wrong, claim_type: "code_state", scope: "project", explicit_user: false, turn_refs: [], quote: "", check_hints: [] },
-        { statement: statements.oneOff, claim_type: "workflow_process", scope: "project", explicit_user: false, turn_refs: [], quote: "", check_hints: [] }
+          quote: "以后提 MR 都用 Bits", check_hints: [], detail: "" },
+        { statement: statements.wrong, claim_type: "code_state", scope: "project", explicit_user: false, turn_refs: [], quote: "", check_hints: [],
+          detail: "这是需要被丢弃的细节。" },
+        { statement: statements.oneOff, claim_type: "workflow_process", scope: "project", explicit_user: false, turn_refs: [], quote: "", check_hints: [], detail: "" }
       ] });
     },
     merge(request) {
@@ -72,6 +75,8 @@ function fakeModel(log: string[]): DreamModel {
       for (const claim of request.claims) {
         if (claim.text.startsWith(statements.preference)) expect(claim.user_words?.[0]).toContain("以后提 MR 都用 Bits");
         else expect(claim.user_words).toBeUndefined();
+        // Detail travels with its claim so the verifier can check it against evidence.
+        if (claim.text.startsWith(statements.code)) expect(claim.text).toContain(`补充细节：${statements.codeDetail}`);
       }
       return Promise.resolve({ usage: { tokens: 50, seconds: 1 }, results: request.claims.map((claim): Verdict => {
         const verdict = claim.text.startsWith(statements.code) ? "confirmed"
@@ -80,7 +85,8 @@ function fakeModel(log: string[]): DreamModel {
         return { id: claim.id, claim_type: "code_state", durability: claim.text.startsWith(statements.oneOff) ? "episodic" : "long_term",
           scope: claim.text.startsWith(statements.preference) ? "global" : "project", subsystem: "preview", verdict, branch: "", evidence: ["clone@abc [R1-implementation 2026-01-01] src/preview.ts:1"], reason: "test",
           refined_statement: claim.text.startsWith(statements.code) ? "TTEH 的 `setVideo` 在预览中调用 `reloadEffect` 重新加载特效。" : "",
-          documented_at: "", user_support: claim.user_words === undefined ? "not_applicable" : "user_stated_rule" };
+          documented_at: "", user_support: claim.user_words === undefined ? "not_applicable" : "user_stated_rule",
+          detail_check: claim.text.includes("补充细节") ? (claim.text.startsWith(statements.wrong) ? "contradicted" : "consistent") : "none" };
       }) });
     },
     reconcile: () => Promise.reject(new Error("unexpected reconcile")),
@@ -231,6 +237,13 @@ test("in apply mode a nightly run writes its inject tier as dreaming Memory befo
       .toEqual([{ authority: "agent_derived", scope_kind: "global", lifecycle: "active" }, { authority: "agent_derived", scope_kind: "project", lifecycle: "active" }]);
     expect(database.prepare("SELECT apply_state, COUNT(*) AS n FROM dream_items GROUP BY apply_state ORDER BY apply_state").all())
       .toEqual([{ apply_state: null, n: 2 }, { apply_state: "written", n: 2 }]);
+    // Two layers: the statement is what injection shows, the body adds the detail.
+    const written = database.prepare("SELECT apply_memory_id FROM dream_items WHERE statement = ? AND apply_state = 'written'").get(statements.code);
+    const memory = (await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(written?.apply_memory_id) }))?.memory;
+    const refined = "TTEH 的 `setVideo` 在预览中调用 `reloadEffect` 重新加载特效。";
+    expect(memory?.representations.compact.text).toBe(refined);
+    expect(memory?.body).toBe(`${refined}\n\n${statements.codeDetail}`);
+    expect(memory?.representations.standard.text).toBe(memory?.body);
   } finally {
     database.close();
   }
@@ -421,12 +434,13 @@ test("remember extract hands its selection to dreaming, which verifies and write
       expect(request.requested).toBe(true);
       const statement = request.chunk.includes("### T01 FILE") ? "奥德赛的商港先补食物再补木料。" : "奥德赛的归航资源奖励只在归航成功时发放。";
       return Promise.resolve({ usage: { tokens: 1, seconds: 1 }, candidates: [{ statement,
-        claim_type: "external_system", scope: "project", explicit_user: false, turn_refs: ["T01"], quote: "", check_hints: [] }] });
+        claim_type: "external_system", scope: "project", explicit_user: false, turn_refs: ["T01"], quote: "", check_hints: [], detail: "" }] });
     },
     merge: () => Promise.reject(new Error("unexpected merge")),
     verify: (request) => Promise.resolve({ usage: { tokens: 1, seconds: 1 }, results: request.claims.map((claim): Verdict => ({
       id: claim.id, claim_type: "external_system", durability: "long_term", scope: "project", subsystem: "Odyssey", verdict: "not_repo_verifiable",
-      branch: "", evidence: [], reason: "external game rule", refined_statement: "", documented_at: "", user_support: "not_applicable" })) }),
+      branch: "", evidence: [], reason: "external game rule", refined_statement: "", documented_at: "", user_support: "not_applicable",
+      detail_check: "none" })) }),
     defend: () => Promise.reject(new Error("unexpected defend")),
     reconcile: (request) => Promise.resolve({ usage: { tokens: 1, seconds: 1 },
       results: request.items.map((item) => ({ id: item.id, decision: "new" as const, target: "", merged_statement: "", reason: "different fact" })) })

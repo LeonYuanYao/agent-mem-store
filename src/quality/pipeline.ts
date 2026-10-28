@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { compactFitsInjection, readMemorySummaries, storeMemorySummary, summaryKey } from "./summaries.js";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 
@@ -141,7 +142,6 @@ async function activeSourceMemory(request: {
   if (
     current === undefined ||
     current.memory.lifecycle !== "active" ||
-    current.memory.authority !== "agent_derived" ||
     current.memory.revisionId !== request.item.sourceRevisionId ||
     current.contentIdentity !== request.item.sourceContentIdentity
   ) return undefined;
@@ -169,11 +169,18 @@ export async function enqueueCompactBackfill(request: {
   try {
     rows = database.prepare(
       `SELECT memory_id FROM memory_catalog
-       WHERE authority = 'agent_derived' AND lifecycle = 'active' AND memory_id > ?
+       WHERE lifecycle = 'active' AND memory_id > ?
        ORDER BY memory_id LIMIT ?`
     ).all(request.cursor ?? "", limit + 1);
   } finally {
     database.close();
+  }
+  const summaryDatabase = await openRuntimeDatabase(request.runtimeRoot);
+  let summaries: ReadonlyMap<string, unknown>;
+  try {
+    summaries = readMemorySummaries(summaryDatabase);
+  } finally {
+    summaryDatabase.close();
   }
   const selectedRows = rows.slice(0, limit);
   const memories = (await Promise.all(selectedRows.map(async (row) => {
@@ -187,8 +194,8 @@ export async function enqueueCompactBackfill(request: {
   const eligible = memories.filter((memory) => !(
     memory.representations.compact.validated &&
     memory.representations.compact.sourceRevisionId === memory.revisionId &&
-    memory.representations.compact.text.trim().length > 0
-  ));
+    compactFitsInjection(memory.representations.compact.text)
+  ) && !summaries.has(summaryKey(memory.memoryId, memory.revisionId)));
   let enqueuedCount = 0;
   if (!request.preview && eligible.length > 0) {
     const writeDatabase = await openRuntimeDatabase(request.runtimeRoot);
@@ -748,6 +755,33 @@ export async function runNextMemoryQualityStep(request: {
       if (!local.valid) {
         await markStale(request.runtimeRoot, [entry.item.itemId], now);
         staleCount += 1;
+        continue;
+      }
+      if (entry.memory.authority === "human_authored") {
+        // An Agent never revises Human-authored Memory: the summary is derived data (ADR-0155).
+        const database = await openRuntimeDatabase(request.runtimeRoot);
+        try {
+          database.exec("BEGIN IMMEDIATE");
+          storeMemorySummary(database, {
+            memoryId: entry.memory.memoryId, revisionId: entry.memory.revisionId, summary: compactText,
+            renderedTokenCount: local.renderedTokenCount,
+            generatorIdentity: `${entry.item.generatorIdentity ?? "unknown:compact-generation"}+${lunaModelIdentity}:fidelity-v3`,
+            validationReasonCode: validation.reasonCode, now
+          });
+          database.prepare(
+            `UPDATE memory_quality_items SET state = 'completed', validation_state = 'preserves',
+               validation_reason_code = ?, completed_at = ?, updated_at = ?,
+               last_error_category = NULL, last_error_diagnostic_json = NULL,
+               lease_token = NULL, lease_until = NULL WHERE item_id = ?`
+          ).run(validation.reasonCode, now, now, entry.item.itemId);
+          database.exec("COMMIT");
+        } catch (error) {
+          database.exec("ROLLBACK");
+          throw error;
+        } finally {
+          database.close();
+        }
+        publishedCount += 1;
         continue;
       }
       const revisionId = `msrev_${randomUUID()}`;

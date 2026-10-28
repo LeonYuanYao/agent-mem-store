@@ -568,7 +568,9 @@ export async function runWorkerOnce(request: {
       if (quality.state !== "empty") {
         activities.push(`memory-quality:${quality.state}`);
       }
-      if (quality.state === "empty") {
+      // Dreaming reconciles each new item against close Memories when it writes;
+      // nothing consumes background duplicate reviews then.
+      if (quality.state === "empty" && !dreaming.enabled) {
         const discovery = await advanceDuplicateDiscovery({
           runtimeRoot: request.runtimeRoot,
           now

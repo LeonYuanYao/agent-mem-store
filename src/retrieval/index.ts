@@ -8,6 +8,7 @@ import { openRuntimeDatabase } from "../runtime/database.js";
 import { readCanonicalRevision, type CanonicalMemory } from "../vault/index.js";
 import { acknowledgeUnleasedIndexPublication } from "./index-coordinator.js";
 import { basePriorityTier } from "../memories/priority.js";
+import { readMemorySummaries, summaryKey, type MemorySummary } from "../quality/summaries.js";
 
 const embeddingIdentitySchema = z.object({
   adapterVersion: z.string().min(1),
@@ -43,22 +44,29 @@ export interface ActiveRetrievalIndex {
   readonly adapterIdentity: EmbeddingAdapter["identity"];
 }
 
+/**
+ * Text for lexical search and the document embedding. The summary and its
+ * applicability come first: the embedding model reads only the first 512 tokens,
+ * and a long body would otherwise crowd out what the Memory is about (ADR-0155).
+ * Repeated texts (a body equal to its compact or standard text) appear once.
+ */
 function searchableText(memory: CanonicalMemory): string {
-  return [
-    memory.body,
+  const parts = [
     memory.representations.compact.text,
-    memory.representations.standard.text,
     memory.representations.identity?.label ?? "",
-    memory.primaryCategory,
-    ...memory.categoryTags,
-    ...memory.importanceTags,
     memory.applicability.summary,
     ...memory.applicability.conditions,
     ...memory.semanticContract.claims,
     ...memory.semanticContract.conditions,
     ...memory.semanticContract.exclusions,
-    ...memory.semanticContract.preservedNegations
-  ].filter((item) => item.length > 0).join("\n");
+    ...memory.semanticContract.preservedNegations,
+    memory.primaryCategory,
+    ...memory.categoryTags,
+    ...memory.importanceTags,
+    memory.body,
+    memory.representations.standard.text
+  ].map((item) => item.trim()).filter((item) => item.length > 0);
+  return [...new Set(parts)].join("\n");
 }
 
 function sessionOrderKey(memory: CanonicalMemory): string {
@@ -81,8 +89,27 @@ function encodeVectors(vectors: readonly (readonly number[])[]): Uint8Array {
   return new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
 }
 
-function reusableVectorKey(memoryId: string, revisionId: string, contentIdentity: string): string {
-  return `${memoryId}\u0000${revisionId}\u0000${contentIdentity}`;
+// The embedded text is part of the key: a summary or a new text layout re-embeds an unchanged revision.
+function reusableVectorKey(memoryId: string, revisionId: string, contentIdentity: string, text: string): string {
+  const textSha256 = createHash("sha256").update(text).digest("hex");
+  return `${memoryId}\u0000${revisionId}\u0000${contentIdentity}\u0000${textSha256}`;
+}
+
+/**
+ * Human-authored Memory too long to inject uses its validated summary from
+ * memory_summaries as compact, in the index only; the Memory itself is unchanged.
+ */
+function withSummary(memory: CanonicalMemory, summaries: ReadonlyMap<string, MemorySummary>): CanonicalMemory {
+  if (memory.authority !== "human_authored") return memory;
+  const compact = memory.representations.compact;
+  if (compact.validated && compact.sourceRevisionId === memory.revisionId && compact.text.trim() !== "" &&
+    tokenizer.encode(compact.text).length <= 96) return memory;
+  const summary = summaries.get(summaryKey(memory.memoryId, memory.revisionId));
+  if (summary === undefined) return memory;
+  return { ...memory, representations: { ...memory.representations, compact: {
+    text: summary.summary, validated: true, generatorIdentity: summary.generatorIdentity,
+    sourceRevisionId: memory.revisionId, renderedTokenCount: summary.renderedTokenCount
+  } } };
 }
 
 async function loadReusableVectors(request: {
@@ -108,7 +135,7 @@ async function loadReusableVectors(request: {
     ).get();
     if (active !== undefined) {
       documents = database.prepare(
-        `SELECT vector_ordinal, memory_id, revision_id, content_identity
+        `SELECT vector_ordinal, memory_id, revision_id, content_identity, searchable_text
          FROM retrieval_documents
          WHERE index_revision_id = ?
          ORDER BY vector_ordinal`
@@ -159,7 +186,8 @@ async function loadReusableVectors(request: {
       vectors.set(reusableVectorKey(
         z.string().parse(document.memory_id),
         z.string().parse(document.revision_id),
-        z.string().parse(document.content_identity)
+        z.string().parse(document.content_identity),
+        z.string().parse(document.searchable_text)
       ), vector);
     }
     return vectors;
@@ -206,7 +234,7 @@ async function buildRetrievalIndexImpl(request: {
     snapshotDatabase.close();
   }
   const sourceCatalogSha256 = catalogSha256(catalogRows);
-  const memories = (await Promise.all(catalogRows.map(async (row) => {
+  const loadedMemories = (await Promise.all(catalogRows.map(async (row) => {
     const memoryId = z.string().parse(row.memory_id);
     const memoryRef = z.number().int().positive().parse(row.memory_ref);
     const currentRevisionId = z.string().parse(row.current_revision_id);
@@ -227,6 +255,14 @@ async function buildRetrievalIndexImpl(request: {
     }
     return { ...current.memory, memoryRef };
   }))).filter((memory) => memory.validity.state !== "invalid");
+  const summaryDatabase = await openRuntimeDatabase(request.runtimeRoot);
+  let summaries: ReadonlyMap<string, MemorySummary>;
+  try {
+    summaries = readMemorySummaries(summaryDatabase);
+  } finally {
+    summaryDatabase.close();
+  }
+  const memories = loadedMemories.map((memory) => withSummary(memory, summaries));
   const texts = memories.map((memory) => searchableText(memory));
   const reusableVectors = await loadReusableVectors({
     runtimeRoot: request.runtimeRoot,
@@ -238,7 +274,8 @@ async function buildRetrievalIndexImpl(request: {
     const reusable = reusableVectors.get(reusableVectorKey(
       memory.memoryId,
       memory.revisionId,
-      memory.contentIdentity
+      memory.contentIdentity,
+      texts[ordinal] ?? ""
     ));
     if (reusable !== undefined) return reusable;
     missingOrdinals.push(ordinal);

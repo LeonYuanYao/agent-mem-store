@@ -1131,13 +1131,16 @@ export class CodexLunaAdapter {
       compactGenerationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 3,
+        promptVersion: 4,
         task: "generate_compact_memory_representations",
         rules: [
           "Create one independently understandable compact representation for each supplied Memory.",
-          "Preserve the core claim, certainty, scope, applicability, conditions, exclusions, negations, versions, thresholds, commands, paths, and state boundaries.",
+          "Name the system, repository or tool the Memory is about, so the compact is understood without its body.",
+          "Preserve the core claim, certainty, scope, applicability, and meaning-changing conditions, exclusions and negations.",
+          "A body longer than about 150 tokens gets a summary card: what the Memory covers and when it applies, plus at most two critical constraints. Leave lists, examples, dates, paths, command options and values to the body, which agents read in full on request (ADR-0155).",
+          "Keep versions, thresholds, commands and paths only when they are the point of a short Memory.",
           "Do not add facts, broaden applicability, resolve uncertainty, or turn time-bound status into a timeless fact.",
-          "Aim for at most 64 o200k-style rendered tokens per compact; 96 rendered tokens is an absolute hard limit.",
+          "Aim for at most 60 o200k-style rendered tokens per compact (about 60 Chinese characters); 96 rendered tokens is an absolute hard limit.",
           "Copy each supplied Memory identity exactly and return every supplied Memory once.",
           "Do not execute commands or request more context."
         ],
@@ -1172,8 +1175,8 @@ export class CodexLunaAdapter {
           task: "repair_overlong_compact_memory_representations",
           rules: [
             "Rewrite only the supplied overlong compact drafts.",
-            "Use terse syntax and remove redundancy while preserving the core claim, certainty, applicability, conditions, exclusions, negations, versions, thresholds, commands, paths, and state boundaries.",
-            "Aim for at most 64 o200k-style rendered tokens; 96 rendered tokens is an absolute hard limit.",
+            "Write a summary card: name the system, say what the Memory covers and when it applies, keep the core claim and meaning-changing conditions, exclusions and negations, and drop lists, examples, dates, paths, command options and values, which the body keeps (ADR-0155).",
+            "Aim for at most 60 o200k-style rendered tokens (about 60 Chinese characters); 96 rendered tokens is an absolute hard limit.",
             "Copy each supplied short Memory identity exactly and return every supplied Memory once.",
             "Do not execute commands or request more context."
           ],
@@ -1238,11 +1241,12 @@ export class CodexLunaAdapter {
       compactValidationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 2,
+        promptVersion: 3,
         task: "validate_compact_memory_fidelity",
         rules: [
           "Act only as an independent fidelity assessor; do not rewrite the proposed compact text.",
-          "Use preserves only when the compact retains the core claim, original certainty, applicability, every meaning-changing condition, exclusion, negation, version, threshold, command, path, and state boundary.",
+          "Use preserves only when the compact retains the core claim, original certainty, applicability, and every meaning-changing condition, exclusion, negation, and state boundary.",
+          "The compact is a summary: agents read the full body on request (ADR-0155). Steps, commands, paths, versions and thresholds may be left to the body when the compact neither misstates nor contradicts them; any it does state must be exact.",
           "Use lossy when meaning is omitted, broadened, contradicted, or added; use uncertain when the supplied contract is insufficient to decide.",
           "Return a bounded reasonCode, copy each supplied Memory identity exactly, and return every supplied Memory once.",
           "Do not execute commands or request more context."

@@ -23,6 +23,8 @@ import { routePath } from "./repo-map.js";
 
 // A failing run waits 5, 10, 20, 40, then at most 60 minutes between attempts, so
 // an outage of hours costs a few dozen cheap attempts rather than every chunk.
+// Upper bound for a candidate's detail; the extractor is asked for at most 400 characters.
+const detailCharacters = 1_200;
 const retryBackoffMilliseconds = 5 * 60_000;
 const maximumRetryBackoffMilliseconds = 60 * 60_000;
 // A chunk fails for good after three failures of the call itself, or after 48
@@ -446,11 +448,11 @@ async function stepRun(
           const explicit = user !== undefined && user.source !== "other";
           database.prepare(
             `INSERT INTO dream_candidates(candidate_id, run_id, session_id, chunk_index, statement, claim_type, scope,
-               explicit_user, quote_found, check_hints_json, source_paths_json, user_words_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+               explicit_user, quote_found, check_hints_json, source_paths_json, user_words_json, detail)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).run(`msdc_${randomUUID()}`, run.runId, sessionId, index, candidate.statement, candidate.claim_type, candidate.scope,
             explicit ? 1 : 0, quote.length > 0 && source.includes(quote) ? 1 : 0, json(candidate.check_hints), json(paths),
-            explicit ? json(user.words) : null);
+            explicit ? json(user.words) : null, candidate.detail.trim() === "" ? null : candidate.detail.trim().slice(0, detailCharacters));
         }
         database.prepare("UPDATE dream_chunks SET state = 'completed', candidate_count = ? WHERE run_id = ? AND session_id = ? AND chunk_index = ?")
           .run(candidates.length, run.runId, sessionId, index);
@@ -491,13 +493,16 @@ async function stepRun(
         const sessions = [...new Set(members.map((member) => String(member.session_id)))];
         database.prepare(
           `INSERT INTO dream_items(item_id, run_id, statement, claim_type, scope, member_ids_json, session_ids_json,
-             explicit_user, first_seen_at, check_hints_json, source_paths_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             explicit_user, first_seen_at, check_hints_json, source_paths_json, detail)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(`msdi_${randomUUID()}`, run.runId, statement, claimType, scope, json(members.map((member) => String(member.candidate_id))),
           json(sessions), members.some((member) => member.explicit_user === 1) ? 1 : 0,
           members.map((member) => String(member.first_event_at)).sort()[0] ?? now,
           json([...new Set([...hints, ...members.flatMap((member) => parseJson<string[]>(member.check_hints_json, []))])].slice(0, 10)),
-          json([...new Set(members.flatMap((member) => parseJson<string[]>(member.source_paths_json, [])))].slice(0, 10)));
+          json([...new Set(members.flatMap((member) => parseJson<string[]>(member.source_paths_json, [])))].slice(0, 10)),
+          // Members state one fact; the longest detail is the most complete account of it.
+          members.map((member) => typeof member.detail === "string" ? member.detail : "")
+            .sort((left, right) => right.length - left.length)[0] || null);
       };
       for (const item of items) {
         const members = item.member_ids.filter((alias) => aliases.has(alias) && !used.has(alias));
@@ -535,7 +540,7 @@ async function stepRun(
     case "verify": {
       const map = await loadMap(runtimeRoot, run.runId);
       const items = database.prepare(
-        `SELECT item_id, statement, check_hints_json, source_paths_json, presearch_json, first_seen_at, explicit_user, member_ids_json
+        `SELECT item_id, statement, check_hints_json, source_paths_json, presearch_json, first_seen_at, explicit_user, member_ids_json, detail
          FROM dream_items WHERE run_id = ? AND verdict_json IS NULL ORDER BY item_id LIMIT ?`
       ).all(run.runId, configuration.verify_batch_size * configuration.verify_parallelism);
       if (items.length === 0) {
@@ -547,7 +552,7 @@ async function stepRun(
           database.prepare("UPDATE dream_items SET verdict_json = ? WHERE item_id = ?").run(json({
             id: String(item.item_id), claim_type: "external_system", durability: "long_term", scope: "project", subsystem: "",
             verdict: "not_repo_verifiable", branch: "", evidence: [], reason: "Project has no Git repository to verify against.", refined_statement: "",
-            documented_at: "", user_support: "not_applicable"
+            documented_at: "", user_support: "not_applicable", detail_check: "none"
           } satisfies Verdict), String(item.item_id));
         }
         return `unverifiable ${String(items.length)}`;
@@ -570,7 +575,8 @@ async function stepRun(
             text: String(item.statement) +
               (hints.length > 0 ? `（检索提示：${hints.join(", ")}）` : "") +
               renderPresearch(parseJson(item.presearch_json, [])) +
-              (paths.length > 0 ? `（来源线索：这条记忆产生时 agent 读过这些文件，可优先查看：${paths.join(", ")}）` : ""),
+              (paths.length > 0 ? `（来源线索：这条记忆产生时 agent 读过这些文件，可优先查看：${paths.join(", ")}）` : "") +
+              (typeof item.detail === "string" && item.detail !== "" ? `（补充细节：${item.detail}）` : ""),
             created_at: String(item.first_seen_at).slice(0, 10),
             ...(words.length > 0 ? { user_words: words } : {})
           };
@@ -593,7 +599,7 @@ async function stepRun(
           const result = outcome.value.results.find((candidate) => candidate.id === alias);
           const verdict: Verdict = result ?? {
             id: alias, claim_type: "code_state", durability: "long_term", scope: "project", subsystem: "",
-            verdict: "inconclusive", branch: "", evidence: [], reason: "verifier_omitted", refined_statement: "", documented_at: "", user_support: "not_applicable"
+            verdict: "inconclusive", branch: "", evidence: [], reason: "verifier_omitted", refined_statement: "", documented_at: "", user_support: "not_applicable", detail_check: "none"
           };
           const refined = verdict.refined_statement.trim();
           database.prepare("UPDATE dream_items SET verdict_json = ?, refined_statement = ? WHERE item_id = ?")

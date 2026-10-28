@@ -509,8 +509,24 @@ async function configuredWorkerAdapters(
         extractEffort: configuration.extract_effort,
         verifyEffort: configuration.verify_effort
       });
+  // With dreaming, per-turn Luna work stays off, but Memories still need compact
+  // summaries: Human-authored ones longer than the injection limit are otherwise
+  // never injected (ADR-0155). The same Codex home as dreaming runs them.
+  let quality: CodexLunaAdapter | undefined;
+  if (luna === undefined) {
+    const dreaming = await readDreamingConfiguration(runtimeRoot).catch(() => undefined);
+    if (dreaming?.enabled === true) {
+      quality = new CodexLunaAdapter({
+        codexExecutable: process.env.MEMSTORE_CODEX_EXECUTABLE ?? "codex",
+        codexHome: resolve(dreaming.codex_home.replace(/^~(?=\/|$)/u, homedir())),
+        isolatedHome: resolve(runtimeRoot, "luna-home"),
+        temporaryRoot: resolve(runtimeRoot, "tmp")
+      });
+    }
+  }
   const adapters = {
     ...(luna === undefined ? {} : { luna, governance: luna, quality: luna }),
+    ...(quality === undefined ? {} : { quality }),
     dreamModel,
     ...(embedding === undefined ? {} : { embedding: embedding.adapter }),
     ...(notifierExecutable === undefined

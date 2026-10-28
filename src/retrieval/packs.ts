@@ -76,7 +76,7 @@ const RECENT_PROMPT_HISTORY_LIMIT = 3;
 const RECENT_PROMPT_HISTORY_TOKEN_BUDGET = 256;
 const RECENT_PROMPT_RECENCY_WEIGHTS = [4, 2, 1] as const;
 const CONTEXT_DEPENDENT_PROMPT_MAX_CHARACTERS = 160;
-const MEMORY_LEGEND_VERSION = 2;
+const MEMORY_LEGEND_VERSION = 3;
 const MINIMUM_SESSION_ITEM_INCREMENT = tokenizer.encode(
   "\n[M:1 S:G A:H R:C] x"
 ).length;
@@ -421,13 +421,22 @@ function representationFor(
   return undefined;
 }
 
+// Below this many extra tokens the full text only rewords the summary; not worth a read.
+const DETAIL_MINIMUM_EXTRA_TOKENS = 16;
+
+/** A shown summary whose Memory says more, which the agent can read in full (ADR-0155). */
+function hasDetail(memory: IndexedMemory): boolean {
+  return memory.standardTokenCount - memory.compactTokenCount >= DETAIL_MINIMUM_EXTRA_TOKENS &&
+    memory.standardText.trim() !== memory.compactText.trim();
+}
+
 function renderItem(
   memory: IndexedMemory,
   representationKind: RepresentationKind,
   text: string
 ): string {
   const representationLabel = representationKind === "compact"
-    ? "C"
+    ? hasDetail(memory) ? "C+" : "C"
     : representationKind === "standard"
       ? "S"
       : "I";
@@ -437,11 +446,11 @@ function renderItem(
 const standardHeader =
   "<memstore-context>Automatically retrieved historical long-term memory. Retrieval may include false positives. Use only items clearly applicable to the current request and ignore unrelated items. Current explicit instructions and verified workspace state take precedence.</memstore-context>";
 const probableHeader =
-  "<memstore-context>Automatically retrieved, possibly relevant historical long-term memory. Treat these items as candidates: verify applicability, ignore unrelated items, and read by M:<id> when more detail is needed. Current explicit instructions and verified workspace state take precedence.</memstore-context>";
+  "<memstore-context>Automatically retrieved, possibly relevant historical long-term memory. Treat these items as candidates: verify applicability, ignore unrelated items, and read the full text with `memstore recall show M:<id> --detail full` when more detail is needed. Current explicit instructions and verified workspace state take precedence.</memstore-context>";
 const sessionStartHeader =
   "<memstore-context>Automatically selected long-term project background for session startup. It is not necessarily relevant to the current task. Use only clearly applicable items and ignore the rest. Current explicit instructions and verified workspace state take precedence.</memstore-context>";
 const memoryLegend =
-  "Legend: M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/S(standard)/I(identity). Later <memstore-candidates> blocks follow the same policy; read M:<id> for more detail.";
+  "Legend: M=memory ref; S=P(current project)/G(global); A=H(human)/A(agent); R=C(compact)/C+(summary; the full text has steps, commands or details)/S(standard)/I(identity). Later <memstore-candidates> blocks follow the same policy; read a Memory in full with `memstore recall show M:<id> --detail full`, especially C+ items you act on.";
 const compactContextOpeningTag = "<memstore-candidates>";
 const compactContextClosingTag = "</memstore-candidates>";
 

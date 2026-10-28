@@ -39,6 +39,8 @@ export interface ApplyItem {
   readonly verdict: Partial<Verdict>;
   /** Scope the user asked for with `remember extract --scope`, for requested runs. */
   readonly requestedScope?: "project" | "global";
+  /** Steps, commands or values the statement cannot hold ("" when none); kept in the body. */
+  readonly detail: string;
 }
 
 export interface ApplyOutcome {
@@ -109,11 +111,23 @@ export function memoryScopeFor(item: ApplyItem): CanonicalMemory["scope"] {
   return intended ? { kind: "global" } : { kind: "project", projectId: item.projectId };
 }
 
-function representationsFor(text: string, revisionId: string): CanonicalMemory["representations"] {
+/** The statement is what injection shows; the body adds the detail an agent reads on demand (ADR-0155). */
+function bodyFor(text: string, detail: string): string {
+  return detail === "" ? text : `${text}\n\n${detail}`;
+}
+
+/** The detail a dreaming body holds after its statement, if it was written that way. */
+function detailOf(memory: CanonicalMemory): string {
+  const statement = memory.representations.compact.text;
+  return memory.body.startsWith(statement) ? memory.body.slice(statement.length).trim() : "";
+}
+
+function representationsFor(text: string, revisionId: string, body = text): CanonicalMemory["representations"] {
   const compact = assessExactCompact({ body: text, conditions: [], exclusions: [], preservedNegations: [] });
+  const standard = assessExactCompact({ body, conditions: [], exclusions: [], preservedNegations: [] });
   return {
     compact: { text: compact.text, validated: compact.validated, generatorIdentity, sourceRevisionId: revisionId, renderedTokenCount: compact.renderedTokenCount },
-    standard: { text, validated: true, generatorIdentity, sourceRevisionId: revisionId, renderedTokenCount: compact.renderedTokenCount }
+    standard: { text: standard.text, validated: true, generatorIdentity, sourceRevisionId: revisionId, renderedTokenCount: standard.renderedTokenCount }
   };
 }
 
@@ -148,13 +162,13 @@ function newMemory(item: ApplyItem, now: string): CanonicalMemory {
     createdAt: now,
     revisedAt: now,
     semanticContract: { schemaVersion: 1, claims: [item.text], conditions: [], exclusions: [], preservedNegations: [] },
-    representations: representationsFor(item.text, revisionId),
+    representations: representationsFor(item.text, revisionId, bodyFor(item.text, item.detail)),
     provenance: provenanceFor(item),
     injectionReceiptIds: [],
     relationships: [],
     contentIdentity: "0".repeat(64),
     policyVersion: dreamingPolicyVersion,
-    body: item.text
+    body: bodyFor(item.text, item.detail)
   };
 }
 
@@ -190,14 +204,16 @@ async function revise(request: {
 }
 
 function withStatement(memory: CanonicalMemory, item: ApplyItem, revisionId: string): CanonicalMemory {
+  // A revision without detail of its own keeps the detail the Memory already had.
+  const body = bodyFor(item.text, item.detail === "" ? detailOf(memory) : item.detail);
   return {
     ...memory,
     validity: { state: "valid" },
     applicability: { summary: item.verdict.subsystem ?? memory.applicability.summary, conditions: memory.applicability.conditions },
     semanticContract: { ...memory.semanticContract, claims: [item.text] },
-    representations: representationsFor(item.text, revisionId),
+    representations: representationsFor(item.text, revisionId, body),
     provenance: [...new Set([...provenanceFor(item), ...memory.provenance])].slice(0, provenanceLimit),
-    body: item.text
+    body
   };
 }
 
@@ -416,7 +432,7 @@ function errorReason(error: unknown): string {
 export function loadApplyItems(database: DatabaseSync, where: string, ...parameters: (string | null)[]): ApplyItem[] {
   return database.prepare(
     `SELECT i.item_id, i.run_id, r.project_id, i.tier, COALESCE(i.refined_statement, i.statement) AS text, i.claim_type, i.scope,
-            i.explicit_user, i.session_ids_json, i.verdict_json, i.defense_json, r.request_json
+            i.explicit_user, i.session_ids_json, i.verdict_json, i.defense_json, r.request_json, i.detail
      FROM dream_items i JOIN dream_runs r USING (run_id)
      WHERE ${where} ORDER BY r.created_at, i.item_id`
   ).all(...parameters).map((row) => {
@@ -430,6 +446,8 @@ export function loadApplyItems(database: DatabaseSync, where: string, ...paramet
       itemId: String(row.item_id), runId: String(row.run_id), projectId: String(row.project_id), tier: String(row.tier),
       text: String(row.text), claimType: String(row.claim_type), scope: row.scope === "global" ? "global" : "project",
       explicitUser: row.explicit_user === 1, sessionIds: sessions, verdict,
+      // Detail the verifier found contradicted by evidence is dropped.
+      detail: typeof row.detail === "string" && verdict.detail_check !== "contradicted" ? row.detail : "",
       ...(requestedScope === "global" || requestedScope === "project" ? { requestedScope } : {})
     };
   });
