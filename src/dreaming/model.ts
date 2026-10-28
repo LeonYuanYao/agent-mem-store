@@ -256,6 +256,10 @@ export interface CodexDreamModelOptions {
   readonly temporaryRoot: string;
   readonly extractEffort: string;
   readonly verifyEffort: string;
+  /** Extraction and verification, the high-volume calls; defaults to Luna. */
+  readonly model?: string;
+  /** Merge, reconciliation and defense, the low-volume judgments (ADR-0157); defaults to `model`. */
+  readonly judgeModel?: string;
   readonly timeoutMilliseconds?: number;
 }
 
@@ -265,8 +269,9 @@ export interface CodexDreamModelOptions {
  */
 export function codexArguments(request: {
   readonly effort: string; readonly shell: boolean; readonly work: string; readonly schemaPath: string; readonly outputPath: string;
+  readonly model?: string;
 }): string[] {
-  const args = ["exec", "--model", lunaModelIdentity, "-c", `model_reasoning_effort="${request.effort}"`, "-c", 'service_tier="default"',
+  const args = ["exec", "--model", request.model ?? lunaModelIdentity, "-c", `model_reasoning_effort="${request.effort}"`, "-c", 'service_tier="default"',
     "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--color", "never"];
   const disabled = ["apps", "plugins", "memories", "multi_agent", "image_generation", "browser_use", "in_app_browser",
     "browser_use_external", "browser_use_full_cdp_access", ...(request.shell ? [] : ["shell_tool", "unified_exec", "code_mode_host"])];
@@ -315,7 +320,7 @@ export class CodexDreamModel implements DreamModel {
     this.#options = options;
   }
 
-  async #invoke<T>(prompt: string, schema: z.ZodType<T>, effort: string, shell: boolean): Promise<{ output: T; usage: ModelUsage }> {
+  async #invoke<T>(prompt: string, schema: z.ZodType<T>, effort: string, shell: boolean, judgment = false): Promise<{ output: T; usage: ModelUsage }> {
     await mkdir(this.#options.temporaryRoot, { recursive: true, mode: 0o700 });
     await mkdir(this.#options.isolatedHome, { recursive: true, mode: 0o700 });
     const work = await mkdtemp(join(this.#options.temporaryRoot, "memstore-dream-"));
@@ -323,7 +328,8 @@ export class CodexDreamModel implements DreamModel {
       const schemaPath = join(work, "schema.json");
       const outputPath = join(work, "out.json");
       await writeFile(schemaPath, JSON.stringify(jsonSchemaOf(schema)), { mode: 0o600 });
-      const args = codexArguments({ effort, shell, work, schemaPath, outputPath });
+      const model = (judgment ? this.#options.judgeModel : undefined) ?? this.#options.model;
+      const args = codexArguments({ effort, shell, work, schemaPath, outputPath, ...(model === undefined ? {} : { model }) });
       const environment: Record<string, string> = {};
       for (const name of passthroughEnvironment) {
         const value = process.env[name];
@@ -382,7 +388,7 @@ export class CodexDreamModel implements DreamModel {
   }
 
   public async merge(request: { candidates: readonly { id: string; statement: string; claim_type: string; scope: string }[] }) {
-    const { output, usage } = await this.#invoke(mergePrompt + JSON.stringify(request.candidates), mergeSchema, this.#options.extractEffort, false);
+    const { output, usage } = await this.#invoke(mergePrompt + JSON.stringify(request.candidates), mergeSchema, this.#options.extractEffort, false, true);
     return { items: output.items, usage };
   }
 
@@ -393,13 +399,13 @@ export class CodexDreamModel implements DreamModel {
   }
 
   public async reconcile(request: { items: readonly ReconcileItem[] }) {
-    const { output, usage } = await this.#invoke(reconcilePrompt + JSON.stringify(request.items, null, 1), reconcileSchema, this.#options.extractEffort, false);
+    const { output, usage } = await this.#invoke(reconcilePrompt + JSON.stringify(request.items, null, 1), reconcileSchema, this.#options.extractEffort, false, true);
     return { results: output.results, usage };
   }
 
   public async defend(request: { tool: string; repoMap: string; claims: readonly Record<string, unknown>[] }) {
     const { output, usage } = await this.#invoke(defendPrompt(request.tool, request.repoMap, JSON.stringify(request.claims, null, 1)),
-      defendSchema, this.#options.verifyEffort, true);
+      defendSchema, this.#options.verifyEffort, true, true);
     return { results: output.results, usage };
   }
 }

@@ -512,7 +512,9 @@ async function configuredWorkerAdapters(
         isolatedHome: resolve(runtimeRoot, "luna-home"),
         temporaryRoot: resolve(runtimeRoot, "tmp"),
         extractEffort: configuration.extract_effort,
-        verifyEffort: configuration.verify_effort
+        verifyEffort: configuration.verify_effort,
+        model: configuration.model,
+        judgeModel: configuration.judge_model
       });
   // With dreaming, per-turn Luna work stays off, but Memories still need compact
   // summaries: Human-authored ones longer than the injection limit are otherwise

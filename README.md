@@ -19,8 +19,8 @@ separate. Use `memstore status` and `memstore doctor --deep` for live inspection
 - macOS 13 or newer.
 - Node.js `>=22.17.0 <23` and pnpm `>=10.25.0 <11`.
 - Xcode Command Line Tools with Swift 6 and `codesign`.
-- Codex CLI installed, authenticated, and entitled to `gpt-6-luna` and
-  `gpt-5.6-terra`. The current adapters use Luna with `medium` reasoning and
+- Codex CLI installed, authenticated, and entitled to `gpt-6-luna`,
+  `gpt-5.6-terra` and, for dreaming judgments, `gpt-6.1-terra`. The current adapters use Luna with `medium` reasoning and
   Terra with `low` reasoning, both with `service_tier="default"` (not Fast mode).
 - Obsidian with the intended Vault opened at least once.
 - `~/.codex/config.toml` created by Codex. Active setup also requires explicit
@@ -164,7 +164,7 @@ memstore dream apply --from 2026-10-16 --preview   # what apply mode would write
 memstore dream rollback [RUN_ID] [--apply]          # archive Memory dreaming wrote
 ```
 
-Model calls go through Codex (`codex_home`, default `~/.codex`; independent of the legacy Luna adapter): Luna medium for extraction, Luna high for verification (`extract_effort`, `verify_effort`, `verify_parallelism`). See the Nightly dreaming section of the [SPEC](SPEC.md) and [ADR-0147](docs/adr/0147-nightly-dreaming.md).
+Model calls go through Codex (`codex_home`, default `~/.codex`; independent of the legacy Luna adapter): Luna medium for extraction, Luna high for verification (`model`, `extract_effort`, `verify_effort`, `verify_parallelism`); merge, apply-time reconciliation and defense use `judge_model`, default `gpt-6.1-terra` ([ADR-0157](docs/adr/0157-terra-for-dreaming-judgments.md)). See the Nightly dreaming section of the [SPEC](SPEC.md) and [ADR-0147](docs/adr/0147-nightly-dreaming.md).
 
 ### Skills and MCP tools
 

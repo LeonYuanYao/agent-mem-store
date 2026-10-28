@@ -17,6 +17,10 @@ export const dreamingConfigurationSchema = z.object({
   chunk_characters: z.number().int().min(20_000).max(400_000).default(150_000),
   extract_effort: reasoningEffortSchema.default("medium"),
   verify_effort: reasoningEffortSchema.default("high"),
+  // Codex models: extraction and verification carry nearly all tokens and stay on Luna; merge,
+  // reconciliation and defense decide what joins or replaces Memory and use Terra (ADR-0157).
+  model: z.string().min(1).default("gpt-6-luna"),
+  judge_model: z.string().min(1).default("gpt-6.1-terra"),
   verify_batch_size: z.number().int().min(1).max(8).default(3),
   verify_parallelism: z.number().int().min(1).max(6).default(3),
   fresh_days: z.number().int().min(1).max(90).default(7),
