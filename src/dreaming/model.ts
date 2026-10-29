@@ -242,7 +242,7 @@ const reconcilePrompt = `下面是准备写入记忆库的新知识（N 开头�
 - refines：与某一条（target）是同一事实，但新知识更准确、更完整，或纠正了它的细节；
 - conflicts：与某一条（target）直接矛盾。
 只比较事实本身：措辞、语言、详略不同不算不同事实。同一主题下的不同事实是 new，例如一条讲 A 模式、一条讲 B 模式，一条讲排查步骤、一条讲原因，一条讲规则、一条讲规则的另一个条件：这些都要判 new，不能判 refines。
-refines 时 merged_statement 写合并后的完整陈述：target 里仍然正确的事实、条件、数值和例外全部保留，再加入新知识补充或纠正的部分；用 target 的语言；不加入两者之外的信息。其他 decision 的 merged_statement 填空字符串。
+refines 时 merged_statement 写合并后的完整陈述：target 里仍然正确的事实、条件、数值和例外全部保留，再加入新知识补充或纠正的部分；用 target 的语言；不加入两者之外的信息。merged_statement 会被直接注入，必须仍是一句话、不超过 120 个汉字（英文约 70 词）；合并后装不下时判 new，让新知识单独成条，不要为了缩短而删去 target 的事实。其他 decision 的 merged_statement 填空字符串。
 target 填对应编号，new 时填空字符串；reason 一句话。
 新知识（JSON）：
 `;

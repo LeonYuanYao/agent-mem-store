@@ -226,6 +226,24 @@ test("a refinement never overwrites facts it does not carry", async () => {
   expect(await body(byItem.get("msdi_unmerged")?.memoryId)).toBe(unmerged);
 });
 
+test("a merge too long to inject leaves the target as it was and keeps the new knowledge as its own Memory", async () => {
+  const { runtimeRoot, vaultRoot, projectId } = await fixture();
+  const base = `${texts.code}切换特效、更换视频源或修改分辨率时都会触发重新加载，加载期间预览暂停，事件队列清空，用户设置的播放速度和暂停状态需要重新应用。`;
+  await addRun(runtimeRoot, projectId, "msdream_00000010-0000-4000-8000-000000000010", "2026-10-16T19:00:00.000Z", [{ id: "msdi_long", text: base }]);
+  const request = { runtimeRoot, vaultRoot, now: "2026-10-17T00:00:00.000Z", model: fakeModel([]), timeZone: "Asia/Shanghai", preview: false };
+  const [first] = (await applyCompletedRuns({ ...request, runId: "msdream_00000010-0000-4000-8000-000000000010" })).outcomes;
+  const corrected = `${base}（更正）PTC 路径保留运行时状态。`;
+  await addRun(runtimeRoot, projectId, "msdream_00000011-0000-4000-8000-000000000011", "2026-10-18T19:00:00.000Z", [{ id: "msdi_more", text: corrected }]);
+  const [second] = (await applyCompletedRuns({ ...request, now: "2026-10-19T00:00:00.000Z", runId: "msdream_00000011-0000-4000-8000-000000000011" })).outcomes;
+  // The fake merge repeats the target, far over 96 tokens: written separately, the target untouched.
+  expect(second).toMatchObject({ state: "written" });
+  expect(second?.memoryId).not.toBe(first?.memoryId);
+  const target = (await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(first?.memoryId) }))?.memory;
+  expect(target?.body).toBe(base);
+  expect(target?.representations.compact.validated).toBe(true);
+  expect((await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(second?.memoryId) }))?.memory.body).toBe(corrected);
+});
+
 test("detail goes into the body, survives a revision without detail, and is dropped when evidence contradicts it", async () => {
   const { runtimeRoot, vaultRoot, projectId } = await fixture();
   const detail = "1. 调用 setVideo\n2. 等待新帧后再截图";

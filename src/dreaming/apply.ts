@@ -369,6 +369,13 @@ export async function applyBatch(request: {
           outcome = await writeNew(item, { itemId: item.itemId, state: "written",
             reason: `${outcome.reason}（同批已修订该记忆，单独保存）` });
           outcomes.set(item.itemId, outcome);
+        } else if (outcome.state === "revised" &&
+          !assessExactCompact({ body: mergedStatements.get(item.itemId) ?? item.text, conditions: [], exclusions: [], preservedNegations: [] }).validated) {
+          // A merged statement too long to inject would take the target out of injection;
+          // the target stays as it was and the new knowledge is kept as its own Memory.
+          outcome = await writeNew(item, { itemId: item.itemId, state: "written",
+            reason: `${outcome.reason}（合并后超出摘要长度，单独保存）` });
+          outcomes.set(item.itemId, outcome);
         } else if (outcome.state === "revised") {
           const text = mergedStatements.get(item.itemId) ?? item.text;
           await revise({ ...request, memoryId, change: (memory, revisionId) => withStatement(memory, { ...item, text }, revisionId) });

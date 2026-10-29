@@ -1,11 +1,17 @@
+import { getEncoding } from "js-tiktoken";
+
 export interface ExactCompactAssessment {
   readonly text: string;
   readonly renderedTokenCount: number;
   readonly validated: boolean;
 }
 
-function tokenEstimate(value: string): number {
-  return Math.max(1, Math.ceil(Buffer.byteLength(value, "utf8") / 4));
+let tokenizer: ReturnType<typeof getEncoding> | undefined;
+
+/** Counts tokens as the retrieval index does (o200k), so a compact valid at write time is also eligible there. */
+function renderedTokens(value: string): number {
+  tokenizer ??= getEncoding("o200k_base");
+  return Math.max(1, tokenizer.encode(value).length);
 }
 
 function normalize(value: string): string {
@@ -25,7 +31,7 @@ export function assessExactCompact(request: {
   readonly maximumTokens?: number;
 }): ExactCompactAssessment {
   const text = request.body.trim();
-  const renderedTokenCount = tokenEstimate(text);
+  const renderedTokenCount = renderedTokens(text);
   const normalizedText = normalize(text);
   const qualifiers = [
     ...request.conditions,
