@@ -176,6 +176,63 @@ test("a Human-authored Memory too long to inject gets a summary for the index wi
   } finally { database.close(); }
 });
 
+test("a compact judged lossy is rewritten from the first draft with every reason so far, at most twice", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-quality-lossy-repair-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const write = async (suffix: string) => {
+    const memoryId = `msmem_123e4567-e89b-42d3-a456-4266141740${suffix}`;
+    const body = `Effect House 的问题（TTEH 编辑器、Ask AI、PTC Agent 接口、EH 文档）都记到飞书文档「Effect House 问题记录」：${"先读总览表查重，新问题按编号续写并补充证据。".repeat(10)}`;
+    await writeCanonicalMemory({ runtimeRoot, vaultRoot, actor: "human", memory: makeCanonicalMemory({
+      memoryId, revisionId: `msrev_123e4567-e89b-42d3-a456-4266141740${suffix}`, authority: "human_authored", body, compact: body, validatedCompact: false
+    }) });
+    return memoryId;
+  };
+  const fixed = await write("81");
+  const stubborn = await write("82");
+  const vague = "Effect House 相关问题统一记到飞书「Effect House 问题记录」，先查重再续号。";
+  const scoped = "TTEH 编辑器、Ask AI、PTC Agent 接口和 EH 文档的问题统一记到飞书「Effect House 问题记录」，先查重再续号。";
+  const drafts: { memoryId: string; rejectedDraft?: unknown }[] = [];
+  const adapter: MemoryQualityAdapter = {
+    generateCompacts: (request) => {
+      drafts.push(...request.memories.map(({ memoryId, rejectedDraft }) => ({ memoryId, rejectedDraft })));
+      return Promise.resolve({ schemaVersion: 1, kind: "compact_generation", items: request.memories.map((memory) => ({
+        memoryId: memory.memoryId, compactText: memory.rejectedDraft === undefined || memory.memoryId === stubborn ? vague : scoped })) });
+    },
+    // Only the summary that names the cases it applies to preserves the Memory.
+    validateCompacts: (request) => Promise.resolve({ schemaVersion: 1, kind: "compact_validation", items: request.memories.map((memory) => (
+      memory.compactText === scoped
+        ? { memoryId: memory.memoryId, state: "preserves" as const, reasonCode: "summary_preserves_core" }
+        : { memoryId: memory.memoryId, state: "lossy" as const, reasonCode: "omits_scope" })) })
+  };
+  await enqueueCompactBackfill({ runtimeRoot, vaultRoot, requestedAt: "2026-10-29T03:00:00.000Z", preview: false });
+  const step = (now: string) => runNextMemoryQualityStep({ runtimeRoot, vaultRoot, workerId: "quality-worker", now, adapter });
+  await step("2026-10-29T03:00:01.000Z");
+  await step("2026-10-29T03:00:02.000Z");
+  // Both were judged lossy once: each is rewritten from the rejected draft and the reason.
+  await step("2026-10-29T03:00:03.000Z");
+  // The claim order among equally old items is not fixed.
+  expect(drafts.slice(2)).toHaveLength(2);
+  expect(drafts.slice(2)).toEqual(expect.arrayContaining([
+    { memoryId: fixed, rejectedDraft: { compactText: vague, reasonCode: "omits_scope" } },
+    { memoryId: stubborn, rejectedDraft: { compactText: vague, reasonCode: "omits_scope" } }
+  ]));
+  await step("2026-10-29T03:00:04.000Z");
+  // The second rewrite still starts from the first draft and carries both reasons; a third lossy judgment is final.
+  await step("2026-10-29T03:00:05.000Z");
+  expect(drafts.at(-1)).toEqual({ memoryId: stubborn, rejectedDraft: { compactText: vague, reasonCode: "omits_scope; omits_scope" } });
+  await step("2026-10-29T03:00:06.000Z");
+  await expect(step("2026-10-29T03:00:07.000Z")).resolves.toMatchObject({ state: "empty" });
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(database.prepare("SELECT summary FROM memory_summaries WHERE memory_id = ?").get(fixed)).toMatchObject({ summary: scoped });
+    expect(database.prepare("SELECT state, validation_state, validation_reason_code FROM memory_quality_items WHERE memory_id = ?").get(stubborn))
+      .toMatchObject({ state: "rejected", validation_state: "lossy", validation_reason_code: "omits_scope" });
+    expect(database.prepare("SELECT count(*) AS n FROM memory_summaries WHERE memory_id = ?").get(stubborn)).toMatchObject({ n: 0 });
+  } finally { database.close(); }
+});
+
 test("an Agent revision immediately queues its unvalidated compact when quality is enabled", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-quality-revision-"));
   roots.push(root);

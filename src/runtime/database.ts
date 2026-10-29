@@ -402,6 +402,11 @@ const migrations: readonly Migration[] = [
     version: 74,
     name: "memory_summaries",
     path: new URL("../../migrations/0074-memory-summaries.sql", import.meta.url)
+  },
+  {
+    version: 75,
+    name: "lossy_compact_repair",
+    path: new URL("../../migrations/0075-lossy-compact-repair.sql", import.meta.url)
   }
 ];
 

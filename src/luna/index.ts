@@ -1131,17 +1131,18 @@ export class CodexLunaAdapter {
       compactGenerationOutputJsonSchema,
       {
         schemaVersion: 1,
-        promptVersion: 4,
+        promptVersion: 5,
         task: "generate_compact_memory_representations",
         rules: [
           "Create one independently understandable compact representation for each supplied Memory.",
           "Name the system, repository or tool the Memory is about, so the compact is understood without its body.",
           "Preserve the core claim, certainty, scope, applicability, and meaning-changing conditions, exclusions and negations.",
-          "A body longer than about 150 tokens gets a summary card: what the Memory covers and when it applies, plus at most two critical constraints. Leave lists, examples, dates, paths, command options and values to the body, which agents read in full on request (ADR-0155).",
+          "A body longer than about 150 tokens gets a summary card: what the Memory covers and when it applies, plus at most two critical constraints. Leave lists, examples, dates, paths, command options and values to the body, which agents read in full on request (ADR-0155). A list that says which cases or systems the Memory applies to is its applicability: name those cases briefly.",
           "Keep versions, thresholds, commands and paths only when they are the point of a short Memory.",
           "A Memory with kind document is a reference document: write an index card naming the document, what it covers (its main topics or sections) and when an agent should read it. Do not restate its rules or details.",
           "Do not add facts, broaden applicability, resolve uncertainty, or turn time-bound status into a timeless fact.",
           "Aim for at most 60 o200k-style rendered tokens per compact (about 60 Chinese characters); 96 rendered tokens is an absolute hard limit.",
+          "A Memory with rejectedDraft had that compact judged lossy by an independent assessor; rejectedDraft.reasonCode lists every reason given so far, separated by semicolons. Write a new compact that keeps what the draft got right and restores what each reason names, under the same rules and token limit (ADR-0160).",
           "Copy each supplied Memory identity exactly and return every supplied Memory once.",
           "Do not execute commands or request more context."
         ],

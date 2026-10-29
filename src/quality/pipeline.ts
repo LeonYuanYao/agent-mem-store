@@ -53,6 +53,8 @@ export interface CompactGenerationMemory {
   readonly semanticContract: CanonicalMemory["semanticContract"];
   /** A reference document gets an index card rather than a summary of rules (ADR-0156). */
   readonly kind?: "document";
+  /** A draft an assessor judged lossy and its reason; the rewrite restores what the reason names (ADR-0160). */
+  readonly rejectedDraft?: { readonly compactText: string; readonly reasonCode: string };
 }
 
 export interface CompactValidationMemory extends CompactGenerationMemory {
@@ -98,7 +100,11 @@ interface QualityItem {
   readonly recoveryCount: number;
   readonly proposedCompact?: string;
   readonly generatorIdentity?: string;
+  readonly rejectedDraft?: { readonly compactText: string; readonly reasonCode: string };
 }
+
+/** Rewrites a compact judged lossy may get before the judgment is final (ADR-0160). */
+const maximumLossyRewrites = 2;
 
 function generationInput(memory: CanonicalMemory): CompactGenerationMemory {
   const document = isDocumentMemory(memory);
@@ -441,7 +447,9 @@ function parseQualityItem(row: Record<string, unknown>): QualityItem {
     epochAttemptCount: z.number().int().positive().parse(row.epoch_attempt_count),
     recoveryCount: z.number().int().nonnegative().parse(row.connection_recovery_count),
     ...(typeof row.proposed_compact === "string" ? { proposedCompact: row.proposed_compact } : {}),
-    ...(typeof row.generator_identity === "string" ? { generatorIdentity: row.generator_identity } : {})
+    ...(typeof row.generator_identity === "string" ? { generatorIdentity: row.generator_identity } : {}),
+    ...(typeof row.rejected_compact === "string" && typeof row.rejected_reason_code === "string"
+      ? { rejectedDraft: { compactText: row.rejected_compact, reasonCode: row.rejected_reason_code } } : {})
   };
 }
 
@@ -670,7 +678,10 @@ export async function runNextMemoryQualityStep(request: {
     if (current[0]?.item.state === "processing_generation") {
       const output = await request.adapter.generateCompacts({
         operationId: claimed.leaseToken,
-        memories: current.map((entry) => generationInput(entry.memory))
+        memories: current.map((entry) => ({
+          ...generationInput(entry.memory),
+          ...(entry.item.rejectedDraft === undefined ? {} : { rejectedDraft: entry.item.rejectedDraft })
+        }))
       });
       const byMemory = new Map(output.items.map((item) => [item.memoryId, item]));
       const database = await openRuntimeDatabase(request.runtimeRoot);
@@ -735,6 +746,26 @@ export async function runNextMemoryQualityStep(request: {
     let staleCount = stale.length;
     for (const entry of current) {
       const validation = byMemory.get(entry.memory.memoryId);
+      const earlierReasons = entry.item.rejectedDraft?.reasonCode.split("; ") ?? [];
+      if (validation?.state === "lossy" && earlierReasons.length < maximumLossyRewrites) {
+        // Rewrite from the first rejected draft with every reason given so far (ADR-0160):
+        // a rewrite that sees only the latest reason tends to drop what the first one kept.
+        const database = await openRuntimeDatabase(request.runtimeRoot);
+        try {
+          database.prepare(
+            `UPDATE memory_quality_items SET state = 'pending_generation',
+               rejected_compact = COALESCE(rejected_compact, proposed_compact), rejected_reason_code = ?,
+               proposed_compact = NULL, rendered_token_count = NULL, validation_state = NULL,
+               validation_reason_code = NULL, epoch_attempt_count = 0, updated_at = ?,
+               last_error_category = NULL, last_error_diagnostic_json = NULL,
+               lease_token = NULL, lease_until = NULL WHERE item_id = ?`
+          ).run([...earlierReasons, validation.reasonCode].join("; "), now, entry.item.itemId);
+        } finally {
+          database.close();
+        }
+        rejectedCount += 1;
+        continue;
+      }
       if (validation?.state !== "preserves") {
         const database = await openRuntimeDatabase(request.runtimeRoot);
         try {
