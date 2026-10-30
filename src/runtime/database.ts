@@ -412,6 +412,11 @@ const migrations: readonly Migration[] = [
     version: 76,
     name: "dream_source_turns",
     path: new URL("../../migrations/0076-dream-source-turns.sql", import.meta.url)
+  },
+  {
+    version: 77,
+    name: "recent_work_notes",
+    path: new URL("../../migrations/0077-recent-work-notes.sql", import.meta.url)
   }
 ];
 

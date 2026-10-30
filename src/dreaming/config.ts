@@ -21,6 +21,10 @@ export const dreamingConfigurationSchema = z.object({
   // reconciliation and defense decide what joins or replaces Memory and use Terra (ADR-0157).
   model: z.string().min(1).default("gpt-6-luna"),
   judge_model: z.string().min(1).default("gpt-6.1-terra"),
+  // A short-lived note of where each Session's work stands, for the next Session (ADR-0164).
+  recent_work: z.boolean().default(true),
+  recent_work_idle_minutes: z.number().int().min(5).max(24 * 60).default(20),
+  recent_work_days: z.number().int().min(1).max(30).default(7),
   verify_batch_size: z.number().int().min(1).max(8).default(3),
   verify_parallelism: z.number().int().min(1).max(6).default(3),
   fresh_days: z.number().int().min(1).max(90).default(7),

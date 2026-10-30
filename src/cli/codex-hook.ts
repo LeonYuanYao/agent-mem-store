@@ -1,4 +1,5 @@
 import { readDreamingConfiguration } from "../dreaming/config.js";
+import { firstPromptRecentWork, recentWorkDisplay } from "../dreaming/recent-work.js";
 import { resolve } from "node:path";
 import { text as consumeText } from "node:stream/consumers";
 import { z } from "zod";
@@ -121,18 +122,25 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
         timeoutMilliseconds: Math.max(1, Math.min(1500, Math.floor(hookDeadlineAt - performance.now() - 75)))
       });
       if (watchdogExpired()) return;
-      if (foreground.state === "completed") {
+      // The first prompt of a Session also gets where the Project's recent Sessions left off (ADR-0164).
+      const recent = event === "UserPromptSubmit"
+        ? await firstPromptRecentWork({ runtimeRoot: resolve(runtimeRoot), projectId: result.projectId, sessionId: activeInput.session_id,
+          now: new Date().toISOString(), configuration: await readDreamingConfiguration(resolve(runtimeRoot)) }).catch(() => undefined)
+        : undefined;
+      const retrieved = foreground.state === "completed" ? foreground.text.trim() : "";
+      if (retrieved !== "" || recent !== undefined) {
         hookStage = "display";
-        const systemMessage = renderHookDisplay(
-          await readHookDisplay(resolve(runtimeRoot)), event, foreground.text,
-          foreground.renderedTokenCount
-        );
+        const display = await readHookDisplay(resolve(runtimeRoot));
+        const systemMessage = [
+          foreground.state === "completed" ? renderHookDisplay(display, event, foreground.text, foreground.renderedTokenCount) : undefined,
+          recent !== undefined && display !== "off" ? recentWorkDisplay(recent.count) : undefined
+        ].filter((line) => line !== undefined).join("\n");
         output = {
           continue: true,
-          ...(systemMessage === undefined ? {} : { systemMessage }),
+          ...(systemMessage === "" ? {} : { systemMessage }),
           hookSpecificOutput: {
             hookEventName: event,
-            additionalContext: foreground.text
+            additionalContext: [retrieved, recent?.text ?? ""].filter((part) => part !== "").join("\n\n")
           }
         };
       }

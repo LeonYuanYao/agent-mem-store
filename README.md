@@ -172,6 +172,10 @@ memstore dream rollback [RUN_ID] [--apply]          # archive Memory dreaming wr
 memstore dream digest [--since ISO]                 # what dreaming changed, as a chat message
 ```
 
+A Session idle for 20 minutes gets a short note of where its work stands; the first
+prompt of the next Session in the Project receives the latest two
+([ADR-0164](docs/adr/0164-recent-work-notes-for-the-next-session.md); `recent_work = false` turns it off).
+
 Model calls go through Codex (`codex_home`, default `~/.codex`; independent of the legacy Luna adapter): Luna medium for extraction, Luna high for verification (`model`, `extract_effort`, `verify_effort`, `verify_parallelism`); merge, apply-time reconciliation and defense use `judge_model`, default `gpt-6.1-terra` ([ADR-0157](docs/adr/0157-terra-for-dreaming-judgments.md)). See the Nightly dreaming section of the [SPEC](SPEC.md) and [ADR-0147](docs/adr/0147-nightly-dreaming.md).
 
 ### Skills and MCP tools

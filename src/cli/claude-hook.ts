@@ -9,6 +9,7 @@ import { readClaudeHookDisplay, readSessionStartInjection, renderHookDisplay } f
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { readDreamingConfiguration } from "../dreaming/config.js";
+import { firstPromptRecentWork, recentWorkDisplay } from "../dreaming/recent-work.js";
 import { requestForegroundRetrieval, sendForegroundContextUpdate } from "../retrieval/foreground-client.js";
 
 const claudeHookEventSchema = z.enum(["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]);
@@ -37,7 +38,8 @@ export async function runClaudeHook(eventSource: unknown): Promise<void> {
   try {
     const input = z.record(z.string(), z.unknown()).parse(JSON.parse(await consumeText(process.stdin)));
     const injecting = process.env.MEMSTORE_INJECTION_MODE === "active";
-    const capturing = (await readDreamingConfiguration(root)).enabled;
+    const dreaming = await readDreamingConfiguration(root);
+    const capturing = dreaming.enabled;
     if (!capturing && !injecting) return;
     let enriched: Record<string, unknown> = { ...input, hook_event_name: event };
     if (capturing && event === "Stop" && typeof input.last_assistant_message !== "string" &&
@@ -76,11 +78,21 @@ export async function runClaudeHook(eventSource: unknown): Promise<void> {
       requestedAt: new Date().toISOString(),
       timeoutMilliseconds: Math.max(1, Math.min(1_500, Math.floor(deadlineAt - performance.now() - 75)))
     });
-    if (foreground.state !== "completed" || foreground.text.trim() === "") return;
-    const systemMessage = renderHookDisplay(await readClaudeHookDisplay(root), event, foreground.text, foreground.renderedTokenCount);
+    // The first prompt of a Session also gets where the Project's recent Sessions left off (ADR-0164).
+    const recent = event === "UserPromptSubmit"
+      ? await firstPromptRecentWork({ runtimeRoot: root, projectId: result.projectId, sessionId, now: new Date().toISOString(), configuration: dreaming })
+        .catch(() => undefined)
+      : undefined;
+    const retrieved = foreground.state === "completed" ? foreground.text.trim() : "";
+    if (retrieved === "" && recent === undefined) return;
+    const display = await readClaudeHookDisplay(root);
+    const systemMessage = [
+      foreground.state === "completed" ? renderHookDisplay(display, event, foreground.text, foreground.renderedTokenCount) : undefined,
+      recent !== undefined && display !== "off" ? recentWorkDisplay(recent.count) : undefined
+    ].filter((line) => line !== undefined).join("\n");
     process.stdout.write(`${JSON.stringify({
-      ...(systemMessage === undefined ? {} : { systemMessage }),
-      hookSpecificOutput: { hookEventName: event, additionalContext: foreground.text }
+      ...(systemMessage === "" ? {} : { systemMessage }),
+      hookSpecificOutput: { hookEventName: event, additionalContext: [retrieved, recent?.text ?? ""].filter((part) => part !== "").join("\n\n") }
     })}\n`);
   } catch (error) {
     process.stderr.write(`MemStore (claude ${event}): skipped: ${error instanceof Error ? error.name : "error"}\n`);

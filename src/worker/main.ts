@@ -81,6 +81,7 @@ import { readDreamingConfiguration, type DreamingConfiguration } from "../dreami
 import { handOffCaptureToDreaming } from "../dreaming/handoff.js";
 import type { DreamModel } from "../dreaming/model.js";
 import { runNextDreamStep, scheduleDueDreams } from "../dreaming/run.js";
+import { runNextRecentWorkStep } from "../dreaming/recent-work.js";
 
 export interface WorkerAdapters {
   readonly luna?: LunaWorkerAdapter & CandidateAssessmentAdapter & HumanConflictAssessmentAdapter;
@@ -608,6 +609,11 @@ export async function runWorkerOnce(request: {
         model: request.adapters.dreamModel(dreaming)
       });
       if (step.state !== "idle") activities.push(`dreaming:${step.stage ?? "step"}:${step.state}`);
+      else {
+        // With no dreaming work pending, note where an idle Session's work stands (ADR-0164).
+        const noted = await runNextRecentWorkStep({ runtimeRoot: request.runtimeRoot, now, configuration: dreaming, model: request.adapters.dreamModel(dreaming) });
+        if (noted.state !== "idle") activities.push(`recent-work:${noted.state}`);
+      }
     }
   }
   if (shouldRefreshReview) {
