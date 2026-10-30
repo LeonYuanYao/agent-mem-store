@@ -35,6 +35,12 @@ Automatically injected `<memstore-context>` items marked `R:C+` are summaries of
 memstore recall show M:<id> --detail full --json
 ```
 
+To see the conversation a dreaming Memory came from (the user's prompt, the reply and the tools of its source turns; older Memories show their Sessions' prompts; captured text is kept 30 days), for example to judge whether it still applies:
+
+```text
+memstore recall sources M:<id>
+```
+
 Use `show --detail full` when exact conditions, exceptions, negations, or full implementation detail matter. Page with the returned opaque cursor instead of recreating it. Relationships are exactly one hop; follow returned identities deliberately if another hop is useful.
 
 Explicit foreground retrieval has no hard total token cutoff. Heed token warnings, but continue when the expected accuracy benefit justifies more context.

@@ -443,16 +443,18 @@ async function stepRun(
         for (const candidate of candidates) {
           const quote = candidate.quote.replace(/\s+/gu, "").toLowerCase().slice(0, 50);
           const paths = [...new Set(candidate.turn_refs.flatMap((turn) => stream?.turnPaths[turn] ?? []))].slice(0, 10);
+          const sourceEvents = [...new Set(candidate.turn_refs.flatMap((turn) => stream?.turnEvents[turn] ?? []))].slice(0, 6);
           // A "user-stated" candidate whose quote comes from a reply or tool output was not said by the user.
           const user = candidate.explicit_user ? userWordsFor(text, candidate.turn_refs, candidate.quote) : undefined;
           const explicit = user !== undefined && user.source !== "other";
           database.prepare(
             `INSERT INTO dream_candidates(candidate_id, run_id, session_id, chunk_index, statement, claim_type, scope,
-               explicit_user, quote_found, check_hints_json, source_paths_json, user_words_json, detail)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+               explicit_user, quote_found, check_hints_json, source_paths_json, user_words_json, detail, source_event_ids_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).run(`msdc_${randomUUID()}`, run.runId, sessionId, index, candidate.statement, candidate.claim_type, candidate.scope,
             explicit ? 1 : 0, quote.length > 0 && source.includes(quote) ? 1 : 0, json(candidate.check_hints), json(paths),
-            explicit ? json(user.words) : null, candidate.detail.trim() === "" ? null : candidate.detail.trim().slice(0, detailCharacters));
+            explicit ? json(user.words) : null, candidate.detail.trim() === "" ? null : candidate.detail.trim().slice(0, detailCharacters),
+            sourceEvents.length === 0 ? null : json(sourceEvents));
         }
         database.prepare("UPDATE dream_chunks SET state = 'completed', candidate_count = ? WHERE run_id = ? AND session_id = ? AND chunk_index = ?")
           .run(candidates.length, run.runId, sessionId, index);

@@ -12,6 +12,7 @@ import { inspectDreams, renderDreamReports, runNextDreamStep, scheduleDueDreams,
 import { rememberExtract } from "../../../src/operations/remember.js";
 import { resolveProject } from "../../../src/projects/index.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
+import { recallSources } from "../../../src/retrieval/sources.js";
 import { readCanonicalMemory } from "../../../src/vault/index.js";
 
 const directories: string[] = [];
@@ -244,6 +245,12 @@ test("in apply mode a nightly run writes its inject tier as dreaming Memory befo
     expect(memory?.representations.compact.text).toBe(refined);
     expect(memory?.body).toBe(`${refined}\n\n${statements.codeDetail}`);
     expect(memory?.representations.standard.text).toBe(memory?.body);
+    // The conversation it came from (ADR-0162): the source turn, its reply and tools.
+    await expect(recallSources({ runtimeRoot, vaultRoot, memory: String(written?.apply_memory_id) })).resolves.toMatchObject({
+      authority: "agent_derived",
+      sessions: [{ sessionId: "apply-session", agent: "codex", state: "source_turns", turns: [{
+        user: "以后提 MR 都用 Bits。看看 setVideo 做了什么", assistant: "setVideo 会重新加载特效。", tools: ["Bash"] }] }]
+    });
   } finally {
     database.close();
   }

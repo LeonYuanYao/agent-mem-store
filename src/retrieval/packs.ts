@@ -1372,7 +1372,8 @@ async function semanticScores(request: {
 
 // Neither a bare continuation nor an agent's own notification names a task to recall for.
 function skipsPromptRetrieval(prompt: string): boolean {
-  return isContinuationOnly(prompt) || isAgentNotification(prompt);
+  // An empty prompt, such as one the user marked private (ADR-0161), names nothing either.
+  return prompt.trim() === "" || isContinuationOnly(prompt) || isAgentNotification(prompt);
 }
 
 function isContinuationOnly(prompt: string): boolean {
@@ -1938,6 +1939,7 @@ async function prepareUserPromptShadowPackCore(
     : jev?.state === "filtered" ? "jev_no_relevant_memory"
     : unfilteredWithheld ? "unfiltered_low_confidence"
     : isAgentNotification(normalizedPrompt) ? "agent_notification"
+    : normalizedPrompt.trim() === "" ? "empty_prompt"
     : isContinuationOnly(normalizedPrompt)
       ? "continuation_only"
       : epoch.tokenTotal >= hardLimit

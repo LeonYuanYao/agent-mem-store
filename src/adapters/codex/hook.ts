@@ -1,3 +1,5 @@
+import { inPrivateTurn } from "../../capture/private-turns.js";
+import { withoutPrivateText } from "../../contracts/prompt-text.js";
 import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -61,6 +63,12 @@ export type CodexHookResult =
       readonly captured: false;
       readonly state: "capture_disabled";
       readonly projectId?: string;
+    }
+  | {
+      readonly continue: true;
+      readonly captured: false;
+      /** The user marked this turn private (ADR-0161): nothing of it is captured or retrieved for. */
+      readonly state: "private_turn";
     }
   | {
       readonly continue: true;
@@ -165,7 +173,7 @@ function hookPayload(input: z.infer<typeof hookInputSchema>): unknown {
     return { assistantMessage: input.last_assistant_message ?? "" };
   }
   if (input.hook_event_name === "UserPromptSubmit") {
-    return { prompt: input.prompt ?? "" };
+    return { prompt: withoutPrivateText(input.prompt ?? "").text };
   }
   if (input.hook_event_name === "SessionStart") {
     return { source: input.source ?? "unknown" };
@@ -208,6 +216,10 @@ export async function handleCodexHook(
   try {
     const input = hookInputSchema.parse(request.input);
     eventKind = input.hook_event_name;
+    if (await inPrivateTurn({ runtimeRoot: request.runtimeRoot, sessionId: input.session_id, eventKind,
+      ...(input.prompt === undefined ? {} : { prompt: input.prompt }) })) {
+      return { continue: true, captured: false, state: "private_turn" };
+    }
     occurredAt = z.iso.datetime().parse(request.receivedAt ?? occurredAt);
     if (request.captureEnabled === false &&
         ((eventKind !== "SessionStart" && eventKind !== "UserPromptSubmit") ||

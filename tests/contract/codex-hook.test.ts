@@ -261,3 +261,28 @@ test("a busy Runtime database leaves a normal event durable in the Capture Inbox
   });
   expect(JSON.stringify(status.pipelines.capture)).not.toContain("second");
 });
+
+// ADR-0161: what the user marked private is never captured.
+test("a private span is removed from the captured prompt, and a p: turn is not captured at all", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-codex-hook-private-"));
+  temporaryDirectories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const hook = (index: number, input: Record<string, unknown>) => handleCodexHook({
+    runtimeRoot, receivedAt: `2026-10-30T04:00:0${String(index)}.000Z`,
+    input: { session_id: "session-private", cwd: root, ...input }
+  });
+  const partial = await hook(0, { hook_event_name: "UserPromptSubmit", turn_id: "t1", prompt: "把 <pv>alice 的住址</pv> 改到配置里" });
+  if (!partial.captured) throw new Error("Expected the prompt to be captured.");
+  await importCaptureInboxBatch({ runtimeRoot, importedAt: "2026-10-30T04:00:00.500Z", maximumEntries: 64, maximumMilliseconds: 25 });
+  expect((await readCapturedEvent(runtimeRoot, partial.eventId))?.payload).toEqual({ prompt: "把  改到配置里" });
+
+  // The whole turn, its tool calls and reply, stays out; the next prompt is captured again.
+  await expect(hook(1, { hook_event_name: "UserPromptSubmit", turn_id: "t2", prompt: "p：这一轮都别记" }))
+    .resolves.toMatchObject({ captured: false, state: "private_turn" });
+  await expect(hook(2, { hook_event_name: "PostToolUse", turn_id: "t2", tool_name: "shell", tool_use_id: "call-p", tool_input: { cmd: "cat ~/notes" }, tool_response: { status: "ok" } }))
+    .resolves.toMatchObject({ captured: false, state: "private_turn" });
+  await expect(hook(3, { hook_event_name: "Stop", turn_id: "t2", last_assistant_message: "你的笔记写着……" }))
+    .resolves.toMatchObject({ captured: false, state: "private_turn" });
+  await expect(hook(4, { hook_event_name: "UserPromptSubmit", turn_id: "t3", prompt: "继续正常工作" }))
+    .resolves.toMatchObject({ captured: true });
+});

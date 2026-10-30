@@ -1,4 +1,4 @@
-import { userPromptText } from "../contracts/prompt-text.js";
+import { userPromptText, withoutPrivateText } from "../contracts/prompt-text.js";
 import type { DatabaseSync } from "node:sqlite";
 
 /**
@@ -20,6 +20,8 @@ export interface SessionStream {
   readonly cwds: readonly string[];
   /** File paths touched by tool calls, keyed by turn label (T01, T02, ...). */
   readonly turnPaths: Readonly<Record<string, readonly string[]>>;
+  /** The prompt event that opens each turn, keyed by turn label. */
+  readonly turnEvents: Readonly<Record<string, string>>;
 }
 
 function decodePayload(rows: readonly Record<string, unknown>[]): unknown {
@@ -120,6 +122,7 @@ export function readSessionStream(
   const lines: string[] = request.after === undefined ? [] : ["（本会话更早的内容已在之前的 dreaming 中处理；以下只是之后的新活动。）"];
   const cwds = new Set<string>();
   const turnPaths: Record<string, string[]> = {};
+  const turnEvents: Record<string, string> = {};
   let turn = 0;
   const label = (): string => `T${String(turn).padStart(2, "0")}`;
   for (const event of events) {
@@ -127,10 +130,12 @@ export function readSessionStream(
     if (event.event_kind === "UserPromptSubmit" && payload.explicitExtraction === true && typeof payload.body === "string") {
       // A file the user asked to remember from (`remember extract --from file:`): material, not the user's words.
       turn += 1;
+      turnEvents[label()] = String(event.event_id);
       lines.push(`\n### ${label()} FILE ${text(payload.path)}\n${payload.body}`);
     } else if (event.event_kind === "UserPromptSubmit") {
       turn += 1;
-      lines.push(`\n### ${label()} USER\n${userPromptText(text(payload.prompt))}`);
+      turnEvents[label()] = String(event.event_id);
+      lines.push(`\n### ${label()} USER\n${withoutPrivateText(userPromptText(text(payload.prompt))).text}`);
     } else if (event.event_kind === "Stop") {
       lines.push(`### ${label()} ASSISTANT\n${text(payload.assistantMessage)}`);
     } else if (event.event_kind === "PostToolUse") {
@@ -161,6 +166,7 @@ export function readSessionStream(
     firstEventAt: String(events[0]?.created_at),
     lastEventAt: String(events.at(-1)?.created_at),
     cwds: [...cwds],
-    turnPaths
+    turnPaths,
+    turnEvents
   };
 }

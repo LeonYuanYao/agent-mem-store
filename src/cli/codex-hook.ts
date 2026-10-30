@@ -96,7 +96,7 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
       const sensitiveAssistant = event === "Stop" && classifyLocalSensitivity(value.last_assistant_message ?? "").state !== "normal";
       if (event === "SessionStart" || event === "SessionEnd" || sensitiveUser || sensitiveAssistant) {
         await sendForegroundContextUpdate({ runtimeRoot: resolve(runtimeRoot), sessionId: value.session_id, update: { action: "clear" } });
-      } else if (event === "Stop" && value.turn_id !== undefined && value.last_assistant_message !== undefined) {
+      } else if (event === "Stop" && result.state !== "private_turn" && value.turn_id !== undefined && value.last_assistant_message !== undefined) {
         await sendForegroundContextUpdate({ runtimeRoot: resolve(runtimeRoot), sessionId: value.session_id,
           update: { action: "assistant", turnId: value.turn_id, ...boundConversationMessage(value.last_assistant_message) } });
       }

@@ -30,7 +30,7 @@ import { validateRetrievalSnapshot } from "./snapshot.js";
 import { JevAutomaticRelevanceFilter, type AutomaticRelevanceFilter } from "./jev.js";
 import { JevConnectionWarmer } from "./jev-warm.js";
 import { ConversationCache, type ConversationView } from "./conversation-cache.js";
-import { isAgentNotification, userPromptText } from "../contracts/prompt-text.js";
+import { isAgentNotification, userPromptText, withoutPrivateText } from "../contracts/prompt-text.js";
 
 const maximumRecentPromptSessions = 128;
 const maximumStoredPromptCharacters = 16 * 1024;
@@ -301,9 +301,9 @@ export async function startForegroundRetrievalServer(request: {
   const recentPromptsBySession = new Map<string, readonly string[]>();
   const lane = createForegroundRetrievalLane<ForegroundRequest, ForegroundWireResponse>({
     execute: (receivedRequest, control) => {
-      // Retrieval, history and Jev see only what the user wrote (ADR-0154).
+      // Retrieval, history and Jev see only what the user wrote (ADR-0154), without what they marked private (ADR-0161).
       const foregroundRequest: ForegroundRequest = receivedRequest.event === "UserPromptSubmit"
-        ? { ...receivedRequest, prompt: userPromptText(receivedRequest.prompt) }
+        ? { ...receivedRequest, prompt: withoutPrivateText(userPromptText(receivedRequest.prompt)).text }
         : receivedRequest;
       const notification = foregroundRequest.event === "UserPromptSubmit" && isAgentNotification(foregroundRequest.prompt);
       const snapshot = activeSnapshot;

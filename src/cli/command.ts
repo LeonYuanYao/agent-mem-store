@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { dreamDigest } from "../dreaming/digest.js";
+import { recallSources } from "../retrieval/sources.js";
 import { fetchLarkDocument, rememberDocument } from "../operations/remember-document.js";
 import { readDreamingConfiguration, type DreamingConfiguration } from "../dreaming/config.js";
 import { CodexDreamModel, type DreamModel } from "../dreaming/model.js";
@@ -171,6 +173,7 @@ function parseCommon(arguments_: readonly string[]) {
       stdin: { type: "boolean", default: false },
       file: { type: "string" },
       from: { type: "string" },
+      since: { type: "string" },
       lark: { type: "string" },
       title: { type: "string" },
       source: { type: "string" },
@@ -473,6 +476,8 @@ async function runRepair(arguments_: readonly string[]): Promise<unknown> {
 
 function writeResult(command: string, result: unknown, json: boolean): void {
   if (json) process.stdout.write(`${JSON.stringify(successEnvelope(command, result))}\n`);
+  // The digest is a chat message: plain text unless --json.
+  else if (command === "dream.digest") process.stdout.write(`${(result as { text: string }).text}\n`);
   else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
@@ -962,6 +967,11 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       json: parsed.values.json
     };
   }
+  if (command === "dream" && parsed.positionals[1] === "digest") {
+    const configuration = await readDreamingConfiguration(location.runtimeRoot);
+    const since = parsed.values.since ?? new Date(Date.parse(now) - 24 * 3_600_000).toISOString();
+    return { command: "dream.digest", result: await dreamDigest({ ...location, since, now, timeZone: configuration.timezone }), json: parsed.values.json };
+  }
   if (command === "dream" && parsed.positionals[1] === "status") {
     return { command: "dream.status", result: { runs: await inspectDreams(location.runtimeRoot) }, json: parsed.values.json };
   }
@@ -1367,6 +1377,11 @@ async function runRecall(arguments_: readonly string[]): Promise<unknown> {
       await embedding?.dispose();
     }
   }
+  if (action === "sources") {
+    const memory = parsed.positionals[2];
+    if (memory === undefined) throw new MemStoreCommandError("memory_id_required", "recall sources requires a memory id.");
+    return recallSources({ ...location, memory });
+  }
   if (["show", "provenance", "related"].includes(action ?? "")) {
     const memoryId = parsed.positionals[2];
     if (memoryId === undefined) throw new MemStoreCommandError("memory_id_required", `recall ${action ?? "command"} requires a memory id.`);
@@ -1543,6 +1558,7 @@ Everyday use:
   memstore remember assert --scope project|global --text TEXT
   memstore remember doc --file DOC.md | --lark URL [--title TEXT] [--scope project|global]
   memstore recall search QUERY
+  memstore recall sources M:123
   memstore archive M:123 [--reason TEXT] [--apply]
   memstore restore M:123 [--apply]
   memstore purge-memory M:123 --backup PATH [--gate DIGEST --apply]

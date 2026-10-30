@@ -134,6 +134,13 @@ matches, not unapproved lifecycle Candidates.
 Automatic injection and explicit retrieval have different budgets. Use the
 managed `memstore-recall` Skill to search and read full memories when the injected
 context is insufficient; the automatic limits above are not explicit-search limits.
+`memstore recall sources M:<id>` shows the conversation a dreaming Memory came from
+([ADR-0162](docs/adr/0162-show-the-conversation-a-memory-came-from.md)).
+
+To keep text out of MemStore, wrap it in `<pv>…</pv>` (or `<private>…</private>`),
+or start the message with `p：` to keep the whole turn out. The agent still reads
+it; MemStore does not capture it, match it or send it to Jev
+([ADR-0161](docs/adr/0161-keep-text-marked-private-out-of-memstore.md)).
 
 ### Nightly dreaming (shadow mode)
 
@@ -162,6 +169,7 @@ memstore dream status
 memstore dream report [RUN_ID]   # re-render reports and the overview
 memstore dream apply --from 2026-10-16 --preview   # what apply mode would write
 memstore dream rollback [RUN_ID] [--apply]          # archive Memory dreaming wrote
+memstore dream digest [--since ISO]                 # what dreaming changed, as a chat message
 ```
 
 Model calls go through Codex (`codex_home`, default `~/.codex`; independent of the legacy Luna adapter): Luna medium for extraction, Luna high for verification (`model`, `extract_effort`, `verify_effort`, `verify_parallelism`); merge, apply-time reconciliation and defense use `judge_model`, default `gpt-6.1-terra` ([ADR-0157](docs/adr/0157-terra-for-dreaming-judgments.md)). See the Nightly dreaming section of the [SPEC](SPEC.md) and [ADR-0147](docs/adr/0147-nightly-dreaming.md).

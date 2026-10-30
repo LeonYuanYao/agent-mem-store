@@ -1,3 +1,4 @@
+import { dreamDigest } from "../../../src/dreaming/digest.js";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -242,6 +243,28 @@ test("a merge too long to inject leaves the target as it was and keeps the new k
   expect(target?.body).toBe(base);
   expect(target?.representations.compact.validated).toBe(true);
   expect((await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(second?.memoryId) }))?.memory.body).toBe(corrected);
+});
+
+test("the digest lists what a run wrote and how to undo it", async () => {
+  const { runtimeRoot, vaultRoot, projectId } = await fixture();
+  const runId = "msdream_00000012-0000-4000-8000-000000000012";
+  await addRun(runtimeRoot, projectId, runId, "2026-10-29T19:00:00.000Z", [{ id: "msdi_digest", text: texts.code }]);
+  const request = { runtimeRoot, vaultRoot, now: "2026-10-30T00:00:00.000Z", model: fakeModel([]), timeZone: "Asia/Shanghai", preview: false };
+  const [written] = (await applyCompletedRuns({ ...request, runId })).outcomes;
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare("UPDATE dream_runs SET completed_at = ? WHERE run_id = ?").run("2026-10-29T19:30:00.000Z", runId);
+  } finally {
+    database.close();
+  }
+  const ref = (await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(written?.memoryId) }))?.memory.memoryRef;
+  const digest = await dreamDigest({ runtimeRoot, vaultRoot, since: "2026-10-29T00:00:00.000Z", now: "2026-10-30T01:00:00.000Z", timeZone: "Asia/Shanghai" });
+  expect(digest.counts).toMatchObject({ written: 1, revised: 0 });
+  expect(digest.text).toContain(`- M:${String(ref)} ${texts.code}`);
+  expect(digest.text).toContain(runId);
+  // Nothing since: one line.
+  await expect(dreamDigest({ runtimeRoot, vaultRoot, since: "2026-10-30T00:00:00.000Z", now: "2026-10-31T01:00:00.000Z", timeZone: "Asia/Shanghai" }))
+    .resolves.toMatchObject({ text: "MemStore 10-31：dreaming 没有改动记忆。" });
 });
 
 test("detail goes into the body, survives a revision without detail, and is dropped when evidence contradicts it", async () => {

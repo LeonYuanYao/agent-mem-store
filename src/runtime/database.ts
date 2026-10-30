@@ -407,6 +407,11 @@ const migrations: readonly Migration[] = [
     version: 75,
     name: "lossy_compact_repair",
     path: new URL("../../migrations/0075-lossy-compact-repair.sql", import.meta.url)
+  },
+  {
+    version: 76,
+    name: "dream_source_turns",
+    path: new URL("../../migrations/0076-dream-source-turns.sql", import.meta.url)
   }
 ];
 
