@@ -17,6 +17,7 @@ Decision:
   characters, project shown when there are several), and the commands that undo one
   (`memstore archive M:<id> --apply`) or a run (`memstore dream rollback RUN_ID
   --apply`). A day without changes is one line.
-- A botmux task (`0 9 * * *`, Claude bot, model haiku, a new topic per run in the
+- A botmux task (`0 9 * * 1-5`, Claude bot, model haiku, a new topic per run in the
   user's private chat) runs the command and sends its output unchanged; on a day
-  without changes it sends nothing.
+  without changes it sends nothing. There is no weekend digest, so Monday's covers
+  the last 72 hours.
