@@ -1,7 +1,8 @@
 /**
  * Evaluates automatic injection on real prompts (ADR-0154 method):
  *   A = every candidate Jev scored since --since, with its score;
- *   B = a sample of prompts the local gate found nothing for, with the 3 nearest Memories;
+ *   B = a sample of prompts the local gate found nothing for, with the 3 nearest Memories that
+ *       already existed when the prompt was asked;
  * Codex (gpt-6.1-sol, isolated like dreaming, blind to scores) labels each pair
  * relevant / partial / irrelevant; the report compares Jev thresholds and local misses.
  *
@@ -40,6 +41,13 @@ function memoryText(path: string): string | undefined {
     const text = readFileSync(path, "utf8");
     const body = text.indexOf("\n---\n", 4);
     return (body < 0 ? text : text.slice(body + 5)).trim().slice(0, 600);
+  } catch { return undefined; }
+}
+
+/** When the Memory was first written, from its canonical frontmatter. */
+function memoryCreatedAt(path: string): string | undefined {
+  try {
+    return /^\s*created_at:\s*(\S+)\s*$/mu.exec(readFileSync(path, "utf8").split("\n---\n", 1)[0] ?? "")?.[1];
   } catch { return undefined; }
 }
 
@@ -87,7 +95,14 @@ async function buildCases(): Promise<Case[]> {
     if (entry === undefined) continue;
     const scoring = await inspectUserPromptScoring({ runtimeRoot: runtime, projectId: entry.project, prompt: entry.prompt,
       recentPrompts: entry.recent, adapter, requestedAt: new Date().toISOString(), snapshot });
+    // Only Memories that existed when the prompt was asked can be missed; later ones (often written
+    // by that night's dreaming) are judged against today's corpus otherwise and inflate the miss rate.
     const candidates = [...scoring.items].sort((left, right) => right.score - left.score || right.features.semanticLift - left.features.semanticLift)
+      .filter((item) => {
+        const catalogEntry = catalog.get(item.memoryId);
+        const createdAt = catalogEntry === undefined ? undefined : memoryCreatedAt(catalogEntry.path);
+        return createdAt !== undefined && createdAt <= entry.at;
+      })
       .slice(0, 3).flatMap((item): Candidate[] => {
         const catalogEntry = catalog.get(item.memoryId);
         const text = catalogEntry === undefined ? undefined : memoryText(catalogEntry.path);
