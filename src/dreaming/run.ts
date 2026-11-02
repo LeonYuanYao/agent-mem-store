@@ -658,7 +658,8 @@ async function stepRun(
         const { tier, reason } = tierOf({
           scope,
           catchAllProject,
-          retiredOnly: retiredEvidence(verdict?.evidence ?? [], configuration.retired.flatMap((entry) => entry.paths)),
+          // The user's own words are not about retired code, whatever evidence the verifier found.
+          retiredOnly: item.explicit_user !== 1 && retiredEvidence(verdict?.evidence ?? [], configuration.retired.flatMap((entry) => entry.paths)),
           userRequested: run.request !== undefined,
           verdict: finalVerdict,
           durability: verdict?.durability ?? "long_term",

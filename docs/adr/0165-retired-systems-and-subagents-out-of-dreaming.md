@@ -29,14 +29,23 @@ Decision:
   live one has a tool, command or interface of the same name, preferring the live
   one. Verification marks claims that only hold for a retired system `stale` (review
   tier, never injected). An item whose evidence lies only under a retired path is
-  dropped (`retired_subject`) without a model call.
+  dropped (`retired_subject`) without a model call, unless the user stated it.
 - `subagents_enabled = false` now also covers Claude Code: hook events carrying
   `agent_id` and task-notification prompts are neither captured nor retrieved for.
   The user turns subagents on explicitly.
 - The dreaming stream labels a task-notification turn `NOTIFICATION`; its text is
   material, never the user's words.
-- Classic was declared retired with paths `src/ask-ai/src/` and `src/ask-ai/scripts/`.
+- Classic was declared retired with path `src/ask-ai/src/`. `src/ask-ai/scripts/` was
+  listed at first and removed the same day: its `knowledge-gen` tooling generates
+  the shared knowledge PTC reads and is used almost daily.
   Nine Memories were archived: the five backed only by Classic code (M:8863, M:8855,
   M:8845, M:8543, M:8850) and four framed on Classic (M:8795, M:8695, M:8807,
   M:8708). Memories that hold for PTC or both stay (M:8798, M:8839, M:8533, M:8564,
   M:8630, M:8572, M:8691).
+- Older Memories were rechecked the same day. 24 active dreaming Memories drew their
+  evidence only from Classic paths; Codex (gpt-6.1-sol, read-only in the TTEH repo)
+  judged each against PTC: 9 hold in PTC, 6 behave differently there, 8 exist only
+  in Classic, 1 is unclear. Archived: the 8 whose evidence lies only under
+  `src/ask-ai/src/` and that differ or exist only in Classic (M:8841, M:8843, M:8844,
+  M:8869, M:8828, M:8831, M:8832, M:8835). Kept: those holding in PTC, the unclear
+  one, the `knowledge-gen` Memories, and M:8756, a preference the user stated.
