@@ -220,3 +220,20 @@ test("a Claude Code Session keeps the Project of its launch directory after a cd
   const tool = await readCapturedEvent(runtimeRoot, String(rows[1]?.event_id));
   expect(tool?.payload).toMatchObject({ cwd: elsewhere });
 });
+
+// ADR-0165: subagents stay out of MemStore unless `[adapters] subagents_enabled`.
+test("a subagent's tool calls and its task-notification report are not captured unless subagents are enabled", async () => {
+  const { runtimeRoot, project } = await fixture(true);
+  const common = { session_id: "claude-sub", cwd: project };
+  const subagentTool = { ...common, hook_event_name: "PostToolUse", agent_id: "agent-1", tool_name: "Read", tool_use_id: "toolu_sub",
+    tool_input: { file_path: "src/ask-ai/src/mcp-server/projectTools.ts" }, tool_response: { content: "classic" } };
+  const report = { ...common, hook_event_name: "UserPromptSubmit", prompt: "<task-notification><task-id>t1</task-id><result>Classic MCP 层的设计……</result></task-notification>" };
+  await runHook(runtimeRoot, "UserPromptSubmit", { ...common, hook_event_name: "UserPromptSubmit", prompt: "梳理一下 MCP 层" });
+  await runHook(runtimeRoot, "PostToolUse", subagentTool);
+  await runHook(runtimeRoot, "UserPromptSubmit", report);
+  expect((await capturedEvents(runtimeRoot)).map((row) => String(row.event_kind))).toEqual(["UserPromptSubmit"]);
+
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n\n[adapters]\nsubagents_enabled = true\n\n[dreaming]\nenabled = true\n");
+  await runHook(runtimeRoot, "PostToolUse", { ...subagentTool, tool_use_id: "toolu_sub2" });
+  expect((await capturedEvents(runtimeRoot)).map((row) => String(row.event_kind))).toEqual(["UserPromptSubmit", "PostToolUse"]);
+});

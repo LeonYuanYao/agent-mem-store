@@ -176,6 +176,12 @@ A Session idle for 20 minutes gets a short note of where its work stands; the fi
 prompt of the next Session in the Project receives the latest two
 ([ADR-0164](docs/adr/0164-recent-work-notes-for-the-next-session.md); `recent_work = false` turns it off).
 
+Declare a system you no longer use with `[[dreaming.retired]]` (`note`, `paths`): dreaming stops
+extracting what only it holds and drops items whose evidence lies only under its paths. Subagents
+(Codex subagent Sessions, Claude Code `agent_id` hook events and task-notification reports) are
+neither captured nor retrieved for unless `[adapters] subagents_enabled = true`
+([ADR-0165](docs/adr/0165-retired-systems-and-subagents-out-of-dreaming.md)).
+
 Model calls go through Codex (`codex_home`, default `~/.codex`; independent of the legacy Luna adapter): Luna medium for extraction, Luna high for verification (`model`, `extract_effort`, `verify_effort`, `verify_parallelism`); merge, apply-time reconciliation and defense use `judge_model`, default `gpt-6.1-terra` ([ADR-0157](docs/adr/0157-terra-for-dreaming-judgments.md)). See the Nightly dreaming section of the [SPEC](SPEC.md) and [ADR-0147](docs/adr/0147-nightly-dreaming.md).
 
 ### Skills and MCP tools

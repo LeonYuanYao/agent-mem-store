@@ -1,4 +1,4 @@
-import { userPromptText, withoutPrivateText } from "../contracts/prompt-text.js";
+import { isAgentNotification, userPromptText, withoutPrivateText } from "../contracts/prompt-text.js";
 import type { DatabaseSync } from "node:sqlite";
 
 /**
@@ -63,7 +63,7 @@ export function userWordsFor(chunk: string, turnRefs: readonly string[], quote: 
 } {
   const sections: { turn: string; user: boolean; text: string }[] = [];
   for (const line of chunk.split("\n")) {
-    const heading = /^### (T\d+) (USER|ASSISTANT)$/u.exec(line);
+    const heading = /^### (T\d+) (USER|ASSISTANT|NOTIFICATION)$/u.exec(line);
     const tool = /^\[tool (T\d+)\]/u.exec(line);
     if (heading !== null) sections.push({ turn: heading[1] ?? "", user: heading[2] === "USER", text: "" });
     else if (tool !== null) sections.push({ turn: tool[1] ?? "", user: false, text: line });
@@ -135,7 +135,9 @@ export function readSessionStream(
     } else if (event.event_kind === "UserPromptSubmit") {
       turn += 1;
       turnEvents[label()] = String(event.event_id);
-      lines.push(`\n### ${label()} USER\n${withoutPrivateText(userPromptText(text(payload.prompt))).text}`);
+      const prompt = withoutPrivateText(userPromptText(text(payload.prompt))).text;
+      // A background task's report arrives as a prompt the user did not write (ADR-0165).
+      lines.push(`\n### ${label()} ${isAgentNotification(prompt) ? "NOTIFICATION" : "USER"}\n${prompt}`);
     } else if (event.event_kind === "Stop") {
       lines.push(`### ${label()} ASSISTANT\n${text(payload.assistantMessage)}`);
     } else if (event.event_kind === "PostToolUse") {

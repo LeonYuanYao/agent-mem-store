@@ -5,7 +5,8 @@ import { z } from "zod";
 import { readLastAssistantMessage } from "../adapters/claude/transcript.js";
 import { handleCodexHook } from "../adapters/codex/hook.js";
 import { CaptureProgress, renderCaptureDiagnostic } from "../capture/deadline.js";
-import { readClaudeHookDisplay, readSessionStartInjection, renderHookDisplay } from "../configuration/hook-display.js";
+import { readClaudeHookDisplay, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
+import { isAgentNotification, userPromptText } from "../contracts/prompt-text.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { readDreamingConfiguration } from "../dreaming/config.js";
@@ -41,6 +42,10 @@ export async function runClaudeHook(eventSource: unknown): Promise<void> {
     const dreaming = await readDreamingConfiguration(root);
     const capturing = dreaming.enabled;
     if (!capturing && !injecting) return;
+    // Subagents stay out of MemStore unless the user turns them on (ADR-0165): their tool calls
+    // (Claude Code adds agent_id) and the reports they hand back as task notifications.
+    if (!await readSubagentsEnabled(root) && (typeof input.agent_id === "string" ||
+        (event === "UserPromptSubmit" && typeof input.prompt === "string" && isAgentNotification(userPromptText(input.prompt))))) return;
     let enriched: Record<string, unknown> = { ...input, hook_event_name: event };
     if (capturing && event === "Stop" && typeof input.last_assistant_message !== "string" &&
         typeof input.transcript_path === "string" && typeof input.session_id === "string") {

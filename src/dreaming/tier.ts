@@ -3,6 +3,8 @@ import type { SourceBranch } from "./branches.js";
 export type DreamTier = "inject" | "branch" | "pool" | "review" | "drop";
 
 export interface TierInput {
+  /** All evidence lies under paths of systems the user retired (ADR-0165). */
+  readonly retiredOnly?: boolean;
   readonly verdict: string;
   readonly durability: "long_term" | "episodic";
   readonly branch: string;
@@ -46,7 +48,21 @@ export function isCatchAllRoot(root: string, home: string): boolean {
  * is injected automatically; knowledge from unmerged branches stays with its
  * branch unless the baseline confirms it; everything else remains searchable.
  */
+/**
+ * Whether all of an item's evidence lies under paths of systems the user retired (ADR-0165):
+ * code that still exists verifies as true, but no longer describes what is in use.
+ */
+export function retiredEvidence(evidence: readonly string[], prefixes: readonly string[]): boolean {
+  if (evidence.length === 0 || prefixes.length === 0) return false;
+  const under = (line: string): boolean => prefixes.some((prefix) => {
+    const at = line.indexOf(prefix);
+    return at >= 0 && (at === 0 || /[\s/\]]/u.test(line[at - 1] ?? ""));
+  });
+  return evidence.every(under);
+}
+
 export function tierOf(input: TierInput): { readonly tier: DreamTier; readonly reason: string } {
+  if (input.retiredOnly === true) return { tier: "drop", reason: "retired_subject" };
   // The user's own instruction for one task may still be a preference: keep it searchable instead of dropping it.
   const userTaskInstruction = input.explicitUser && input.userSupport === "user_task_instruction";
   if (input.durability === "episodic" && !userTaskInstruction) return { tier: "drop", reason: "episodic" };

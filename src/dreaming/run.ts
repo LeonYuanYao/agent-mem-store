@@ -18,7 +18,7 @@ import { dreamsDirectoryName, overviewFileName, writeDreamOverview, writeDreamRe
 import { readSessionStream, userWordsFor } from "./stream.js";
 import { applyBatch, applyBatchSize, loadApplyItems, statementKey, type ApplyItem, type ApplyOutcome } from "./apply.js";
 import { applyMemoryLifecycleChange } from "../operations/memory-lifecycle.js";
-import { isCatchAllRoot, relevantRepositories, tierOf } from "./tier.js";
+import { isCatchAllRoot, relevantRepositories, tierOf, retiredEvidence } from "./tier.js";
 import { routePath } from "./repo-map.js";
 
 // A failing run waits 5, 10, 20, 40, then at most 60 minutes between attempts, so
@@ -437,7 +437,8 @@ async function stepRun(
       try {
         const { candidates, usage } = await request.model.extract({
           projectLabel: roots.join(", ") || run.projectId, chunk: text, index, total: stream?.chunks.length ?? index,
-          ...(run.request === undefined ? {} : { requested: true })
+          ...(run.request === undefined ? {} : { requested: true }),
+          ...(configuration.retired.length === 0 ? {} : { retired: configuration.retired.map((entry) => entry.note) })
         });
         const source = text.replace(/\s+/gu, "").toLowerCase();
         for (const candidate of candidates) {
@@ -583,7 +584,8 @@ async function stepRun(
             ...(words.length > 0 ? { user_words: words } : {})
           };
         });
-        const { results, usage } = await request.model.verify({ tool, repoMap, claims });
+        const { results, usage } = await request.model.verify({ tool, repoMap, claims,
+          ...(configuration.retired.length === 0 ? {} : { retired: configuration.retired.map((entry) => entry.note) }) });
         return { aliases, results, usage };
       }));
       let verified = 0;
@@ -656,6 +658,7 @@ async function stepRun(
         const { tier, reason } = tierOf({
           scope,
           catchAllProject,
+          retiredOnly: retiredEvidence(verdict?.evidence ?? [], configuration.retired.flatMap((entry) => entry.paths)),
           userRequested: run.request !== undefined,
           verdict: finalVerdict,
           durability: verdict?.durability ?? "long_term",

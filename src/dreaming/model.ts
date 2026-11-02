@@ -116,11 +116,13 @@ export interface DreamModel {
     readonly projectLabel: string; readonly chunk: string; readonly index: number; readonly total: number;
     /** The user asked to remember this material (`remember extract`). */
     readonly requested?: boolean;
+    /** Notes on systems the user retired (ADR-0165). */
+    readonly retired?: readonly string[];
   }):
     Promise<{ readonly candidates: ExtractedCandidate[]; readonly usage: ModelUsage }>;
   merge(request: { readonly candidates: readonly { id: string; statement: string; claim_type: string; scope: string }[] }):
     Promise<{ readonly items: z.infer<typeof mergedItemSchema>[]; readonly usage: ModelUsage }>;
-  verify(request: { readonly tool: string; readonly repoMap: string; readonly claims: readonly VerifyClaim[] }):
+  verify(request: { readonly tool: string; readonly repoMap: string; readonly claims: readonly VerifyClaim[]; readonly retired?: readonly string[] }):
     Promise<{ readonly results: Verdict[]; readonly usage: ModelUsage }>;
   defend(request: { readonly tool: string; readonly repoMap: string; readonly claims: readonly Record<string, unknown>[] }):
     Promise<{ readonly results: Defense[]; readonly usage: ModelUsage }>;
@@ -143,9 +145,13 @@ export interface ReconcileItem {
 const requestedPreface = `用户明确要求把下面这段内容存为长期记忆（memstore remember extract）。提炼其中所有长期有用的知识：身份与别名、文件和资源的位置、约定、规则和用户的决定，即使它们写成任务说明的样子也要保留；仍然不要提炼凭证、密钥、token 的具体值和只对这一次成立的状态。
 `;
 
-const extractPrompt = (projectLabel: string, index: number, total: number): string => `你是记忆提炼器。下面是 coding agent 会话的一段（第 ${String(index)}/${String(total)} 段），项目：${projectLabel}。
-内容包括用户输入、助手回复和工具调用结果。提炼「在未来新的、任务未知的会话里仍然有用」的知识；工具结果中读到的仓库文档、代码、命令输出同样可以作为来源，但只提炼稳定有用的部分。
+const retiredLines = (retired: readonly string[] | undefined, instruction: string): string =>
+  retired === undefined || retired.length === 0 ? "" : `${instruction}\n${retired.map((note) => `- ${note}`).join("\n")}\n`;
 
+const extractPrompt = (projectLabel: string, index: number, total: number, retired?: readonly string[]): string => `你是记忆提炼器。下面是 coding agent 会话的一段（第 ${String(index)}/${String(total)} 段），项目：${projectLabel}。
+内容包括用户输入、助手回复和工具调用结果。提炼「在未来新的、任务未知的会话里仍然有用」的知识；工具结果中读到的仓库文档、代码、命令输出同样可以作为来源，但只提炼稳定有用的部分。
+「### Txx NOTIFICATION」是后台子任务交回的结果，不是用户说的话：其中的内容可以作为材料，但 explicit_user 不能来自它。
+${retiredLines(retired, "下列系统已停用：不要提炼只适用于它们的知识；在用系统里有同名的工具、命令或接口时，statement 写明是哪一套，并以在用系统为准。")}
 要提炼：
 - 具体的接口/工具/引擎行为、约束、坑（例如某 API 的副作用、参数要求、失败模式）；
 - 用户明确表达的规则、偏好、决策（explicit_user=true）；
@@ -396,9 +402,9 @@ export class CodexDreamModel implements DreamModel {
     }
   }
 
-  public async extract(request: { projectLabel: string; chunk: string; index: number; total: number; requested?: boolean }) {
+  public async extract(request: { projectLabel: string; chunk: string; index: number; total: number; requested?: boolean; retired?: readonly string[] }) {
     const { output, usage } = await this.#invoke((request.requested === true ? requestedPreface : "") +
-      extractPrompt(request.projectLabel, request.index, request.total) + request.chunk,
+      extractPrompt(request.projectLabel, request.index, request.total, request.retired) + request.chunk,
       extractionSchema, this.#options.extractEffort, false);
     return { candidates: output.candidates, usage };
   }
@@ -408,8 +414,9 @@ export class CodexDreamModel implements DreamModel {
     return { items: output.items, usage };
   }
 
-  public async verify(request: { tool: string; repoMap: string; claims: readonly VerifyClaim[] }) {
-    const { output, usage } = await this.#invoke(verifyPrompt(request.tool, request.repoMap, JSON.stringify(request.claims, null, 1)),
+  public async verify(request: { tool: string; repoMap: string; claims: readonly VerifyClaim[]; retired?: readonly string[] }) {
+    const { output, usage } = await this.#invoke(verifyPrompt(request.tool, request.repoMap, JSON.stringify(request.claims, null, 1)) +
+      retiredLines(request.retired, "\n补充：下列系统已停用。只适用于它们的说法即使代码里仍然存在，verdict 也填 stale，并在 reason 里写明属于已停用的系统："),
       verifySchema, this.#options.verifyEffort, true);
     return { results: output.results, usage };
   }

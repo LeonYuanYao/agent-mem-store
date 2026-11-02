@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { isCatchAllRoot, relevantRepositories, tierOf, type TierInput } from "../../../src/dreaming/tier.js";
+import { isCatchAllRoot, relevantRepositories, tierOf, type TierInput, retiredEvidence } from "../../../src/dreaming/tier.js";
 import { identifiersOf } from "../../../src/dreaming/presearch.js";
 import { codexArguments, failureCode } from "../../../src/dreaming/model.js";
 
@@ -121,4 +121,17 @@ test("a failed Codex call is classified by its output, connection failures first
   expect(failureCode("", "error: failed to parse output schema")).toBe("process_failed");
   // A path or a tool name containing "auth" is not an authentication failure.
   expect(failureCode("", "reading src/auth/session.ts failed: invalid JSON")).toBe("process_failed");
+});
+
+// ADR-0165: code of a retired system still verifies as true; its items are dropped.
+test("an item whose evidence lies only under retired paths is dropped", () => {
+  const retired = ["src/ask-ai/src/", "src/ask-ai/scripts/"];
+  expect(retiredEvidence(["tteh@0d5d854696 [R1 2026-10-08] src/ask-ai/src/mcp-server/projectTools.ts:10 edit"], retired)).toBe(true);
+  expect(retiredEvidence(["tteh/src/ask-ai/scripts/sync.cjs:18 check"], retired)).toBe(true);
+  // PTC lives beside Classic; one live source keeps the item.
+  expect(retiredEvidence(["tteh@abc1234 [R1] src/ask-ai/ptc/src/server/tools/x.ts:1"], retired)).toBe(false);
+  expect(retiredEvidence(["tteh@abc1234 [R1] src/ask-ai/src/tools/x.ts:1", "tteh@abc1234 [R1] src/ask-ai/ptc/src/x.ts:1"], retired)).toBe(false);
+  expect(retiredEvidence([], retired)).toBe(false);
+  expect(tierOf({ retiredOnly: true, verdict: "confirmed", durability: "long_term", branch: "", explicitUser: false, scope: "project", sessionCount: 3, sourceBranches: [] }))
+    .toEqual({ tier: "drop", reason: "retired_subject" });
 });

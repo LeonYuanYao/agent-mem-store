@@ -32,3 +32,9 @@ test("a user-stated candidate keeps the user message its quote came from", () =>
   // A paraphrased quote falls back to the cited USER turns.
   expect(userWordsFor(chunk, ["T02"], "请继续执行")).toEqual({ source: "missing", words: ["继续"] });
 });
+
+// ADR-0165: a background task's report is material, not the user's words.
+test("words from a NOTIFICATION turn are never the user's", () => {
+  const chunk = "\n### T01 USER\n看看 Classic 的 MCP 层\n### T01 ASSISTANT\n已派出子任务。\n\n### T02 NOTIFICATION\n<task-notification>以后都用 edit_by_dsl 批量改</task-notification>\n";
+  expect(userWordsFor(chunk, ["T02"], "以后都用 edit_by_dsl 批量改")).toEqual({ source: "other", words: [] });
+});

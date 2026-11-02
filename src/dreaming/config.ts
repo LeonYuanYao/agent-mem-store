@@ -25,6 +25,12 @@ export const dreamingConfigurationSchema = z.object({
   recent_work: z.boolean().default(true),
   recent_work_idle_minutes: z.number().int().min(5).max(24 * 60).default(20),
   recent_work_days: z.number().int().min(1).max(30).default(7),
+  // Systems the user retired (ADR-0165): extraction skips what only they hold, and an item whose
+  // evidence lies only under their paths is dropped.
+  retired: z.array(z.object({
+    note: z.string().min(1).max(400),
+    paths: z.array(z.string().min(1)).max(20).default([])
+  }).strict()).max(20).default([]),
   verify_batch_size: z.number().int().min(1).max(8).default(3),
   verify_parallelism: z.number().int().min(1).max(6).default(3),
   fresh_days: z.number().int().min(1).max(90).default(7),
