@@ -90,11 +90,22 @@ test("when Jev is enabled but gives no judgment, only near-certain items are inj
   const unconfigured = await ask(location, "jev-unconfigured", jevFallback("configuration_unavailable"));
   expect(unconfigured.items.map(item => item.memoryId)).toEqual([target.memoryId, probable.memoryId]);
 
-  const judged = await ask(location, "jev-filtered", { filter: request => Promise.resolve({
-    telemetry: { state: "filtered", model: "jev-1.13.0", threshold: 0.5, elapsedMs: 1 },
-    scores: request.items.map(item => ({ memoryId: item.memoryId, score: 0.9 }))
-  }) });
+  const judgedIds: string[][] = [];
+  const judge = (score: (memoryId: string) => number): AutomaticRelevanceFilter => ({ filter: request => {
+    judgedIds.push(request.items.map(item => item.memoryId));
+    return Promise.resolve({ telemetry: { state: "filtered", model: "jev-1.13.0", threshold: 0.5, elapsedMs: 1 },
+      scores: request.items.map(item => ({ memoryId: item.memoryId, score: score(item.memoryId) })) });
+  } });
+  const noiseIds = new Set(noise.map(memory => memory.memoryId));
+  const judged = await ask(location, "jev-filtered", judge(id => noiseIds.has(id) ? 0.2 : 0.9));
   expect(judged.items.map(item => item.memoryId)).toEqual([target.memoryId, probable.memoryId]);
+  // ADR-0168: weak candidates reach Jev too, and need a higher score to be rescued.
+  expect(judgedIds[0]?.some(id => noiseIds.has(id))).toBe(true);
+  const rescuedId = judgedIds[0]?.find(id => noiseIds.has(id)) ?? "";
+  const rescued = await ask(location, "jev-rescue", judge(id => id === rescuedId ? 0.6 : noiseIds.has(id) ? 0.2 : 0.9));
+  expect(rescued.items.map(item => item.memoryId)).toEqual([target.memoryId, probable.memoryId, rescuedId]);
+  const notRescued = await ask(location, "jev-no-rescue", judge(id => id === rescuedId ? 0.52 : noiseIds.has(id) ? 0.2 : 0.9));
+  expect(notRescued.items.map(item => item.memoryId)).toEqual([target.memoryId, probable.memoryId]);
 });
 
 test("nothing standing out under a Jev failure leaves the pack empty with its reason", async () => {

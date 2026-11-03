@@ -35,6 +35,9 @@ const PROMPT_HARD_LIMIT = 1024;
 const JEV_DETAIL_MAXIMUM_TOKENS = 300;
 const PROMPT_ITEM_LIMIT = 6;
 const PROBABLE_ITEM_LIMIT = 2;
+// Weak candidates that Jev may rescue (ADR-0168): a higher score and at most two per prompt.
+const JEV_WEAK_MINIMUM_SCORE = 0.55;
+const JEV_WEAK_ITEM_LIMIT = 2;
 const SESSION_BUCKET_PAGE_SIZE = 16;
 const SESSION_SNAPSHOT_CHECKPOINT_INTERVAL = 16;
 const RECEIPT_OMISSION_DETAIL_LIMIT = 128;
@@ -1867,6 +1870,32 @@ async function prepareUserPromptShadowPackCore(
       }
     }
   }
+  // The local gate called most of the relevant Memory the weekly audit found weak (ADR-0168).
+  // With Jev to judge them, the nearest weak candidates fill its remaining slots; without a Jev
+  // judgment they are removed again below.
+  const weakForJev = new Set<string>();
+  if (request.relevanceFilter !== undefined && !postSoft && !skipsPromptRetrieval(normalizedPrompt)) {
+    const weak = scored.filter((item) => item.band === "weak" &&
+      !epoch.injectedRevisions.has(`${item.memory.memoryId}:${item.memory.revisionId}`))
+      .sort((left, right) => right.rankingSimilarity - left.rankingSimilarity);
+    for (const item of weak) {
+      if (selected.length >= PROMPT_ITEM_LIMIT) break;
+      const tier = tierFor(item.memory, request.projectId);
+      const representation = representationFor(item.memory, tier, false);
+      if (representation?.kind !== "compact") continue;
+      const text = renderItem(item.memory, representation.kind, representation.text);
+      const candidate: ShadowPackItem = {
+        memoryId: item.memory.memoryId, memoryRef: item.memory.memoryRef, revisionId: item.memory.revisionId,
+        scope: item.memory.scope, authority: item.memory.authority, representationKind: representation.kind,
+        relevanceBand: "weak", priorityTier: tier, score: item.score, reasons: [...item.reasons, "jev_weak_candidate"],
+        text, renderedTokenCount: tokenizer.encode(text).length
+      };
+      const trial = renderPack([...selected, candidate], "relevant", includeMemoryLegend);
+      if (trial.renderedTokenCount > PROMPT_HARD_LIMIT || epoch.tokenTotal + trial.renderedTokenCount > hardLimit) continue;
+      selected.push(candidate);
+      weakForJev.add(candidate.memoryId);
+    }
+  }
   let jev: JevTelemetry | undefined;
   const jevScores = new Map<string, number>();
   if (request.relevanceFilter !== undefined && selected.length > 0) {
@@ -1893,13 +1922,20 @@ async function prepareUserPromptShadowPackCore(
     jev = judgment.telemetry;
     if (judgment.scores !== undefined && jev.state === "filtered") {
       for (const item of judgment.scores) jevScores.set(item.memoryId, item.score);
+      const weakKept = [...weakForJev].filter(id => (jevScores.get(id) ?? 0) >= Math.max(judgment.telemetry.threshold, JEV_WEAK_MINIMUM_SCORE))
+        .sort((left, right) => (jevScores.get(right) ?? 0) - (jevScores.get(left) ?? 0)).slice(0, JEV_WEAK_ITEM_LIMIT);
       const retained = selected.filter(item => {
-        const keep = (jevScores.get(item.memoryId) ?? 0) >= judgment.telemetry.threshold;
+        const keep = weakForJev.has(item.memoryId) ? weakKept.includes(item.memoryId)
+          : (jevScores.get(item.memoryId) ?? 0) >= judgment.telemetry.threshold;
         if (!keep) promptOmissionReasons.set(item.memoryId, "jev_below_threshold");
         return keep;
       }).map(item => ({ ...item, reasons: [...item.reasons, `jev_score:${String(jevScores.get(item.memoryId))}`] }));
       selected.splice(0, selected.length, ...retained);
     }
+  }
+  // Weak candidates enter the pack only through a Jev judgment.
+  if (weakForJev.size > 0 && jev?.state !== "filtered") {
+    selected.splice(0, selected.length, ...selected.filter((item) => !weakForJev.has(item.memoryId)));
   }
   // Local evidence alone admits mostly noise. When Jev is enabled but gave no
   // judgment (timeout, network, cooldown, sensitive input), only near-certain
@@ -1920,7 +1956,7 @@ async function prepareUserPromptShadowPackCore(
   }
   const rendered = renderPack(
     selected,
-    selected.length > 0 && selected.every((item) => item.relevanceBand === "probable")
+    selected.length > 0 && selected.every((item) => item.relevanceBand === "probable" || item.relevanceBand === "weak")
       ? "probable"
       : "relevant",
     includeMemoryLegend
@@ -1935,7 +1971,7 @@ async function prepareUserPromptShadowPackCore(
       ? [...item.reasons, `jev_score:${String(jevScores.get(item.memory.memoryId))}`]
       : item.reasons,
     omissionReason: item.band === "weak"
-      ? "weak_relevance"
+      ? promptOmissionReasons.get(item.memory.memoryId) ?? "weak_relevance"
       : epoch.injectedRevisions.has(`${item.memory.memoryId}:${item.memory.revisionId}`)
         ? "already_present"
         : postSoft && !(item.score >= 5 && item.primaryAnchor &&
