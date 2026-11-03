@@ -55,7 +55,8 @@ export interface AutomaticRelevanceRequest {
   readonly prompt: string;
   readonly recentPrompts: readonly string[];
   readonly conversation?: ConversationView;
-  readonly items: readonly { readonly memoryId: string; readonly text: string }[];
+  /** `detailText`, the Memory's fuller text, is used when it fits beside the conversation context (ADR-0167). */
+  readonly items: readonly { readonly memoryId: string; readonly text: string; readonly detailText?: string }[];
   readonly deadlineAt: number;
   readonly signal?: AbortSignal;
 }
@@ -71,6 +72,9 @@ export interface AutomaticRelevanceFilter {
 }
 
 export type JevWarmOutcome = "disabled" | "direct" | "recent" | "busy" | "backoff" | "warmed" | "failed";
+
+/** The conversation context a request keeps before memory text is shortened (ADR-0167). */
+const minimumHistoryTokens = 768;
 
 const responseSchema = z.object({
   model: z.literal(jevModel),
@@ -186,18 +190,31 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
       };
       // Inspect raw history before selection so clipping cannot conceal sensitive input.
       if ([request.prompt, ...request.recentPrompts, ...conversation.messages.map(message => message.text),
-        ...request.items.map(item => item.text)].some(text => classifyLocalSensitivity(text).state !== "normal")) {
+        ...request.items.flatMap(item => [item.text, item.detailText ?? ""])].some(text => classifyLocalSensitivity(text).state !== "normal")) {
         return result("fallback", "sensitive_input");
       }
-      const aliases = request.items.map((item, index) => ({ alias: `c${String(index + 1)}`, item }));
+      // Fuller memory text first; the longest falls back to its summary until the conversation
+      // keeps at least `minimumHistoryTokens` of the 4,096-token request (ADR-0167).
+      const memoryTexts = request.items.map(item => item.detailText ?? item.text);
+      const aliases = request.items.map((item, index) => ({ alias: `c${String(index + 1)}`, item, index }));
       const serialize = (context: readonly string[], truncated: boolean): string => JSON.stringify({
         model: jevModel,
         state: { user_request: request.prompt, recent_user_context: context,
           history_status: conversation.status, history_truncated: truncated },
-        questions: Object.fromEntries(aliases.map(({ alias, item }) => [alias, {
-          type: "noul", instructions: { memory: item.text, question }, criteria
+        questions: Object.fromEntries(aliases.map(({ alias, index }) => [alias, {
+          type: "noul", instructions: { memory: memoryTexts[index], question }, criteria
         }]))
       });
+      const reserved = conversation.messages.length > 0 ? minimumHistoryTokens : 0;
+      for (;;) {
+        // Bytes first: tokenizing an oversized request is slow, and the byte limit alone decides it.
+        const draft = serialize([], conversation.messages.length > 0);
+        if (Buffer.byteLength(draft) <= maximumRequestBytes && contextTokenCount(draft) <= 4096 - reserved - 16) break;
+        const longest = memoryTexts.map((text, index) => ({ index, extra: text.length - (request.items[index]?.text.length ?? 0) }))
+          .filter(entry => entry.extra > 0).sort((left, right) => right.extra - left.extra)[0];
+        if (longest === undefined) break;
+        memoryTexts[longest.index] = request.items[longest.index]?.text ?? "";
+      }
       const base = serialize([], conversation.messages.length > 0);
       if (Buffer.byteLength(base) > maximumRequestBytes) return result("fallback", "input_limit");
       const baseTokens = contextTokenCount(base);

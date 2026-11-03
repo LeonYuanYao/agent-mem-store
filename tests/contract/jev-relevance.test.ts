@@ -394,3 +394,23 @@ test("warming waits while a Jev request is in flight", async () => {
   expect((await pending).telemetry.state).toBe("filtered");
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
+
+// ADR-0167: Jev reads a Memory's fuller text when it fits beside the conversation context.
+test("fuller memory text is sent when it fits and falls back to the compact when the conversation needs the room", async () => {
+  const bodies: string[] = [];
+  const fetcher = vi.fn<typeof fetch>((_url, init) => { bodies.push(typeof init?.body === "string" ? init.body : ""); return Promise.resolve(response()); });
+  const judge = filter(fetcher);
+  const items = [{ memoryId: "memory-a", text: "WAL compact", detailText: "WAL detail: checkpoint after each batch" },
+    { memoryId: "memory-b", text: "busy compact" }];
+  await judge.filter({ ...input(), items });
+  expect(bodies[0]).toContain("WAL detail: checkpoint after each batch");
+  expect(bodies[0]).toContain("busy compact");
+  // A long detail that would squeeze a present conversation below its reserve is replaced by the compact.
+  const long = Array.from({ length: 3000 }, (_, index) => `step${String(index)}`).join(" ");
+  await judge.filter({ ...input(), items: [{ ...items[0], detailText: long } as typeof items[0], items[1] as typeof items[1]],
+    conversation: { status: "available", messages: [{ role: "user", text: "我们在调 SQLite 的 WAL", truncated: false },
+      { role: "assistant", text: "建议每批写入后 checkpoint", truncated: false }] } });
+  expect(bodies[1]).not.toContain("step2999");
+  expect(bodies[1]).toContain("WAL compact");
+  expect(bodies[1]).toContain("每批写入后 checkpoint");
+});

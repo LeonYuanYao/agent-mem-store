@@ -91,7 +91,8 @@ const contextUpdateBase = z.object({
 });
 export const foregroundContextUpdateSchema = z.discriminatedUnion("action", [
   contextUpdateBase.extend({ action: z.literal("clear") }),
-  contextUpdateBase.extend({ action: z.literal("assistant"), turnId: z.string().min(1),
+  // Claude Code turns carry no turn id; its reply attaches to the Session's latest turn (ADR-0167).
+  contextUpdateBase.extend({ action: z.literal("assistant"), turnId: z.string().min(1).optional(),
     text: z.string(), truncated: z.boolean() })
 ]);
 export const foregroundContextAckSchema = z.object({

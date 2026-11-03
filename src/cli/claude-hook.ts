@@ -11,6 +11,7 @@ import { MemStoreCommandError } from "../contracts/envelope.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { readDreamingConfiguration } from "../dreaming/config.js";
 import { firstPromptRecentWork, recentWorkDisplay } from "../dreaming/recent-work.js";
+import { boundConversationMessage } from "../retrieval/conversation-cache.js";
 import { requestForegroundRetrieval, sendForegroundContextUpdate } from "../retrieval/foreground-client.js";
 
 const claudeHookEventSchema = z.enum(["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]);
@@ -70,6 +71,16 @@ export async function runClaudeHook(eventSource: unknown): Promise<void> {
     if (event === "SessionStart" || event === "SessionEnd" ||
         (event === "UserPromptSubmit" && classifyLocalSensitivity(prompt).state !== "normal")) {
       await sendForegroundContextUpdate({ runtimeRoot: root, sessionId, update: { action: "clear" } });
+    }
+    // Codex hands Jev the reply of each turn; Claude Code now does too (ADR-0167).
+    if (event === "Stop" && result.state !== "private_turn") {
+      const reply = typeof enriched.last_assistant_message === "string" ? enriched.last_assistant_message
+        : typeof input.transcript_path === "string" ? await readLastAssistantMessage(input.transcript_path, sessionId) : undefined;
+      if (reply !== undefined && reply.trim() !== "") {
+        await sendForegroundContextUpdate({ runtimeRoot: root, sessionId, update: classifyLocalSensitivity(reply).state === "normal"
+          ? { action: "assistant", ...boundConversationMessage(reply) } : { action: "clear" } });
+      }
+      return;
     }
     const injectable = event === "UserPromptSubmit" || (event === "SessionStart" && await readSessionStartInjection(root));
     if (!injectable || !(result.captured || result.state === "capture_disabled") || result.projectId === undefined) return;

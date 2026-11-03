@@ -54,7 +54,22 @@ export class ConversationCache {
     return { messages, status };
   }
 
-  assistant(sessionId: string, turnId: string, text: string, truncated = false): boolean {
+  /** Whether this Project and Session already have history here. */
+  has(projectId: string, sessionId: string): boolean {
+    return this.#entries.has(`${projectId}\0${sessionId}`);
+  }
+
+  /** History rebuilt from captured events after a Worker restart (ADR-0167); never replaces live history. */
+  seed(projectId: string, sessionId: string, turns: readonly { readonly user: string; readonly assistant?: string }[]): void {
+    const key = `${projectId}\0${sessionId}`;
+    if (this.#entries.has(key) || turns.length === 0) return;
+    const safe = turns.filter((turn) => classifyLocalSensitivity(turn.user).state === "normal" &&
+      (turn.assistant === undefined || classifyLocalSensitivity(turn.assistant).state === "normal")).slice(-4);
+    this.#entries.set(key, { sessionId, turns: safe.map((turn) => ({ id: undefined, user: { role: "user", ...boundConversationMessage(turn.user) },
+      ...(turn.assistant === undefined ? {} : { assistant: { role: "assistant", ...boundConversationMessage(turn.assistant) } }) })) });
+  }
+
+  assistant(sessionId: string, turnId: string | undefined, text: string, truncated = false): boolean {
     if (classifyLocalSensitivity(text).state !== "normal") {
       this.clearSession(sessionId);
       return false;

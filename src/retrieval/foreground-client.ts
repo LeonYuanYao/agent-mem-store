@@ -124,7 +124,7 @@ export async function sendForegroundContextUpdate(request: {
   readonly runtimeRoot: string;
   readonly sessionId: string;
   readonly update: { readonly action: "clear" } | {
-    readonly action: "assistant"; readonly turnId: string; readonly text: string; readonly truncated: boolean;
+    readonly action: "assistant"; readonly turnId?: string; readonly text: string; readonly truncated: boolean;
   };
 }): Promise<boolean> {
   const requestId = `mscontext_${randomUUID()}`;

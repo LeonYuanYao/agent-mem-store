@@ -1,3 +1,4 @@
+import { capturedConversationTurns } from "./conversation-history.js";
 import { chmod, lstat, mkdir, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { resolve } from "node:path";
@@ -300,7 +301,7 @@ export async function startForegroundRetrievalServer(request: {
   const conversations = new ConversationCache();
   const recentPromptsBySession = new Map<string, readonly string[]>();
   const lane = createForegroundRetrievalLane<ForegroundRequest, ForegroundWireResponse>({
-    execute: (receivedRequest, control) => {
+    execute: async (receivedRequest, control) => {
       // Retrieval, history and Jev see only what the user wrote (ADR-0154), without what they marked private (ADR-0161).
       const foregroundRequest: ForegroundRequest = receivedRequest.event === "UserPromptSubmit"
         ? { ...receivedRequest, prompt: withoutPrivateText(userPromptText(receivedRequest.prompt)).text }
@@ -311,6 +312,13 @@ export async function startForegroundRetrievalServer(request: {
         requestSnapshotIds.set(foregroundRequest.requestId, snapshot.indexRevisionId);
       }
       const historyKey = `${foregroundRequest.projectId}\0${foregroundRequest.sessionId}`;
+      // After a Worker restart the in-memory history is empty: rebuild it from capture (ADR-0167).
+      if (foregroundRequest.event === "UserPromptSubmit" && !notification &&
+          !conversations.has(foregroundRequest.projectId, foregroundRequest.sessionId)) {
+        conversations.seed(foregroundRequest.projectId, foregroundRequest.sessionId, await capturedConversationTurns({
+          runtimeRoot: request.runtimeRoot, sessionId: foregroundRequest.sessionId, currentPrompt: foregroundRequest.prompt
+        }).catch(() => []));
+      }
       const conversation = foregroundRequest.event === "UserPromptSubmit" && !notification
         ? conversations.beginUser(foregroundRequest.projectId, foregroundRequest.sessionId, foregroundRequest.turnId, foregroundRequest.prompt)
         : { messages: [], status: "missing" as const };

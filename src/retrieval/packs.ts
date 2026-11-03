@@ -31,6 +31,8 @@ const SESSION_ITEM_LIMIT = 12;
 const SESSION_IDENTITY_LIMIT = 4;
 const PROMPT_TARGET_LIMIT = 600;
 const PROMPT_HARD_LIMIT = 1024;
+// The fullest memory text Jev reads in place of the compact (ADR-0167).
+const JEV_DETAIL_MAXIMUM_TOKENS = 300;
 const PROMPT_ITEM_LIMIT = 6;
 const PROBABLE_ITEM_LIMIT = 2;
 const SESSION_BUCKET_PAGE_SIZE = 16;
@@ -1868,6 +1870,7 @@ async function prepareUserPromptShadowPackCore(
   let jev: JevTelemetry | undefined;
   const jevScores = new Map<string, number>();
   if (request.relevanceFilter !== undefined && selected.length > 0) {
+    const detailById = new Map(scored.map((entry) => [entry.memory.memoryId, entry.memory]));
     const judgment = await request.relevanceFilter.filter({
       prompt: normalizedPrompt,
       // Local semantic history keeps its existing gate. Jev independently
@@ -1876,7 +1879,13 @@ async function prepareUserPromptShadowPackCore(
       ...(request.conversation === undefined ? {} : { conversation: request.conversation }),
       items: selected.map(item => ({
         memoryId: item.memoryId,
-        text: item.text.replace(/^\[M:[^\]]+\]\s*/u, "")
+        text: item.text.replace(/^\[M:[^\]]+\]\s*/u, ""),
+        // Jev judges the fuller text when it fits beside the conversation (ADR-0167).
+        ...((): { detailText?: string } => {
+          const memory = detailById.get(item.memoryId);
+          return memory !== undefined && memory.standardValidated && memory.standardTokenCount <= JEV_DETAIL_MAXIMUM_TOKENS &&
+            hasDetail(memory) ? { detailText: memory.standardText } : {};
+        })()
       })),
       deadlineAt: request.foregroundDeadlineAt ?? Date.now() + 800,
       ...(request.foregroundControl === undefined ? {} : { signal: request.foregroundControl.signal })
