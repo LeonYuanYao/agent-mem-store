@@ -257,6 +257,63 @@ test("deep doctor reports a managed installation whose Worker socket is unavaila
   });
 });
 
+test("deep doctor reports MemStore Codex Hooks that Codex has not reviewed or has disabled", async () => {
+  const data = await fixture();
+  const preview = await previewFriendlySetup({
+    homeRoot: data.homeRoot,
+    repositoryRoot: data.repositoryRoot,
+    codexExecutable: data.codexExecutable,
+    nodeExecutable: process.execPath,
+    mode: "shadow",
+    preparedAt: "2026-09-02T06:30:00.000Z"
+  });
+  await applyFriendlySetup(preview, {
+    prepareEmbedding: async (destination) => {
+      await mkdir(destination, { recursive: true });
+      return { state: "installed" as const };
+    },
+    activateLaunchAgent: () => Promise.resolve("bootstrapped" as const),
+    waitForForeground: () => Promise.resolve(true),
+    authorizeNotifications: () => Promise.resolve("denied" as const)
+  });
+  const doctor = () => inspectDoctor({
+    runtimeRoot: preview.paths.runtimeRoot,
+    vaultRoot: preview.paths.vaultRoot,
+    deep: true
+  });
+
+  const unreviewed = await doctor();
+  expect(unreviewed.checks.find((check) => check.name === "codex_hooks")).toMatchObject({
+    state: "info",
+    detail: expect.stringContaining("PostToolUse") as unknown
+  });
+
+  const hooksPath = join(data.homeRoot, ".codex", "hooks.json");
+  const configPath = join(data.homeRoot, ".codex", "config.toml");
+  const hooks = JSON.parse(await readFile(hooksPath, "utf8")) as { hooks: Record<string, { hooks: { command: string }[] }[]> };
+  const keys = Object.entries({
+    SessionStart: "session_start",
+    UserPromptSubmit: "user_prompt_submit",
+    PostToolUse: "post_tool_use",
+    Stop: "stop",
+    SessionEnd: "session_end"
+  }).map(([event, key]) => {
+    const group = (hooks.hooks[event] ?? []).findIndex((route) =>
+      route.hooks.some((handler) => handler.command.includes("memstore:gate5-shadow-v1:")));
+    return { event, key: `${hooksPath}:${key}:${String(group)}:0` };
+  });
+  const state = keys.map(({ event, key }) =>
+    `[hooks.state."${key}"]\ntrusted_hash = "sha256:fixture"\n${event === "PostToolUse" ? "enabled = false\n" : ""}`);
+  await writeFile(configPath, `${await readFile(configPath, "utf8")}\n${state.join("\n")}`);
+
+  const disabled = await doctor();
+  expect(disabled.checks.find((check) => check.name === "codex_hooks")).toMatchObject({
+    state: "warning",
+    detail: expect.stringContaining(`disabled in Codex hooks.state: PostToolUse (${String(keys[2]?.key)})`) as unknown,
+    recoveryCondition: expect.stringContaining("Codex /hooks") as unknown
+  });
+});
+
 test("automatic Vault discovery refuses to guess when multiple Obsidian Vaults are equally eligible", async () => {
   const data = await fixture();
   const secondVault = join(data.root, "second-vault");

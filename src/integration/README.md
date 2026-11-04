@@ -10,10 +10,11 @@ Plans and applies installation of hooks, MCP configuration, worker launch settin
 
 - [setup.ts](setup.ts)
 - [managed.ts](managed.ts)
+- [codex-hook-state.ts](codex-hook-state.ts)
 
 ## Flow and collaborators
 
-previewFriendlySetup / applyFriendlySetup provide the installer workflow; managed.ts owns manifests, preservation, upgrades, uninstall and native-memory cutover.
+previewFriendlySetup / applyFriendlySetup provide the installer workflow; managed.ts owns manifests, preservation, upgrades, uninstall and native-memory cutover. codex-hook-state.ts reads, without writing, whether Codex still runs each owned Hook; `doctor --deep` reports the result as `codex_hooks` (ADR-0169). Codex keys `hooks.state` by Hook position, so another tool that reorders `hooks.json` can leave a disabled flag on a MemStore Hook.
 
 Managed command hooks have an explicit `MemStore (<event>)` statusMessage.
 Stop, SessionStart, UserPromptSubmit and PostToolUse allow two host seconds;

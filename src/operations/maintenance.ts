@@ -6,6 +6,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 import { loadConfiguration } from "../configuration/index.js";
+import { readManagedCodexHookStates, type CodexHookStateIssue } from "../integration/codex-hook-state.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { inspectCaptureInbox } from "../capture/inbox.js";
 import { inspectForegroundAttempts } from "../retrieval/foreground-attempts.js";
@@ -25,6 +26,7 @@ export interface DoctorCheck {
 const recoveryConditions: Readonly<Record<string, string>> = {
   configuration: "A supported, path-bound read/write configuration loads without last-known-good fallback.",
   managed_worker: "The managed foreground Worker endpoint accepts local connections again.",
+  codex_hooks: "Every MemStore Hook is present in the Codex Hook file, and Codex hooks.state at its current position is reviewed and not disabled (re-enable or review it in Codex /hooks).",
   capture_inbox: "The inbox is within capacity, has no quarantined files, and no pending capture older than 15 minutes.",
   sqlite_integrity: "The runtime database opens and SQLite integrity_check returns ok.",
   candidate_pipeline: "No unevaluated waiting Candidate is older than 15 minutes; already evaluated waiting Candidates do not block health.",
@@ -109,6 +111,36 @@ async function inspectManagedWorker(runtimeRoot: string): Promise<DoctorCheck | 
       };
 }
 
+async function inspectCodexHooks(runtimeRoot: string): Promise<DoctorCheck | null> {
+  const report = await readManagedCodexHookStates(runtimeRoot);
+  if (report === null) return null;
+  const describe = (issues: readonly CodexHookStateIssue[]): string =>
+    issues.map((issue) => issue.key === null ? issue.event : `${issue.event} (${issue.key})`).join(", ");
+  const problems = [
+    ...(report.missing.length > 0 ? [`missing from the Codex Hook file: ${describe(report.missing)}`] : []),
+    ...(report.disabled.length > 0 ? [`disabled in Codex hooks.state: ${describe(report.disabled)}`] : [])
+  ];
+  if (problems.length > 0) {
+    return {
+      name: "codex_hooks",
+      state: "warning",
+      detail: `Codex does not run these MemStore Hooks, so their events are not captured; ${problems.join("; ")}.`
+    };
+  }
+  if (report.unreviewed.length > 0) {
+    return {
+      name: "codex_hooks",
+      state: "info",
+      detail: `Codex has no trust entry for these MemStore Hooks and lists them as untrusted until reviewed in /hooks: ${describe(report.unreviewed)}.`
+    };
+  }
+  return {
+    name: "codex_hooks",
+    state: "ok",
+    detail: `${String(report.enabledCount)} MemStore Hooks are enabled in Codex hooks.state; trust hashes are host-owned and not verified.`
+  };
+}
+
 async function inspectCatalogFiles(database: DatabaseSync, vaultRoot: string): Promise<DoctorCheck> {
   const rows = database.prepare(
     "SELECT memory_id, current_revision_id, canonical_path FROM memory_catalog ORDER BY memory_id"
@@ -182,6 +214,16 @@ export async function inspectDoctor(request: {
         name: "managed_worker",
         state: "error",
         detail: error instanceof Error ? error.message : "Managed Worker inspection failed."
+      });
+    }
+    try {
+      const codexHooks = await inspectCodexHooks(runtimeRoot);
+      if (codexHooks !== null) checks.push(codexHooks);
+    } catch (error) {
+      checks.push({
+        name: "codex_hooks",
+        state: "warning",
+        detail: error instanceof Error ? `Codex Hook state inspection failed: ${error.message}` : "Codex Hook state inspection failed."
       });
     }
   }

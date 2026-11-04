@@ -40,6 +40,10 @@ work establishes healthy authentication. It then shows recovery waiting until
 the ordinary Worker completes the operation. Exhausting the two recovery attempts
 still requires explicit handling; a healthy model alone cannot clear that warning.
 
+Deep doctor checks managed installations from the host side: `managed_worker`
+probes the foreground socket, and `codex_hooks` warns when Codex has disabled an
+owned Hook or the Hook is missing from `hooks.json` (ADR-0169).
+
 Doctor also checks governance, Compact quality and duplicate assessment using
 the same recovery eligibility as their Workers. Recoverable waiting and scheduled
 retries are informational; exhausted or non-recoverable blocked work is a warning.
