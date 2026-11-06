@@ -12,8 +12,13 @@ import { git, gitText, isAncestor } from "./git.js";
  * never influence verification.
  */
 
-/** Roots under the system temporary directories (scratch clones, test fixtures) are never dreamed about. */
-export const temporaryRootPattern = /^(?:\/private)?\/(?:tmp|var\/folders)\//u;
+/**
+ * The system temporary directories and roots under them (scratch clones, test
+ * fixtures) are never dreamed about. A Session started in a non-git directory
+ * directly under `/tmp` is rooted at `/private/tmp` itself, so the directory
+ * matches as well as its descendants.
+ */
+export const temporaryRootPattern = /^(?:\/private)?\/(?:tmp|var\/folders)(?:\/|$)/u;
 
 export const repoEntrySchema = z.object({
   path: z.string(),
