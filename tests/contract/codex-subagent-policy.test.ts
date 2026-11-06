@@ -199,3 +199,80 @@ test("opt-in restores subagent capture and injection, and disabling it takes eff
     }));
   }
 });
+
+// ADR-0170: a machine can opt standalone `codex exec` Sessions out with `exec_sessions_enabled = false`.
+async function runWithThreadSource(prefix: string, source: string, adapters: string, event: string): Promise<{
+  readonly stdout: string; readonly stderr: string; readonly status: number | null; readonly runtimeRoot: string;
+}> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  roots.push(root);
+  const codexHome = join(root, "codex");
+  await mkdir(codexHome);
+  const db = new DatabaseSync(join(codexHome, "state_5.sqlite"));
+  db.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, source TEXT NOT NULL)");
+  db.prepare("INSERT INTO threads VALUES (?, ?)").run("thread", source);
+  db.close();
+  const runtimeRoot = join(root, "runtime");
+  await mkdir(runtimeRoot);
+  await writeFile(join(runtimeRoot, "config.toml"), `schema_version = 1\n[adapters]\n${adapters}\n`);
+  const result = spawnSync(process.execPath, ["--import", "tsx", "src/cli/hook.ts", "codex", event], {
+    env: { ...process.env, CODEX_HOME: codexHome, MEMSTORE_RUNTIME_ROOT: runtimeRoot, MEMSTORE_INJECTION_MODE: "active" },
+    input: JSON.stringify({ session_id: "thread", cwd: root, prompt: "Unattended fixture.", last_assistant_message: "Unattended fixture." }),
+    encoding: "utf8", timeout: 1500
+  });
+  return { stdout: result.stdout, stderr: result.stderr, status: result.status, runtimeRoot };
+}
+
+for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]) {
+test(`with exec sessions opted out, a codex exec ${event} is neither captured nor injected`, async () => {
+  const result = await runWithThreadSource("memstore-exec-off-", "exec", "exec_sessions_enabled = false", event);
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ continue: true });
+  expect(await readdir(result.runtimeRoot)).toEqual(["config.toml"]);
+});
+}
+
+for (const source of ["cli", "vscode"]) {
+test(`opting exec sessions out leaves an interactive ${source} session captured`, async () => {
+  const result = await runWithThreadSource("memstore-exec-off-primary-", source, "exec_sessions_enabled = false", "Stop");
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ continue: true });
+  expect(await inspectCaptureInbox(result.runtimeRoot)).toMatchObject({ pendingCount: 1 });
+});
+}
+
+test("a transcript-identified codex exec session is skipped when exec sessions are opted out", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-exec-transcript-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  await mkdir(runtimeRoot);
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n[adapters]\nexec_sessions_enabled = false\n");
+  const transcript = join(root, "rollout.jsonl");
+  await writeFile(transcript, `${JSON.stringify({ type: "session_meta", payload: { id: "thread", source: "exec" } })}\n`);
+  const result = spawnSync(process.execPath, ["--import", "tsx", "src/cli/hook.ts", "codex", "Stop"], {
+    env: { ...process.env, CODEX_HOME: join(root, "absent-codex"), MEMSTORE_RUNTIME_ROOT: runtimeRoot },
+    input: JSON.stringify({ session_id: "thread", cwd: root, transcript_path: transcript, last_assistant_message: "Unattended fixture." }),
+    encoding: "utf8", timeout: 1500
+  });
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ continue: true });
+  expect(await readdir(runtimeRoot)).toEqual(["config.toml"]);
+});
+
+for (const setting of ['"false"', "0"]) {
+test(`an invalid exec session setting ${setting} keeps the default and captures codex exec`, async () => {
+  const result = await runWithThreadSource("memstore-exec-invalid-", "exec", `exec_sessions_enabled = ${setting}`, "Stop");
+  expect(result.status, result.stderr).toBe(0);
+  expect(await inspectCaptureInbox(result.runtimeRoot)).toMatchObject({ pendingCount: 1 });
+});
+}
+
+test("the two switches are independent: subagents opted in, exec sessions opted out", async () => {
+  const adapters = "subagents_enabled = true\nexec_sessions_enabled = false";
+  const child = await runWithThreadSource("memstore-exec-off-child-", JSON.stringify({ subagent: "review" }), adapters, "Stop");
+  expect(child.status, child.stderr).toBe(0);
+  expect(await inspectCaptureInbox(child.runtimeRoot)).toMatchObject({ pendingCount: 1 });
+  const exec = await runWithThreadSource("memstore-exec-off-exec-", "exec", adapters, "Stop");
+  expect(exec.status, exec.stderr).toBe(0);
+  expect(await readdir(exec.runtimeRoot)).toEqual(["config.toml"]);
+});

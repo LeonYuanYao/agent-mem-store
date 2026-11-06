@@ -9,7 +9,7 @@ import { MemStoreCommandError } from "../contracts/envelope.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { boundConversationMessage } from "../retrieval/conversation-cache.js";
 import { requestForegroundRetrieval, sendForegroundContextUpdate } from "../retrieval/foreground-client.js";
-import { readHookDisplay, readHumanAuthoredOnlyInjection, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
+import { readExecSessionsEnabled, readHookDisplay, readHumanAuthoredOnlyInjection, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
 import { inspectCodexSessionKind } from "../adapters/codex/session-kind.js";
 import { CaptureProgress, captureErrorCode, renderCaptureDiagnostic } from "../capture/deadline.js";
 
@@ -59,10 +59,14 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
       JSON.parse(await consumeText(process.stdin))
     );
     progress.enter("session_policy");
-    if (!await readSubagentsEnabled(resolve(runtimeRoot))) {
+    const [subagentsEnabled, execSessionsEnabled] = await Promise.all([
+      readSubagentsEnabled(resolve(runtimeRoot)), readExecSessionsEnabled(resolve(runtimeRoot))
+    ]);
+    if (!subagentsEnabled || !execSessionsEnabled) {
       const kind = await inspectCodexSessionKind(input);
       if (watchdogExpired()) return;
-      if (kind !== "primary") {
+      const served = kind === "primary" || (kind === "subagent" && subagentsEnabled) || (kind === "exec" && execSessionsEnabled);
+      if (!served) {
         process.stdout.write(`${JSON.stringify({ continue: true,
           ...(kind === "unknown" ? { systemMessage: `MemStore (${event}): session_kind_unknown; capture and injection skipped. The session will continue.` } : {})
         })}\n`);

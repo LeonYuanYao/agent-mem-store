@@ -21,6 +21,10 @@ and retrieval; missing or invalid configuration keeps subagents disabled. This
 machine-local setting does not disable explicit MCP/Skill operations or change
 Codex native memory configuration.
 
+`[adapters].exec_sessions_enabled` defaults true. A machine sets it false to skip
+standalone `codex exec` Sessions through the same Hook gate; missing or invalid
+configuration keeps the default (ADR-0170).
+
 - [operations/initialize.ts](../../src/operations/initialize.ts)
 - [integration/setup.ts](../../src/integration/setup.ts)
 - [cli/codex-hook.ts](../../src/cli/codex-hook.ts)

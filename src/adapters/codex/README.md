@@ -15,7 +15,9 @@ Maps supported Codex events into project-scoped, durable capture and bounded ses
 
 handleCodexHook validates host input and resolves the project/session route before capture; the CLI hook entry owns output rendering and foreground IPC.
 
-Before capture, the CLI applies the default-off subagent policy. session-kind.ts
+Before capture, the CLI applies the default-off subagent policy and, when a machine
+sets `exec_sessions_enabled = false`, skips standalone `codex exec` Sessions the same
+way (ADR-0170). session-kind.ts classifies the source as primary, exec or subagent; it
 reads the exact thread's source from the newest `state_N.sqlite` under
 `CODEX_HOME` (or `~/.codex`), read-only with no SQLite lock wait. Its fallback reads
 at most 1 MiB of the host-provided transcript's first record and requires a

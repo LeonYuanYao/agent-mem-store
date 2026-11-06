@@ -11,12 +11,14 @@ export const adapterDisplaySchema = z.object({
   hook_display: hookDisplaySchema.default("summary"),
   session_start_injection: z.boolean().default(false),
   subagents_enabled: z.boolean().default(false),
+  // Standalone `codex exec` runs are primary Sessions; a machine can opt them out (ADR-0170).
+  exec_sessions_enabled: z.boolean().default(true),
   human_authored_only_injection: z.boolean().default(false),
   dreaming_injection: z.boolean().default(false),
   // Claude Code shows a Hook systemMessage on every prompt, so a one-line summary is its default.
   claude_hook_display: hookDisplaySchema.default("summary")
 }).loose().default({ hook_display: "summary", session_start_injection: false, subagents_enabled: false,
-  human_authored_only_injection: false, dreaming_injection: false, claude_hook_display: "summary" });
+  exec_sessions_enabled: true, human_authored_only_injection: false, dreaming_injection: false, claude_hook_display: "summary" });
 
 export async function readHumanAuthoredOnlyInjection(runtimeRoot: string): Promise<boolean> {
   try {
@@ -66,6 +68,23 @@ export async function readSubagentsEnabled(runtimeRoot: string): Promise<boolean
     return config.adapters.subagents_enabled;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Whether standalone `codex exec` Sessions are captured and served (ADR-0170).
+ * Missing, invalid or unreadable settings keep the default: they are, like any
+ * primary Session.
+ */
+export async function readExecSessionsEnabled(runtimeRoot: string): Promise<boolean> {
+  try {
+    const config = z.object({
+      schema_version: z.literal(1),
+      adapters: z.object({ exec_sessions_enabled: z.boolean().default(true) }).default({ exec_sessions_enabled: true })
+    }).parse(parse(await readFile(join(runtimeRoot, "config.toml"), "utf8")));
+    return config.adapters.exec_sessions_enabled;
+  } catch {
+    return true;
   }
 }
 

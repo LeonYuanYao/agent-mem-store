@@ -72,6 +72,8 @@ Codex 集成会采集会话事件，交由后台提取知识。Luna 生成 Agent
 
 Codex 子代理的自动采集和注入**默认关闭**。如需开启，在 `<runtime>/config.toml` 已有的 `[adapters]` 段设置 `subagents_enabled = true`；改回 `false` 即可关闭。Hook 每次执行都会读取开关，无需重启 Worker。配置缺失、无效或不可读时保持关闭。主会话（包括独立启动的 `codex exec`）保持原有行为。如果本地元数据无法确认会话身份，MemStore 显示无正文的 `session_kind_unknown` 提示，跳过本次事件，下次事件重新识别。
 
+独立启动的 `codex exec` 默认和其他主会话一样采集。如果本机的 `codex exec` 基本都是自动化任务（E2E、评测、委托评审等），可以在 `[adapters]` 设置 `exec_sessions_enabled = false`，像子代理一样跳过它们的采集和注入。配置缺失或无效时保持默认（[ADR-0170](docs/adr/0170-opt-codex-exec-sessions-out.md)）。
+
 开关不影响显式 MCP/Skill 操作，不删除已采集数据，也不移除从父会话继承的上下文；子代理返回给父会话的结果仍可能被父会话采集。Codex 原生记忆另有配置：在自定义子代理 TOML 的 `[memories]` 下，将 `use_memories` 和 `generate_memories` 都设为 `false`，分别关闭原生记忆使用和生成。参见官方[记忆配置](https://learn.chatgpt.com/docs/customization/memories)和[自定义子代理配置](https://learn.chatgpt.com/docs/agent-configuration/subagents)。这些配置不控制 MemStore。
 
 若只想注入人工知识，在同一 `[adapters]` 段设置 `human_authored_only_injection = true`。

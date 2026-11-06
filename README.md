@@ -109,6 +109,12 @@ keep subagents disabled. Primary sessions, including standalone `codex exec`,
 keep their normal behavior. Unknown session identity produces a body-free
 `session_kind_unknown` notice and skips that event; the next event retries identification.
 
+Standalone `codex exec` runs are captured like any primary session by default. On a
+machine where they are mostly automation (E2E harnesses, evaluators, delegated
+reviews), set `exec_sessions_enabled = false` in `[adapters]` to skip their capture
+and injection the same way. Missing or invalid settings keep the default
+([ADR-0170](docs/adr/0170-opt-codex-exec-sessions-out.md)).
+
 This switch leaves explicit MCP/Skill operations available, preserves already
 captured work, and cannot remove inherited parent context. Results returned to
 the parent can still be captured there. Codex native memory has separate controls:

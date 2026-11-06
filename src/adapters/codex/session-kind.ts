@@ -5,11 +5,13 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 
-export type CodexSessionKind = "primary" | "subagent" | "unknown";
+/** `exec` is a standalone `codex exec` run: a primary Session that no one attends interactively. */
+export type CodexSessionKind = "primary" | "exec" | "subagent" | "unknown";
 
 function classifySource(source: unknown): CodexSessionKind {
   if (source === "subagent") return "subagent";
-  if (source === "cli" || source === "exec" || source === "vscode" || source === "appServer") return "primary";
+  if (source === "exec") return "exec";
+  if (source === "cli" || source === "vscode" || source === "appServer") return "primary";
   const structured = z.object({ subagent: z.unknown() }).safeParse(source);
   return structured.success && structured.data.subagent !== undefined ? "subagent" : "unknown";
 }
