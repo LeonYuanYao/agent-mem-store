@@ -154,15 +154,21 @@ function displayStatement(item: Record<string, unknown>): string {
   return escapeLine(typeof item.refined_statement === "string" ? item.refined_statement : String(item.statement));
 }
 
-/** Readable Project label (its most recently used non-temporary root) and a filename-safe slug. */
+/**
+ * Readable Project label (its most recently used non-temporary root) and a filename-safe slug.
+ * A name given at registration that differs from the root's directory name leads both (ADR-0171).
+ */
 export function projectDisplay(database: DatabaseSync, projectId: string): { readonly label: string; readonly slug: string } {
   const roots = database.prepare("SELECT canonical_root FROM project_roots WHERE project_id = ? ORDER BY last_used_at DESC")
     .all(projectId).map((row) => String(row.canonical_root));
   const root = roots.find((candidate) => !temporaryRootPattern.test(candidate)) ?? roots[0];
   if (root === undefined) return { label: projectId, slug: projectId.slice(7, 15) };
   const home = homedir();
-  const label = root === home ? "~" : root.startsWith(`${home}/`) ? `~${root.slice(home.length)}` : root;
-  const slug = (root === home ? "home" : basename(root)).replace(/[^\p{L}\p{N}._-]+/gu, "-").slice(0, 40) || "project";
+  const path = root === home ? "~" : root.startsWith(`${home}/`) ? `~${root.slice(home.length)}` : root;
+  const displayName = database.prepare("SELECT display_name FROM projects WHERE project_id = ?").get(projectId)?.display_name;
+  const name = root !== home && typeof displayName === "string" && displayName !== basename(root) ? displayName : undefined;
+  const label = name === undefined ? path : `${name} (${path})`;
+  const slug = (root === home ? "home" : name ?? basename(root)).replace(/[^\p{L}\p{N}._-]+/gu, "-").slice(0, 40) || "project";
   return { label, slug };
 }
 

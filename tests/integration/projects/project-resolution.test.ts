@@ -18,6 +18,8 @@ import {
   listProjectCollisions,
   resolveProject
 } from "../../../src/projects/index.js";
+import { projectDisplay } from "../../../src/dreaming/report.js";
+import { projectRegister } from "../../../src/operations/project.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 
 const temporaryDirectories: string[] = [];
@@ -169,6 +171,45 @@ test("a non-Git directory registers once and descendants reuse the deepest root"
       /^msproj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
     );
   }
+});
+
+test("a non-Git directory below a registered root can be registered as its own Project", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-project-register-"));
+  temporaryDirectories.push(root);
+  const outer = join(root, "home");
+  const inner = join(outer, "apps", "studio");
+  const descendant = join(inner, "workspace-1");
+  const runtimeRoot = join(root, "runtime");
+  await mkdir(descendant, { recursive: true });
+  const enclosing = await resolveProject({ path: outer, runtimeRoot });
+  expect(await resolveProject({ path: descendant, runtimeRoot })).toEqual(enclosing);
+
+  const preview = await projectRegister({ runtimeRoot, path: inner, preview: true });
+  expect(preview).toMatchObject({ dry_run: true, would_register: { root: await realpath(inner), display_name: "studio" } });
+  expect(await resolveProject({ path: descendant, runtimeRoot })).toEqual(enclosing);
+
+  const applied = await projectRegister({ runtimeRoot, path: inner, name: " Studio-Runs ", preview: false });
+  const registered = await resolveProject({ path: descendant, runtimeRoot });
+  expect(registered).toMatchObject({
+    status: "resolved", source: "registered_root", root: await realpath(inner), displayName: "Studio-Runs"
+  });
+  if (registered.status !== "resolved" || enclosing.status !== "resolved") return;
+  expect(applied).toMatchObject({ dry_run: false, project_id: registered.projectId });
+  expect(registered.projectId).not.toBe(enclosing.projectId);
+  // Dream reports name the Project by its given name; a Project named after its root keeps the path label.
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    expect(projectDisplay(database, registered.projectId)).toEqual({
+      label: `Studio-Runs (${await realpath(inner)})`, slug: "Studio-Runs"
+    });
+    expect(projectDisplay(database, enclosing.projectId)).toEqual({ label: await realpath(outer), slug: "home" });
+  } finally {
+    database.close();
+  }
+  // Siblings above the new root keep the enclosing Project, and a root registers only once.
+  expect(await resolveProject({ path: join(outer, "apps"), runtimeRoot })).toEqual(enclosing);
+  await expect(projectRegister({ runtimeRoot, path: inner, preview: false }))
+    .rejects.toMatchObject({ code: "register_not_applicable" });
 });
 
 test("same-basename non-Git roots remain different Projects", async () => {

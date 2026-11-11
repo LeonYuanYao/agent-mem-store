@@ -168,7 +168,9 @@ export async function scheduleDueDreams(request: {
       const projectId = String(row.project_id);
       const already = database.prepare("SELECT 1 FROM dream_runs WHERE project_id = ? AND scheduled_for = ?").get(projectId, scheduledFor);
       if (already !== undefined) continue;
-      if ((await projectRoots(database, projectId, request.allowTemporaryRoots)).roots.length === 0) continue;
+      const { roots } = await projectRoots(database, projectId, request.allowTemporaryRoots);
+      if (roots.length === 0) continue;
+      if (!request.configuration.catch_all_projects && roots.every((root) => isCatchAllRoot(root, homedir()))) continue;
       if (eligibleSessions(database, projectId, request.now, request.configuration).length === 0) continue;
       created.push(createRun(database, projectId, scheduledFor, request.now, request.configuration.mode));
     }

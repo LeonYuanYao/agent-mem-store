@@ -25,6 +25,9 @@ export const dreamingConfigurationSchema = z.object({
   recent_work: z.boolean().default(true),
   recent_work_idle_minutes: z.number().int().min(5).max(24 * 60).default(20),
   recent_work_days: z.number().int().min(1).max(30).default(7),
+  // The catch-all Project (only root is the home directory or above) collects Sessions from every
+  // unregistered non-Git directory and keeps global knowledge only; false stops scheduling its runs (ADR-0171).
+  catch_all_projects: z.boolean().default(true),
   // Systems the user retired (ADR-0165): extraction skips what only they hold, and an item whose
   // evidence lies only under their paths is dropped.
   retired: z.array(z.object({

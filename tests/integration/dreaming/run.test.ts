@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 
@@ -490,6 +490,33 @@ test("remember extract hands its selection to dreaming, which verifies and write
   } finally {
     after.close();
   }
+});
+
+test("a machine can stop scheduling dreams for the catch-all Project", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-catch-all-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174171";
+  const registeredAt = new Date().toISOString();
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare("INSERT INTO projects(project_id, display_name, created_at, last_used_at) VALUES (?, 'home', ?, ?)")
+      .run(projectId, registeredAt, registeredAt);
+    database.prepare(
+      "INSERT INTO project_roots(canonical_root, project_id, root_kind, created_at, last_used_at) VALUES (?, ?, 'non_git', ?, ?)"
+    ).run(homedir(), projectId, registeredAt, registeredAt);
+  } finally {
+    database.close();
+  }
+  await captureEvent({ runtimeRoot, event: {
+    schemaVersion: 1, eventId: "msevent_catch_all_0", deduplicationKey: "catch-all:0", agent: "codex", eventKind: "SessionEnd",
+    occurredAt: registeredAt, projectId, sessionId: "catch-all-session", payload: { reason: "other" }
+  } });
+  const now = new Date(Date.now() + 60_000).toISOString();
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true, hour: 0 });
+  expect(configuration.catch_all_projects).toBe(true);
+  expect((await scheduleDueDreams({ runtimeRoot, now, configuration: { ...configuration, catch_all_projects: false } })).created).toEqual([]);
+  expect((await scheduleDueDreams({ runtimeRoot, now, configuration })).created).toHaveLength(1);
 });
 
 test("dreaming is disabled by default and never schedules without configuration", async () => {

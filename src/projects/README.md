@@ -13,7 +13,7 @@ Resolves directories into memory scopes, handles explicit project markers and tr
 
 ## Flow and collaborators
 
-resolveProject performs discovery; inspectProject reports identity; configureProjectMarker handles explicit configuration. Session routes override routing for a migrated thread.
+resolveProject performs discovery; inspectProject reports identity; configureProjectMarker handles explicit configuration. A non-Git directory below an enclosing registered root (such as the home directory) gets its own Project only through `memstore project register` (ADR-0171). Session routes override routing for a migrated thread.
 
 `inspectProject` and `resolveProject` accept an optional AbortSignal. Cancellation kills
 the current Git child and propagates rather than being interpreted as a non-Git

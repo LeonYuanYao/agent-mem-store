@@ -180,6 +180,62 @@ export async function projectUnlink(request: {
   };
 }
 
+/**
+ * Registers a non-Git directory as the root of a new Project when it currently
+ * falls under an enclosing registered root, typically the catch-all home
+ * directory. Descendants resolve to it by the deepest registered root (ADR-0171).
+ */
+export async function projectRegister(request: {
+  readonly runtimeRoot: string;
+  readonly path: string;
+  readonly name?: string;
+  readonly preview: boolean;
+}) {
+  const root = await realpath(resolve(request.path));
+  const before = await inspectProject({ path: root, runtimeRoot: request.runtimeRoot });
+  if (before.status !== "resolved" || before.source !== "registered_root" || before.root === root) {
+    throw new MemStoreCommandError(
+      "register_not_applicable",
+      "Only a non-Git directory below another registered root can be registered as its own Project."
+    );
+  }
+  const displayName = request.name === undefined
+    ? basename(root) || root
+    : z.string().trim().min(1).max(80).parse(request.name);
+  if (request.preview) {
+    return { dry_run: true, old_resolution: before, would_register: { root, display_name: displayName } };
+  }
+  const databasePath = await runtimeDatabasePath(request.runtimeRoot);
+  if (databasePath === undefined) throw new MemStoreCommandError("registry_unavailable", "Project Registry is unavailable.");
+  const projectId = `msproj_${randomUUID()}`;
+  const now = new Date().toISOString();
+  const database = new DatabaseSync(databasePath);
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.prepare(
+        "INSERT INTO projects(project_id, display_name, created_at, last_used_at) VALUES (?, ?, ?, ?)"
+      ).run(projectId, displayName, now, now);
+      database.prepare(
+        `INSERT INTO project_roots(canonical_root, project_id, root_kind, created_at, last_used_at)
+         VALUES (?, ?, 'non_git', ?, ?)`
+      ).run(root, projectId, now, now);
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    database.close();
+  }
+  return {
+    dry_run: false,
+    old_resolution: before,
+    project_id: projectId,
+    resolution: await inspectProject({ path: root, runtimeRoot: request.runtimeRoot })
+  };
+}
+
 export async function projectRelinkRoot(request: {
   readonly runtimeRoot: string;
   readonly from: string;

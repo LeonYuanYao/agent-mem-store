@@ -92,6 +92,7 @@ import {
   projectCollisions,
   projectLink,
   projectList,
+  projectRegister,
   projectRelinkRoot,
   projectResolveCollision,
   projectStatus,
@@ -176,6 +177,7 @@ function parseCommon(arguments_: readonly string[]) {
       since: { type: "string" },
       lark: { type: "string" },
       title: { type: "string" },
+      name: { type: "string" },
       source: { type: "string" },
       "confirm-sensitive": { type: "string" },
       revision: { type: "string" },
@@ -1292,6 +1294,14 @@ async function runProject(arguments_: readonly string[]): Promise<unknown> {
       path,
       preview: parsed.values.preview,
       now: new Date().toISOString()
+    });
+  }
+  if (action === "register") {
+    return projectRegister({
+      runtimeRoot,
+      path,
+      ...(parsed.values.name === undefined ? {} : { name: parsed.values.name }),
+      preview: parsed.values.preview
     });
   }
   if (action === "relink-root") {
