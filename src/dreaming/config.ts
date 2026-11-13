@@ -1,5 +1,7 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve, sep } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import { parse } from "smol-toml";
 import { z } from "zod";
 
@@ -28,6 +30,11 @@ export const dreamingConfigurationSchema = z.object({
   // The catch-all Project (only root is the home directory or above) collects Sessions from every
   // unregistered non-Git directory and keeps global knowledge only; false stops scheduling its runs (ADR-0171).
   catch_all_projects: z.boolean().default(true),
+  // Directories whose Sessions dreaming learns nothing from, such as the per-run workspaces an
+  // application creates for evaluation ("~" expands to the home directory). A Project whose every
+  // root lies at or under one gets no nightly run and no recent-work notes; capture, injection and
+  // explicit runs are unchanged (ADR-0172).
+  skip_roots: z.array(z.string().min(1)).max(20).default([]),
   // Systems the user retired (ADR-0165): extraction skips what only they hold, and an item whose
   // evidence lies only under their paths is dropped.
   retired: z.array(z.object({
@@ -50,6 +57,32 @@ export const dreamingConfigurationSchema = z.object({
 export type DreamingConfiguration = z.infer<typeof dreamingConfigurationSchema>;
 
 export const defaultDreamingConfiguration: DreamingConfiguration = dreamingConfigurationSchema.parse({});
+
+/** `[dreaming].skip_roots` with "~" expanded and symlinks resolved, so they compare with canonical Project roots. */
+export async function resolveSkipRoots(configuration: DreamingConfiguration): Promise<string[]> {
+  return Promise.all(configuration.skip_roots.map(async (configured) => {
+    const path = resolve(configured.replace(/^~(?=\/|$)/u, homedir()));
+    return realpath(path).catch(() => path);
+  }));
+}
+
+/** Whether a Project with these roots is skipped: it has roots and every one lies at or under a skip root. */
+export function skippedRoots(roots: readonly string[], skipRoots: readonly string[]): boolean {
+  if (roots.length === 0 || skipRoots.length === 0) return false;
+  return roots.every((root) => skipRoots.some((skip) => root === skip || root.startsWith(skip.endsWith(sep) ? skip : `${skip}${sep}`)));
+}
+
+/** The Projects whose registered roots all lie under `[dreaming].skip_roots`. */
+export async function skippedProjects(database: DatabaseSync, configuration: DreamingConfiguration): Promise<Set<string>> {
+  const skipRoots = await resolveSkipRoots(configuration);
+  if (skipRoots.length === 0) return new Set();
+  const roots = new Map<string, string[]>();
+  for (const row of database.prepare("SELECT project_id, canonical_root FROM project_roots").all()) {
+    const projectId = String(row.project_id);
+    roots.set(projectId, [...(roots.get(projectId) ?? []), String(row.canonical_root)]);
+  }
+  return new Set([...roots].filter(([, list]) => skippedRoots(list, skipRoots)).map(([projectId]) => projectId));
+}
 
 /**
  * Reads machine-local `[dreaming]`. A missing, unreadable or invalid section

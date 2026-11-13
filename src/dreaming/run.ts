@@ -9,7 +9,7 @@ import { Temporal } from "@js-temporal/polyfill";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { cloneOf, sessionSourceBranches, type SourceBranch } from "./branches.js";
-import type { DreamingConfiguration } from "./config.js";
+import { resolveSkipRoots, skippedRoots, type DreamingConfiguration } from "./config.js";
 import { DreamModelError, transientModelErrors, type DreamModel, type Verdict } from "./model.js";
 import { EvidenceReader } from "./msverify.js";
 import { presearch, renderPresearch } from "./presearch.js";
@@ -157,6 +157,7 @@ export async function scheduleDueDreams(request: {
   const local = Temporal.Instant.from(request.now).toZonedDateTimeISO(request.configuration.timezone);
   if (local.hour < request.configuration.hour) return { created: [] };
   const scheduledFor = local.toPlainDate().toString();
+  const skipRoots = await resolveSkipRoots(request.configuration);
   const database = await openRuntimeDatabase(request.runtimeRoot);
   const created: string[] = [];
   try {
@@ -171,6 +172,7 @@ export async function scheduleDueDreams(request: {
       const { roots } = await projectRoots(database, projectId, request.allowTemporaryRoots);
       if (roots.length === 0) continue;
       if (!request.configuration.catch_all_projects && roots.every((root) => isCatchAllRoot(root, homedir()))) continue;
+      if (skippedRoots(roots, skipRoots)) continue;
       if (eligibleSessions(database, projectId, request.now, request.configuration).length === 0) continue;
       created.push(createRun(database, projectId, scheduledFor, request.now, request.configuration.mode));
     }

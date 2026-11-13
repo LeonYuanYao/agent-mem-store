@@ -103,3 +103,39 @@ test("only the Sessions whose notes could still be injected get one", async () =
   // Two newer notes already cover the Project: the oldest Session is never summarized.
   expect(noted).toEqual(["new", "middle"]);
 });
+
+// ADR-0172: Sessions of a Project under `skip_roots` get no note, and notes written before are not injected.
+test("Projects under skip_roots get no recent-work notes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-recent-work-skip-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const folder = join(root, "runs", "instance");
+  await mkdir(folder, { recursive: true });
+  const project = await resolveProject({ sessionId: "run-a", path: folder, runtimeRoot });
+  if (project.status !== "resolved") throw new Error("Project did not resolve.");
+  for (const [index, sessionId] of ["run-a", "run-b"].entries()) {
+    await captureEvent({ runtimeRoot, event: { schemaVersion: 1, eventId: `msevent_skip_${String(index)}`, deduplicationKey: `skip:${String(index)}`,
+      agent: "codex", eventKind: "UserPromptSubmit", occurredAt: new Date().toISOString(), projectId: project.projectId, sessionId,
+      payload: { prompt: `${sessionId} 评测用例` } } });
+    await new Promise((done) => setTimeout(done, 5));
+  }
+  const noted: string[] = [];
+  const model = { summarizeWork: (request: { transcript: string }) => {
+    noted.push(request.transcript.includes("run-a") ? "run-a" : "run-b");
+    return Promise.resolve({ carryOver: true, summary: "评测进行中", usage: { tokens: 1, seconds: 1 } });
+  } } as unknown as DreamModel;
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true });
+  const skipping = { ...configuration, skip_roots: [join(root, "runs")] };
+  const now = new Date(Date.now() + 30 * 60_000).toISOString();
+
+  await expect(runNextRecentWorkStep({ runtimeRoot, now, configuration: skipping, model })).resolves.toEqual({ state: "idle" });
+  expect(noted).toEqual([]);
+  // A note written before the root was skipped is no longer injected.
+  await expect(runNextRecentWorkStep({ runtimeRoot, now, configuration, model })).resolves.toMatchObject({ state: "noted", sessionId: "run-b" });
+  await captureEvent({ runtimeRoot, event: { schemaVersion: 1, eventId: "msevent_skip_new", deduplicationKey: "skip:new", agent: "codex",
+    eventKind: "UserPromptSubmit", occurredAt: now, projectId: project.projectId, sessionId: "run-c", payload: { prompt: "新用例" } } });
+  await expect(firstPromptRecentWork({ runtimeRoot, projectId: project.projectId, sessionId: "run-c", now, configuration }))
+    .resolves.toMatchObject({ count: 1 });
+  await expect(firstPromptRecentWork({ runtimeRoot, projectId: project.projectId, sessionId: "run-c", now, configuration: skipping }))
+    .resolves.toBeUndefined();
+});

@@ -519,6 +519,44 @@ test("a machine can stop scheduling dreams for the catch-all Project", async () 
   expect((await scheduleDueDreams({ runtimeRoot, now, configuration })).created).toHaveLength(1);
 });
 
+test("a machine can skip dreaming for Projects under configured roots", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-skip-roots-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const apps = join(root, "Application Support");
+  await mkdir(join(apps, "EditorRuns", "Instance1", "workspace"), { recursive: true });
+  await mkdir(join(apps, "EditorRunsArchive"), { recursive: true });
+  const at = new Date().toISOString();
+  const projects: string[] = [];
+  for (const [index, folder] of ["EditorRuns/Instance1/workspace", "EditorRunsArchive"].entries()) {
+    const project = await resolveProject({ sessionId: `skip-${String(index)}`, path: join(apps, folder), runtimeRoot });
+    if (project.status !== "resolved") throw new Error("Project did not resolve.");
+    projects.push(project.projectId);
+    await captureEvent({ runtimeRoot, event: {
+      schemaVersion: 1, eventId: `msevent_skip_${String(index)}`, deduplicationKey: `skip:${String(index)}`, agent: "codex", eventKind: "SessionEnd",
+      occurredAt: at, projectId: project.projectId, sessionId: `skip-${String(index)}`, payload: { reason: "other" }
+    } });
+  }
+  const now = new Date(Date.now() + 60_000).toISOString();
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true, hour: 0 });
+  expect(configuration.skip_roots).toEqual([]);
+  // The configured path is not canonical (the system temporary directory is a symlink on macOS);
+  // a sibling directory that only shares its name prefix is still dreamed.
+  const skipping = { ...configuration, skip_roots: [join(apps, "EditorRuns")] };
+  const runProjects = async (created: readonly string[]) => {
+    const database = await openRuntimeDatabase(runtimeRoot);
+    try {
+      return created.map((runId) => String(database.prepare("SELECT project_id FROM dream_runs WHERE run_id = ?").get(runId)?.project_id));
+    } finally {
+      database.close();
+    }
+  };
+  const skipped = await scheduleDueDreams({ runtimeRoot, now, configuration: skipping, allowTemporaryRoots: true });
+  expect(await runProjects(skipped.created)).toEqual([projects[1]]);
+  const unskipped = await scheduleDueDreams({ runtimeRoot, now, configuration, allowTemporaryRoots: true });
+  expect(await runProjects(unskipped.created)).toEqual([projects[0]]);
+});
+
 test("dreaming is disabled by default and never schedules without configuration", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-dream-off-"));
   directories.push(root);

@@ -2,7 +2,7 @@ import { Temporal } from "@js-temporal/polyfill";
 
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { openRuntimeDatabase, openRuntimeDatabaseReadOnly } from "../runtime/database.js";
-import type { DreamingConfiguration } from "./config.js";
+import { skippedProjects, type DreamingConfiguration } from "./config.js";
 import { DreamModelError, transientModelErrors, type DreamModel } from "./model.js";
 import { projectDisplay } from "./report.js";
 import { readSessionStream } from "./stream.js";
@@ -39,6 +39,8 @@ export async function runNextRecentWorkStep(request: {
   const database = await openRuntimeDatabase(request.runtimeRoot);
   try {
     database.prepare("DELETE FROM recent_work_notes WHERE through_event_at < ?").run(oldest);
+    // Sessions of Projects under `skip_roots` get no note (ADR-0172).
+    const skipped = JSON.stringify([...await skippedProjects(database, request.configuration)]);
     // The most recently active idle Session whose work has moved on since its note.
     // Only the latest notes of a Project are injected, so a Session with two newer notes in its Project is skipped.
     const session = database.prepare(
@@ -55,10 +57,11 @@ export async function runNextRecentWorkStep(request: {
        WHERE (note.session_id IS NULL OR note.last_error_code IS NOT NULL
               OR (note.through_event_at < located.last_at AND note.updated_at <= ?))
          AND (note.next_attempt_at IS NULL OR note.next_attempt_at <= ?)
+         AND (located.project_id IS NULL OR located.project_id NOT IN (SELECT value FROM json_each(?)))
          AND (SELECT count(*) FROM recent_work_notes AS newer WHERE newer.project_id = located.project_id
               AND newer.summary != '' AND newer.through_event_at > located.last_at) < ?
        ORDER BY located.last_at DESC LIMIT 1`
-    ).get(oldest, idleBefore, refreshBefore, request.now, notesInjected);
+    ).get(oldest, idleBefore, refreshBefore, request.now, skipped, notesInjected);
     if (session === undefined || typeof session.project_id !== "string") return { state: "idle" };
     const projectId = session.project_id;
     const sessionId = String(session.session_id);
@@ -111,6 +114,8 @@ export async function recentWorkContext(request: {
   const database = await openRuntimeDatabaseReadOnly(request.runtimeRoot);
   let notes: { agent: string; at: string; summary: string }[];
   try {
+    // A Project under `skip_roots` gets no notes, including ones written before it was skipped (ADR-0172).
+    if ((await skippedProjects(database, request.configuration)).has(request.projectId)) return undefined;
     notes = database.prepare(
       `SELECT agent, through_event_at, summary FROM recent_work_notes
        WHERE project_id = ? AND session_id != ? AND summary != '' AND through_event_at >= ?
