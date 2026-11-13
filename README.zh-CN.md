@@ -74,6 +74,8 @@ Codex 子代理的自动采集和注入**默认关闭**。如需开启，在 `<r
 
 独立启动的 `codex exec` 默认和其他主会话一样采集。如果本机的 `codex exec` 基本都是自动化任务（E2E、评测、委托评审等），可以在 `[adapters]` 设置 `exec_sessions_enabled = false`，像子代理一样跳过它们的采集和注入。配置缺失或无效时保持默认（[ADR-0170](docs/adr/0170-opt-codex-exec-sessions-out.md)）。
 
+要让某些目录里启动的会话完全不进 MemStore（例如编辑器每个实例的 AI 工作区、评测 runner 每个 case 的工作区），把它们写进 `[adapters].excluded_roots`（`~` 会展开；末尾带 `*` 时按名称前缀匹配同级目录，例如 `/tmp/mcp_test_multi_*`）。这些会话的 Codex 和 Claude Code hook 不采集、不注入。在会话里发一条以 `ms：` 或 `ms:` 开头的消息，就能为这个会话重新开启 MemStore（[ADR-0173](docs/adr/0173-exclude-sessions-under-configured-roots.md)）。
+
 开关不影响显式 MCP/Skill 操作，不删除已采集数据，也不移除从父会话继承的上下文；子代理返回给父会话的结果仍可能被父会话采集。Codex 原生记忆另有配置：在自定义子代理 TOML 的 `[memories]` 下，将 `use_memories` 和 `generate_memories` 都设为 `false`，分别关闭原生记忆使用和生成。参见官方[记忆配置](https://learn.chatgpt.com/docs/customization/memories)和[自定义子代理配置](https://learn.chatgpt.com/docs/agent-configuration/subagents)。这些配置不控制 MemStore。
 
 若只想注入人工知识，在同一 `[adapters]` 段设置 `human_authored_only_injection = true`。

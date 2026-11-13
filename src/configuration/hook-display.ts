@@ -13,12 +13,14 @@ export const adapterDisplaySchema = z.object({
   subagents_enabled: z.boolean().default(false),
   // Standalone `codex exec` runs are primary Sessions; a machine can opt them out (ADR-0170).
   exec_sessions_enabled: z.boolean().default(true),
+  // Sessions started at or under these directories stay out of MemStore unless the user opts in (ADR-0173).
+  excluded_roots: z.array(z.string().min(1)).max(20).default([]),
   human_authored_only_injection: z.boolean().default(false),
   dreaming_injection: z.boolean().default(false),
   // Claude Code shows a Hook systemMessage on every prompt, so a one-line summary is its default.
   claude_hook_display: hookDisplaySchema.default("summary")
 }).loose().default({ hook_display: "summary", session_start_injection: false, subagents_enabled: false,
-  exec_sessions_enabled: true, human_authored_only_injection: false, dreaming_injection: false, claude_hook_display: "summary" });
+  exec_sessions_enabled: true, excluded_roots: [], human_authored_only_injection: false, dreaming_injection: false, claude_hook_display: "summary" });
 
 export async function readHumanAuthoredOnlyInjection(runtimeRoot: string): Promise<boolean> {
   try {
@@ -85,6 +87,23 @@ export async function readExecSessionsEnabled(runtimeRoot: string): Promise<bool
     return config.adapters.exec_sessions_enabled;
   } catch {
     return true;
+  }
+}
+
+/**
+ * Directories whose Sessions stay out of MemStore (ADR-0173). Missing, invalid or
+ * unreadable settings exclude nothing, so a broken setting never silently stops
+ * capture of Sessions the user expects to keep.
+ */
+export async function readExcludedRoots(runtimeRoot: string): Promise<string[]> {
+  try {
+    const config = z.object({
+      schema_version: z.literal(1),
+      adapters: z.object({ excluded_roots: z.array(z.string().min(1)).max(20).default([]) }).default({ excluded_roots: [] })
+    }).parse(parse(await readFile(join(runtimeRoot, "config.toml"), "utf8")));
+    return config.adapters.excluded_roots;
+  } catch {
+    return [];
   }
 }
 

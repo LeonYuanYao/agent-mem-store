@@ -5,7 +5,8 @@ import { z } from "zod";
 import { readLastAssistantMessage } from "../adapters/claude/transcript.js";
 import { handleCodexHook } from "../adapters/codex/hook.js";
 import { CaptureProgress, renderCaptureDiagnostic } from "../capture/deadline.js";
-import { readClaudeHookDisplay, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
+import { excludedRootDecision, optInNotice } from "../capture/excluded-roots.js";
+import { readClaudeHookDisplay, readExcludedRoots, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
 import { isAgentNotification, userPromptText } from "../contracts/prompt-text.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
@@ -47,14 +48,27 @@ export async function runClaudeHook(eventSource: unknown): Promise<void> {
     // (Claude Code adds agent_id) and the reports they hand back as task notifications.
     if (!await readSubagentsEnabled(root) && (typeof input.agent_id === "string" ||
         (event === "UserPromptSubmit" && typeof input.prompt === "string" && isAgentNotification(userPromptText(input.prompt))))) return;
+    // Claude Code passes the directory it was started in; a `cd` during the Session must not change its Project.
+    const launchDirectory = process.env.CLAUDE_PROJECT_DIR;
+    const sessionPath = launchDirectory !== undefined && isAbsolute(launchDirectory) ? launchDirectory
+      : typeof input.cwd === "string" ? input.cwd : undefined;
+    // Sessions under an excluded root stay out unless the user opts in with `ms：` (ADR-0173).
+    const excludedRoots = await readExcludedRoots(root);
+    let optedIn = false;
+    if (excludedRoots.length > 0 && typeof input.session_id === "string" && sessionPath !== undefined) {
+      const decision = await excludedRootDecision({ runtimeRoot: root, sessionId: input.session_id, path: sessionPath, eventKind: event,
+        ...(typeof input.prompt === "string" ? { prompt: input.prompt } : {}), entries: excludedRoots });
+      if (decision === "excluded") return;
+      optedIn = decision === "opted_in";
+    }
+    // The opt-in shows its notice even when nothing is injected.
+    const notice = (): void => { if (optedIn) process.stdout.write(`${JSON.stringify({ systemMessage: optInNotice })}\n`); };
     let enriched: Record<string, unknown> = { ...input, hook_event_name: event };
     if (capturing && event === "Stop" && typeof input.last_assistant_message !== "string" &&
         typeof input.transcript_path === "string" && typeof input.session_id === "string") {
       const reply = await readLastAssistantMessage(input.transcript_path, input.session_id);
       if (reply !== undefined) enriched = { ...enriched, last_assistant_message: reply };
     }
-    // Claude Code passes the directory it was started in; a `cd` during the Session must not change its Project.
-    const launchDirectory = process.env.CLAUDE_PROJECT_DIR;
     const result = await handleCodexHook({
       runtimeRoot: root,
       input: enriched,
@@ -64,7 +78,7 @@ export async function runClaudeHook(eventSource: unknown): Promise<void> {
       progress: new CaptureProgress(hookBudgetMilliseconds - 200)
     });
     if (result.state === "capture_unavailable") process.stderr.write(`${renderCaptureDiagnostic(result.diagnostic)}\n`);
-    if (!injecting || typeof input.session_id !== "string") return;
+    if (!injecting || typeof input.session_id !== "string") { notice(); return; }
     const sessionId = input.session_id;
     const prompt = typeof input.prompt === "string" ? input.prompt : "";
     // A new or ended Session, or a sensitive prompt, must not leave conversation context behind.
@@ -83,7 +97,7 @@ export async function runClaudeHook(eventSource: unknown): Promise<void> {
       return;
     }
     const injectable = event === "UserPromptSubmit" || (event === "SessionStart" && await readSessionStartInjection(root));
-    if (!injectable || !(result.captured || result.state === "capture_disabled") || result.projectId === undefined) return;
+    if (!injectable || !(result.captured || result.state === "capture_disabled") || result.projectId === undefined) { notice(); return; }
     const foreground = await requestForegroundRetrieval({
       runtimeRoot: root,
       event,
@@ -100,9 +114,10 @@ export async function runClaudeHook(eventSource: unknown): Promise<void> {
         .catch(() => undefined)
       : undefined;
     const retrieved = foreground.state === "completed" ? foreground.text.trim() : "";
-    if (retrieved === "" && recent === undefined) return;
+    if (retrieved === "" && recent === undefined) { notice(); return; }
     const display = await readClaudeHookDisplay(root);
     const systemMessage = [
+      optedIn ? optInNotice : undefined,
       foreground.state === "completed" ? renderHookDisplay(display, event, foreground.text, foreground.renderedTokenCount) : undefined,
       recent !== undefined && display !== "off" ? recentWorkDisplay(recent.count) : undefined
     ].filter((line) => line !== undefined).join("\n");

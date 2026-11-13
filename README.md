@@ -115,6 +115,14 @@ reviews), set `exec_sessions_enabled = false` in `[adapters]` to skip their capt
 and injection the same way. Missing or invalid settings keep the default
 ([ADR-0170](docs/adr/0170-opt-codex-exec-sessions-out.md)).
 
+To keep Sessions started in particular directories out of MemStore, such as an
+editor's per-instance AI workspaces or an evaluation runner's per-case workspaces,
+list them in `[adapters].excluded_roots` (`~` expands; a trailing `*` matches sibling
+directories by name prefix, for example `/tmp/mcp_test_multi_*`). Their Codex and
+Claude Code hooks capture and inject nothing. A prompt that starts with `ms：` or
+`ms:` turns MemStore back on for that Session
+([ADR-0173](docs/adr/0173-exclude-sessions-under-configured-roots.md)).
+
 This switch leaves explicit MCP/Skill operations available, preserves already
 captured work, and cannot remove inherited parent context. Results returned to
 the parent can still be captured there. Codex native memory has separate controls:
@@ -181,8 +189,8 @@ memstore dream digest [--since ISO]                 # what dreaming changed, as 
 ```
 
 A Session idle for 20 minutes gets a short note of where its work stands; the first
-prompt of the next Session in the Project receives the latest two
-([ADR-0164](docs/adr/0164-recent-work-notes-for-the-next-session.md); `recent_work = false` turns it off).
+prompt of the next Session in the Project receives the latest three
+([ADR-0164](docs/adr/0164-recent-work-notes-for-the-next-session.md), [ADR-0174](docs/adr/0174-inject-three-recent-work-notes.md); `recent_work = false` turns it off).
 
 Declare a system you no longer use with `[[dreaming.retired]]` (`note`, `paths`): dreaming stops
 extracting what only it holds and drops items whose evidence lies only under its paths. Subagents

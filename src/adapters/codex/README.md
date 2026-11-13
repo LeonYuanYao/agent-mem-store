@@ -17,7 +17,9 @@ handleCodexHook validates host input and resolves the project/session route befo
 
 Before capture, the CLI applies the default-off subagent policy and, when a machine
 sets `exec_sessions_enabled = false`, skips standalone `codex exec` Sessions the same
-way (ADR-0170). session-kind.ts classifies the source as primary, exec or subagent; it
+way (ADR-0170). Sessions whose `cwd` lies under `[adapters].excluded_roots` are
+skipped as well until a `ms：` prompt opts them in ([excluded-roots.ts](../../capture/excluded-roots.ts),
+ADR-0173). session-kind.ts classifies the source as primary, exec or subagent; it
 reads the exact thread's source from the newest `state_N.sqlite` under
 `CODEX_HOME` (or `~/.codex`), read-only with no SQLite lock wait. Its fallback reads
 at most 1 MiB of the host-provided transcript's first record and requires a

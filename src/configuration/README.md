@@ -23,7 +23,9 @@ Codex native memory configuration.
 
 `[adapters].exec_sessions_enabled` defaults true. A machine sets it false to skip
 standalone `codex exec` Sessions through the same Hook gate; missing or invalid
-configuration keeps the default (ADR-0170).
+configuration keeps the default (ADR-0170). `[adapters].excluded_roots` lists
+directories whose Sessions (Codex and Claude Code) skip the same gate until a `ms：`
+prompt opts them in; missing or invalid configuration excludes nothing (ADR-0173).
 
 - [operations/initialize.ts](../../src/operations/initialize.ts)
 - [integration/setup.ts](../../src/integration/setup.ts)

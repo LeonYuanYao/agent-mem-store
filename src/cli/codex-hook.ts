@@ -9,9 +9,10 @@ import { MemStoreCommandError } from "../contracts/envelope.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { boundConversationMessage } from "../retrieval/conversation-cache.js";
 import { requestForegroundRetrieval, sendForegroundContextUpdate } from "../retrieval/foreground-client.js";
-import { readExecSessionsEnabled, readHookDisplay, readHumanAuthoredOnlyInjection, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
+import { readExcludedRoots, readExecSessionsEnabled, readHookDisplay, readHumanAuthoredOnlyInjection, readSessionStartInjection, readSubagentsEnabled, renderHookDisplay } from "../configuration/hook-display.js";
 import { inspectCodexSessionKind } from "../adapters/codex/session-kind.js";
 import { CaptureProgress, captureErrorCode, renderCaptureDiagnostic } from "../capture/deadline.js";
+import { excludedRootDecision, optInNotice } from "../capture/excluded-roots.js";
 
 const codexHookEventSchema = z.enum([
   "SessionStart",
@@ -59,8 +60,8 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
       JSON.parse(await consumeText(process.stdin))
     );
     progress.enter("session_policy");
-    const [subagentsEnabled, execSessionsEnabled] = await Promise.all([
-      readSubagentsEnabled(resolve(runtimeRoot)), readExecSessionsEnabled(resolve(runtimeRoot))
+    const [subagentsEnabled, execSessionsEnabled, excludedRoots] = await Promise.all([
+      readSubagentsEnabled(resolve(runtimeRoot)), readExecSessionsEnabled(resolve(runtimeRoot)), readExcludedRoots(resolve(runtimeRoot))
     ]);
     if (!subagentsEnabled || !execSessionsEnabled) {
       const kind = await inspectCodexSessionKind(input);
@@ -72,6 +73,18 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
         })}\n`);
         return;
       }
+    }
+    // Sessions under an excluded root stay out unless the user opts in with `ms：` (ADR-0173).
+    let optedIn = false;
+    if (excludedRoots.length > 0 && typeof input.session_id === "string" && typeof input.cwd === "string") {
+      const decision = await excludedRootDecision({ runtimeRoot: resolve(runtimeRoot), sessionId: input.session_id, path: input.cwd,
+        eventKind: event, ...(typeof input.prompt === "string" ? { prompt: input.prompt } : {}), entries: excludedRoots });
+      if (watchdogExpired()) return;
+      if (decision === "excluded") {
+        process.stdout.write(`${JSON.stringify({ continue: true })}\n`);
+        return;
+      }
+      optedIn = decision === "opted_in";
     }
     if (watchdogExpired()) return;
     const result = await handleCodexHook({
@@ -150,6 +163,10 @@ export async function runCodexHook(eventSource: unknown): Promise<void> {
       }
     }
     if (watchdogExpired()) return;
+    if (optedIn) {
+      const shown = typeof output.systemMessage === "string" ? output.systemMessage : "";
+      output = { ...output, systemMessage: shown === "" ? optInNotice : `${optInNotice}\n${shown}` };
+    }
     process.stdout.write(`${JSON.stringify(output)}\n`);
   } catch (error) {
     if (watchdogExpired()) return;
