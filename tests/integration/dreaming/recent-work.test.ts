@@ -84,9 +84,9 @@ test("only the Sessions whose notes could still be injected get one", async () =
   const runtimeRoot = join(root, "runtime");
   const folder = join(root, "project");
   await mkdir(folder, { recursive: true });
-  const project = await resolveProject({ sessionId: "old", path: folder, runtimeRoot });
+  const project = await resolveProject({ sessionId: "first", path: folder, runtimeRoot });
   if (project.status !== "resolved") throw new Error("Project did not resolve.");
-  for (const [index, sessionId] of ["old", "middle", "new"].entries()) {
+  for (const [index, sessionId] of ["first", "second", "third", "fourth"].entries()) {
     await captureEvent({ runtimeRoot, event: { schemaVersion: 1, eventId: `msevent_latest_${String(index)}`, deduplicationKey: `latest:${String(index)}`,
       agent: "claude", eventKind: "UserPromptSubmit", occurredAt: new Date().toISOString(), projectId: project.projectId, sessionId,
       payload: { prompt: `${sessionId} 会话的工作` } } });
@@ -94,14 +94,14 @@ test("only the Sessions whose notes could still be injected get one", async () =
   }
   const noted: string[] = [];
   const model = { summarizeWork: (request: { transcript: string }) => {
-    noted.push(request.transcript.includes("old") ? "old" : request.transcript.includes("middle") ? "middle" : "new");
+    noted.push(["first", "second", "third", "fourth"].find((name) => request.transcript.includes(name)) ?? "unknown");
     return Promise.resolve({ carryOver: true, summary: "进行中", usage: { tokens: 1, seconds: 1 } });
   } } as unknown as DreamModel;
   const configuration = dreamingConfigurationSchema.parse({ enabled: true });
   const now = new Date(Date.now() + 30 * 60_000).toISOString();
-  for (let step = 0; step < 4; step += 1) await runNextRecentWorkStep({ runtimeRoot, now, configuration, model });
-  // Two newer notes already cover the Project: the oldest Session is never summarized.
-  expect(noted).toEqual(["new", "middle"]);
+  for (let step = 0; step < 5; step += 1) await runNextRecentWorkStep({ runtimeRoot, now, configuration, model });
+  // Three newer notes already cover the Project: the oldest Session is never summarized.
+  expect(noted).toEqual(["fourth", "third", "second"]);
 });
 
 // ADR-0172: Sessions of a Project under `skip_roots` get no note, and notes written before are not injected.

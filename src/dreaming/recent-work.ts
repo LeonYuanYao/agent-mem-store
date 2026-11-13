@@ -17,7 +17,8 @@ import { readSessionStream } from "./stream.js";
 
 const transcriptCharacters = 20_000;
 const summaryCharacters = 400;
-const notesInjected = 2;
+// The first prompt gets this many of the Project's latest notes (ADR-0174; two before).
+const notesInjected = 3;
 const refreshMinutes = 60;
 
 export type RecentWorkStepResult =
@@ -42,7 +43,7 @@ export async function runNextRecentWorkStep(request: {
     // Sessions of Projects under `skip_roots` get no note (ADR-0172).
     const skipped = JSON.stringify([...await skippedProjects(database, request.configuration)]);
     // The most recently active idle Session whose work has moved on since its note.
-    // Only the latest notes of a Project are injected, so a Session with two newer notes in its Project is skipped.
+    // Only the latest notes of a Project are injected, so a Session with that many newer notes in its Project is skipped.
     const session = database.prepare(
       `WITH activity AS (
          SELECT session_id, max(created_at) AS last_at, max(agent) AS agent, sum(event_kind = 'UserPromptSubmit') AS prompts
