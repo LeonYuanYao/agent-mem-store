@@ -35,6 +35,21 @@ filters before rendering and recording epoch tokens/deduplication, and records
 provider telemetry under receipt `timings.jev`. SessionStart and explicit recall
 do not invoke Jev. See [ADR-0135](../../docs/adr/0135-add-opt-in-jev-automatic-relevance-filter.md).
 
+With Jev enabled, one request judges up to 18 candidates: the local selection first,
+then the next candidates by reciprocal rank fusion of their semantic and BM25 ranks
+(plus a vote for exact metadata and applicability). Pool candidates carry
+`jev_pool_candidate`; weak ones need 0.6 and at most two are kept. Kept items are
+ordered by Jev score into the six-item, token-bounded pack. Without a Jev judgment
+pool candidates are dropped and the ADR-0152 fallback applies. Jev's latency barely
+grows with the candidate count, while a second parallel request would pay a proxied
+TLS handshake. See [ADR-0175](../../docs/adr/0175-let-jev-judge-a-fused-candidate-pool.md).
+
+Lexical ranking in both automatic and explicit recall uses BM25 over
+[snapshot.ts](snapshot.ts) search terms: words, their Latin and CJK runs and CJK
+character bigrams, so a Chinese word is found inside a longer run of Chinese text.
+Explicit recall no longer ranks with the FTS5 `unicode61` table, which keeps such a
+run as one token. See [ADR-0176](../../docs/adr/0176-rank-explicit-recall-with-bigram-bm25.md).
+
 [conversation-cache.ts](conversation-cache.ts) keeps at most three prior User/Assistant
 turns per Project and Session (128 session entries, bounded messages). UserPromptSubmit
 starts a turn; a lightweight Stop update attaches the last Assistant reply only when
@@ -49,7 +64,8 @@ query terms, entities and constraints. Unused space is shared rather than reserv
 per message. Whole oversized paragraphs are omitted; this is lossy selection, not a
 semantic summary or a guarantee that all qualifications survive. History is capped
 at 1,024 local `o200k_base` tokens including labels/JSON. Current request, candidates
-and criteria take precedence within a 4,096-token serialized request and 48 KiB cap;
+and criteria take precedence within a 4,096-token serialized request and 48 KiB cap,
+each growing by 512 tokens and 6 KiB per candidate beyond six (ADR-0175);
 provider token accounting may differ. No additional model call extracts keywords.
 Local recall still uses its existing User-only history rules. Jev must resolve the
 current action, target and conditions before judging applicability; Assistant text

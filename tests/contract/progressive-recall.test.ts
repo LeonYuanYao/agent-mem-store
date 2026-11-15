@@ -180,3 +180,29 @@ test("explicit deep reads warn at cumulative token bands without imposing a prod
   expect(second.cumulativeTokenCount).toBeGreaterThan(16_384);
   expect(second.warning).toContain("16,384");
 });
+
+test("explicit search finds a Chinese word inside a longer run of Chinese text", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-progressive-recall-cjk-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  const memories = [
+    makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174401", revisionId: "msrev_123e4567-e89b-42d3-a456-426614174411",
+      body: "下载安装包后先解压再双击运行，多开时每个实例用独立目录。", compact: "下载安装包后先解压再双击运行，多开时每个实例用独立目录。",
+      scope: { kind: "project", projectId }
+    }),
+    makeCanonicalMemory({
+      memoryId: "msmem_123e4567-e89b-42d3-a456-426614174402", revisionId: "msrev_123e4567-e89b-42d3-a456-426614174412",
+      body: "提交前跑完单元测试。", compact: "提交前跑完单元测试。", scope: { kind: "project", projectId }
+    })
+  ];
+  for (const memory of memories) await writeCanonicalMemory({ vaultRoot, runtimeRoot, actor: "human", memory });
+  // No semantic signal: both texts embed alike, so only lexical evidence can rank them.
+  const flat: EmbeddingAdapter = { ...adapter, embed: (texts) => Promise.resolve(texts.map(() => [0, 1])) };
+  await buildRetrievalIndex({ runtimeRoot, vaultRoot, adapter: flat, builtAt: "2026-08-07T11:00:00.000Z" });
+  const found = await recallSearch({ runtimeRoot, vaultRoot, query: "安装包 多开", scope: "current", currentProjectId: projectId,
+    callerIdentity: "codex:test-session", adapter: flat, requestedAt: "2026-08-07T11:01:00.000Z" });
+  expect(found.items.map((item) => item.memoryId)).toEqual(["msmem_123e4567-e89b-42d3-a456-426614174401"]);
+  expect(found.items[0]?.relevanceReasons).toContain("lexical_match");
+});

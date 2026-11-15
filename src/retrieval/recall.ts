@@ -19,6 +19,7 @@ import {
 import type { EmbeddingAdapter } from "./index.js";
 import type { RetrievalJudge } from "./judge.js";
 import { approvedShadowEmbeddingProfile } from "./shadow-profile.js";
+import { countSearchTerms } from "./snapshot.js";
 
 const tokenizer = getEncoding("o200k_base");
 const scopeSchema = z.enum(["current", "global", "project", "all_projects"]);
@@ -195,12 +196,54 @@ function eligibleForScope(
   return row.sensitivity === "normal";
 }
 
-function ftsExpression(query: string): string | undefined {
-  const terms = query.match(/[\p{L}\p{N}_]+/gu)?.filter((term) => term.length > 1) ?? [];
-  const unique = [...new Set(terms)].slice(0, 24);
-  return unique.length === 0
-    ? undefined
-    : unique.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
+const LEXICAL_QUERY_TERM_LIMIT = 64;
+const BM25_K1 = 1.2;
+const BM25_B = 0.75;
+
+/**
+ * Automatic recall search terms, merged with the plain words FTS5 `unicode61` produced
+ * (punctuation-free, so `memory.` and `long-term` also match `memory` and `term`).
+ */
+function explicitSearchTerms(text: string): ReadonlyMap<string, number> {
+  const counts = new Map(countSearchTerms(text));
+  const words = new Map<string, number>();
+  for (const word of text.normalize("NFKC").toLocaleLowerCase("en-US").match(/[\p{L}\p{N}]+/gu) ?? []) {
+    if (Array.from(word).length > 1) words.set(word, (words.get(word) ?? 0) + 1);
+  }
+  for (const [word, count] of words) counts.set(word, Math.max(count, counts.get(word) ?? 0));
+  return counts;
+}
+
+function lexicalRanking(query: string, documents: readonly RetrievalDocument[]): ReadonlyMap<string, number> {
+  const counted = documents.map((document) => {
+    const frequencies = explicitSearchTerms(document.searchableText);
+    let length = 0;
+    for (const count of frequencies.values()) length += count;
+    return { memoryId: document.memoryId, frequencies, length };
+  });
+  const averageLength = counted.reduce((sum, item) => sum + item.length, 0) / Math.max(1, counted.length);
+  const documentFrequency = new Map<string, number>();
+  const terms = [...explicitSearchTerms(query).keys()];
+  for (const item of counted) {
+    for (const term of terms) if (item.frequencies.has(term)) documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
+  }
+  const weighted = terms.filter((term) => (documentFrequency.get(term) ?? 0) > 0)
+    .sort((left, right) => (documentFrequency.get(left) ?? 0) - (documentFrequency.get(right) ?? 0) || left.localeCompare(right))
+    .slice(0, LEXICAL_QUERY_TERM_LIMIT)
+    .map((term) => {
+      const frequency = documentFrequency.get(term) ?? 0;
+      return { term, idf: Math.log(1 + (counted.length - frequency + 0.5) / (frequency + 0.5)) };
+    });
+  return new Map(counted.flatMap((item) => {
+    const lengthNorm = BM25_K1 * (1 - BM25_B + BM25_B * item.length / Math.max(1, averageLength));
+    let score = 0;
+    for (const { term, idf } of weighted) {
+      const frequency = item.frequencies.get(term) ?? 0;
+      if (frequency > 0) score += idf * frequency * (BM25_K1 + 1) / (frequency + lengthNorm);
+    }
+    return score > 0 ? [[item.memoryId, score] as const] : [];
+  }).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([memoryId], index) => [memoryId, index + 1] as const));
 }
 
 function queryTerms(query: string): readonly string[] {
@@ -322,26 +365,9 @@ export async function recallSearch(request: {
   const documents = rows.map((row) => documentFromRow(row));
   const terms = queryTerms(normalized);
 
-  const lexicalRanks = new Map<string, number>();
-  const expression = ftsExpression(normalized);
-  if (expression !== undefined) {
-    const lexicalDatabase = await openRecallDatabase(request.runtimeRoot);
-    try {
-      const allowed = new Set(documents.map((item) => item.memoryId));
-      const matches = lexicalDatabase.prepare(
-        `SELECT memory_id, bm25(active_fts_memories) AS lexical_score
-         FROM active_fts_memories
-         WHERE active_fts_memories MATCH ? AND index_revision_id = ?
-         ORDER BY lexical_score, memory_id`
-      ).all(expression, indexRevisionId).filter((row) =>
-        allowed.has(z.string().parse(row.memory_id))
-      );
-      matches.forEach((row, index) => lexicalRanks.set(z.string().parse(row.memory_id), index + 1));
-    } finally {
-      lexicalDatabase.close();
-    }
-  }
-
+  // BM25 over the same terms as automatic recall: CJK character bigrams find a word inside
+  // a longer run of Chinese text, which the FTS5 unicode61 tokenizer keeps as one token.
+  const lexicalRanks = lexicalRanking(normalized, documents);
   const semanticScores = new Map<string, number>();
   let semanticStage: "complete" | "lexical_only" = "lexical_only";
   if (
