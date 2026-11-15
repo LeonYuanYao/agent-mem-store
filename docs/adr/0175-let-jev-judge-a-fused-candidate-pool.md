@@ -73,3 +73,13 @@ two ranks gave 0.78-0.81. Keeping as many items as Jev kept (72) would have inje
 to 13 relevant Memories instead of 36. It sees no conversation, judges topical overlap
 rather than applicability, and took 340 ms median and 0.5-1.1 s at p90 on CPU for 18
 pairs. Jev fell back on about 2% of prompts since 11-02, so a fallback role adds little.
+
+Rejected: a second embedding model as a third fused rank (2026-11-16). bge-m3, bge-base-zh-v1.5
+and Qwen3-Embedding-0.6B (int8) were each added to the fusion and tried in place of e5. With the
+new pool members labeled too (4,630 pairs, 140 relevant), only bge-m3 helped the pool: relevant
+Memory among the 18 candidates rose from 69.3% to 77.9% (77.1% in the real run), mostly for
+prompts of up to 300 characters; the other two lowered it on long prompts. Run end to end with Jev,
+injection did not improve: 33 to 32 relevant Memories injected, precision 50.8% to 49.2%. Jev
+scored most added relevant candidates 0.1 to 0.56, nearly all for short follow-ups such as "做吧"
+whose task it cannot see, below the 0.6 a weak candidate needs. bge-m3 would add 570 MB on disk,
+about 800 MB of worker memory and 30 ms median, 140 ms p90 per prompt on CPU.
