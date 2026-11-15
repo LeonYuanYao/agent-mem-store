@@ -33,4 +33,6 @@ Semantic recall already covered most Chinese queries, so the gain is small; no
 measure regressed. Labels are one model's judgment.
 
 Automatic recall still uses `countSearchTerms` alone, where a sentence-final word
-keeps its period; changing that shifts local scores and needs its own evaluation.
+keeps its period. Also adding punctuation-trimmed words and identifier parts there was
+tried on the ADR-0175 set: relevant recall fell from 29.2% to 22.5% and precision from
+53.8% to 45.0% (common parts dilute BM25 and coverage), so it was not adopted.
