@@ -65,3 +65,11 @@ The weekly audit labels the nearest Memories by both the local score and the fus
 score, so a ranking is not graded only on its own pool, and reports weak candidates
 outside the pool as "not among Jev's candidates". Labels are one model's judgment;
 the sample is 117 relevant pairs.
+
+Rejected: a local cross-encoder (bge-reranker-base, int8, as in other knowledge bases)
+in place of or beside Jev. On the 2,488 labeled pairs Jev scored in the final run it
+separated relevant from irrelevant Memory with AUC 0.74-0.75 (Jev 0.95); averaging the
+two ranks gave 0.78-0.81. Keeping as many items as Jev kept (72) would have injected 9
+to 13 relevant Memories instead of 36. It sees no conversation, judges topical overlap
+rather than applicability, and took 340 ms median and 0.5-1.1 s at p90 on CPU for 18
+pairs. Jev fell back on about 2% of prompts since 11-02, so a fallback role adds little.
