@@ -76,39 +76,53 @@ export interface RetrievalSearchDocument {
   readonly normalizedApplicabilityText: string;
   readonly searchableTerms: ReadonlySet<string>;
   readonly applicabilityTerms: ReadonlySet<string>;
+  /** Occurrences of each searchable term and their total, for BM25 ranking. */
+  readonly termFrequencies: ReadonlyMap<string, number>;
+  readonly termCount: number;
 }
 
 export interface RetrievalSearchIndex {
   readonly documentsByMemoryId: ReadonlyMap<string, RetrievalSearchDocument>;
   readonly memoryIdByRef: ReadonlyMap<number, string>;
   readonly postingsByTerm: ReadonlyMap<string, readonly string[]>;
+  /** Mean `termCount` of the indexed documents. */
+  readonly averageTermCount: number;
 }
 
 function normalizeSearchText(text: string): string {
   return text.normalize("NFKC").toLocaleLowerCase("en-US");
 }
 
-export function tokenizeSearchText(text: string): ReadonlySet<string> {
-  const terms = new Set<string>();
+/**
+ * Counts search terms: each word, its Latin and CJK runs, and CJK character bigrams.
+ * A run equal to its word is the same occurrence and counts once.
+ */
+export function countSearchTerms(text: string): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  const add = (term: string): void => { counts.set(term, (counts.get(term) ?? 0) + 1); };
   const normalized = normalizeSearchText(text);
   for (const token of normalized.match(/[\p{L}\p{N}_./:-]+/gu) ?? []) {
-    if (Array.from(token).length > 1) terms.add(token);
+    if (Array.from(token).length > 1) add(token);
     for (const latinRun of token.match(/[a-z0-9_./:-]+/gu) ?? []) {
-      if (latinRun.length > 1) terms.add(latinRun);
+      if (latinRun.length > 1 && latinRun !== token) add(latinRun);
     }
     for (const cjkRun of token.match(
       /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]+/gu
     ) ?? []) {
       const characters = Array.from(cjkRun);
-      if (characters.length > 1) terms.add(cjkRun);
+      if (characters.length > 1 && cjkRun !== token) add(cjkRun);
       for (let index = 0; index + 1 < characters.length; index += 1) {
         const left = characters[index];
         const right = characters[index + 1];
-        if (left !== undefined && right !== undefined) terms.add(left + right);
+        if (left !== undefined && right !== undefined) add(left + right);
       }
     }
   }
-  return terms;
+  return counts;
+}
+
+export function tokenizeSearchText(text: string): ReadonlySet<string> {
+  return new Set(countSearchTerms(text).keys());
 }
 
 export function buildRetrievalSearchIndex(
@@ -117,21 +131,28 @@ export function buildRetrievalSearchIndex(
   const documentsByMemoryId = new Map<string, RetrievalSearchDocument>();
   const memoryIdByRef = new Map<number, string>();
   const mutablePostings = new Map<string, string[]>();
+  let totalTermCount = 0;
   for (const document of documents) {
     const normalizedSearchableText = normalizeSearchText(document.searchableText);
     const normalizedApplicabilityText = normalizeSearchText([
       document.applicabilitySummary,
       ...document.applicabilityConditions
     ].join("\n"));
-    const searchableTerms = tokenizeSearchText(normalizedSearchableText);
+    const termFrequencies = countSearchTerms(normalizedSearchableText);
+    const searchableTerms = new Set(termFrequencies.keys());
     const applicabilityTerms = tokenizeSearchText(normalizedApplicabilityText);
+    let termCount = 0;
+    for (const count of termFrequencies.values()) termCount += count;
+    totalTermCount += termCount;
     documentsByMemoryId.set(document.memoryId, {
       memoryId: document.memoryId,
       memoryRef: document.memoryRef,
       normalizedSearchableText,
       normalizedApplicabilityText,
       searchableTerms,
-      applicabilityTerms
+      applicabilityTerms,
+      termFrequencies,
+      termCount
     });
     memoryIdByRef.set(document.memoryRef, document.memoryId);
     for (const term of searchableTerms) {
@@ -145,7 +166,8 @@ export function buildRetrievalSearchIndex(
     memoryIdByRef,
     postingsByTerm: new Map(
       [...mutablePostings.entries()].map(([term, memoryIds]) => [term, memoryIds] as const)
-    )
+    ),
+    averageTermCount: documents.length === 0 ? 0 : totalTermCount / documents.length
   };
 }
 

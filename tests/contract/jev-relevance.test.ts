@@ -414,3 +414,43 @@ test("fuller memory text is sent when it fits and falls back to the compact when
   expect(bodies[1]).toContain("WAL compact");
   expect(bodies[1]).toContain("每批写入后 checkpoint");
 });
+
+test("one request judges up to 24 candidates; the request budget grows with each beyond six", async () => {
+  const bodies: string[] = [];
+  const fetcher = vi.fn<typeof fetch>((_url, init) => {
+    const body = typeof init?.body === "string" ? init.body : "";
+    bodies.push(body);
+    const count = Object.keys((JSON.parse(body) as { questions: Record<string, unknown> }).questions).length;
+    return Promise.resolve(response(Array.from({ length: count }, (_, index) => index / 100)));
+  });
+  const items = Array.from({ length: 18 }, (_, index) => ({ memoryId: `memory-${String(index)}`, text: `compact ${String(index)}`,
+    detailText: `detail ${String(index)}: ${"checkpoint the WAL after each batch ".repeat(20)}` }));
+  const result = await filter(fetcher).filter({ ...input(), items });
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(result.telemetry.state).toBe("filtered");
+  expect(result.scores?.map(item => item.memoryId)).toEqual(items.map(item => item.memoryId));
+  expect(result.telemetry.requestTokens).toBeGreaterThan(4096);
+  expect(result.telemetry.requestTokens).toBeLessThanOrEqual(4096 + 12 * 512);
+  expect(bodies[0]).toContain("detail 0:");
+  const tooMany = Array.from({ length: 25 }, (_, index) => ({ memoryId: `memory-${String(index)}`, text: `compact ${String(index)}` }));
+  expect((await filter(fetcher).filter({ ...input(), items: tooMany })).telemetry.reason).toBe("input_limit");
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+test("details fall back to compacts, longest first, until a large request fits its budget", async () => {
+  const bodies: string[] = [];
+  const fetcher = vi.fn<typeof fetch>((_url, init) => {
+    const body = typeof init?.body === "string" ? init.body : "";
+    bodies.push(body);
+    return Promise.resolve(response(Array.from({ length: 12 }, () => 0.5)));
+  });
+  const items = Array.from({ length: 12 }, (_, index) => ({ memoryId: `memory-${String(index)}`, text: `compact ${String(index)}`,
+    detailText: `detail ${String(index)} ${Array.from({ length: 150 + index * 40 }, (_, word) => `w${String(word)}`).join(" ")}` }));
+  const result = await filter(fetcher).filter({ ...input(), items });
+  expect(result.telemetry.state).toBe("filtered");
+  expect(result.telemetry.requestTokens).toBeLessThanOrEqual(4096 + 6 * 512);
+  // The longest detail is replaced first; the shortest survives.
+  expect(bodies[0]).not.toContain("detail 11 ");
+  expect(bodies[0]).toContain("compact 11");
+  expect(bodies[0]).toContain("detail 0 ");
+});

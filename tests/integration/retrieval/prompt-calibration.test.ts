@@ -116,3 +116,29 @@ test("nothing standing out under a Jev failure leaves the pack empty with its re
   expect(pack.items).toHaveLength(0);
   expect(pack.emptyReason).toBe("unfiltered_low_confidence");
 });
+
+test("Jev judges the whole fused pool in one request and the best by its score are injected", async () => {
+  const location = await fixture();
+  const requests: string[][] = [];
+  const noiseIds = noise.map(memory => memory.memoryId);
+  const scores = new Map<string, number>([[target.memoryId, 0.5], [probable.memoryId, 0.9],
+    [noiseIds[0] ?? "", 0.6], [noiseIds[1] ?? "", 0.7], [noiseIds[2] ?? "", 0.65]]);
+  const judge: AutomaticRelevanceFilter = { filter: request => {
+    requests.push(request.items.map(item => item.memoryId));
+    return Promise.resolve({ telemetry: { state: "filtered", model: "jev-1.13.0", threshold: 0.5, elapsedMs: 1 },
+      scores: request.items.map(item => ({ memoryId: item.memoryId, score: scores.get(item.memoryId) ?? 0.1 })) });
+  } };
+  const pack = await ask(location, "jev-pool", judge);
+  // Every eligible candidate, local selection first, in a single request.
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.slice(0, 2)).toEqual([target.memoryId, probable.memoryId]);
+  expect(new Set(requests[0])).toEqual(new Set([target.memoryId, probable.memoryId, ...noiseIds]));
+  // Ordered by Jev's score; at most two weak candidates, each at 0.55 or more.
+  expect(pack.items.map(item => item.memoryId)).toEqual([probable.memoryId, noiseIds[1], noiseIds[2], target.memoryId]);
+
+  const limited = await prepareUserPromptShadowPack({ ...location, projectId, sessionId: "jev-pool-limit", prompt, adapter,
+    relevanceFilter: judge, jevCandidateLimit: 4, signals: { files: [], symbols: [], errors: [], commands: [] },
+    requestedAt: "2026-10-22T12:01:00.000Z" });
+  expect(requests[1]).toHaveLength(4);
+  expect(limited.items.length).toBeLessThanOrEqual(4);
+});

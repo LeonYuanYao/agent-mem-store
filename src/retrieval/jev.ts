@@ -13,6 +13,21 @@ const warmEndpoint = "https://api.typesafe.ai/cdn-cgi/trace";
 const warmTimeoutMilliseconds = 5_000;
 const maximumResponseBytes = 32 * 1024;
 const maximumRequestBytes = 48 * 1024;
+// One request judges the whole candidate pool: Jev's latency barely grows with its
+// size, while a second parallel request pays a proxied TLS handshake (ADR-0175).
+export const maximumJevItems = 24;
+// The request budget grows with each candidate past the first six (ADR-0146, ADR-0175).
+const baseRequestTokens = 4096;
+const tokensPerExtraItem = 512;
+const bytesPerExtraItem = 6 * 1024;
+// Serialized request structure outside the prompt, context and memory texts, with margin.
+const requestFrameTokens = 64;
+let questionFrameTokenCount: number | undefined;
+/** Tokens one question adds besides its memory text: alias, criteria and the shared question. */
+function questionFrameTokens(): number {
+  questionFrameTokenCount ??= contextTokenCount(JSON.stringify({ c10: { type: "noul", instructions: { memory: "", question }, criteria } }));
+  return questionFrameTokenCount;
+}
 const receiptReserveMilliseconds = 200;
 
 // Keep this criterion aligned with the frozen, real-API threshold experiments.
@@ -181,9 +196,12 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
       controller.signal.throwIfAborted();
       if (key === undefined) return result("fallback", "missing_credentials");
       stage = "request_preparation";
-      if (request.items.length > 6 || new Set(request.items.map(item => item.memoryId)).size !== request.items.length) {
+      if (request.items.length > maximumJevItems || new Set(request.items.map(item => item.memoryId)).size !== request.items.length) {
         return result("fallback", "input_limit");
       }
+      const extraItems = Math.max(0, request.items.length - 6);
+      const tokenLimit = baseRequestTokens + extraItems * tokensPerExtraItem;
+      const byteLimit = maximumRequestBytes + extraItems * bytesPerExtraItem;
       const conversation: ConversationView = request.conversation ?? {
         messages: request.recentPrompts.map(text => ({ role: "user", text, truncated: false })),
         status: request.recentPrompts.length === 0 ? "missing" : "partial"
@@ -194,7 +212,7 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
         return result("fallback", "sensitive_input");
       }
       // Fuller memory text first; the longest falls back to its summary until the conversation
-      // keeps at least `minimumHistoryTokens` of the 4,096-token request (ADR-0167).
+      // keeps at least `minimumHistoryTokens` of the request budget (ADR-0167, ADR-0175).
       const memoryTexts = request.items.map(item => item.detailText ?? item.text);
       const aliases = request.items.map((item, index) => ({ alias: `c${String(index + 1)}`, item, index }));
       const serialize = (context: readonly string[], truncated: boolean): string => JSON.stringify({
@@ -206,27 +224,41 @@ export class JevAutomaticRelevanceFilter implements AutomaticRelevanceFilter {
         }]))
       });
       const reserved = conversation.messages.length > 0 ? minimumHistoryTokens : 0;
-      for (;;) {
-        // Bytes first: tokenizing an oversized request is slow, and the byte limit alone decides it.
-        const draft = serialize([], conversation.messages.length > 0);
-        if (Buffer.byteLength(draft) <= maximumRequestBytes && contextTokenCount(draft) <= 4096 - reserved - 16) break;
-        const longest = memoryTexts.map((text, index) => ({ index, extra: text.length - (request.items[index]?.text.length ?? 0) }))
-          .filter(entry => entry.extra > 0).sort((left, right) => right.extra - left.extra)[0];
-        if (longest === undefined) break;
-        memoryTexts[longest.index] = request.items[longest.index]?.text ?? "";
+      // Bytes first: tokenizing an oversized request is slow, and the byte limit alone decides it.
+      const textBytes = (text: string): number => Buffer.byteLength(JSON.stringify(text));
+      const shrinkable = request.items.map((item, index) => ({ index, extra: (memoryTexts[index]?.length ?? 0) - item.text.length }))
+        .filter(entry => entry.extra > 0).sort((left, right) => right.extra - left.extra);
+      let estimatedBytes = Buffer.byteLength(serialize([], conversation.messages.length > 0));
+      const minimumBytes = shrinkable.reduce((bytes, { index }) =>
+        bytes - textBytes(memoryTexts[index] ?? "") + textBytes(request.items[index]?.text ?? ""), estimatedBytes);
+      if (minimumBytes > byteLimit) return result("fallback", "input_limit");
+      // Each part is counted once; the whole request is counted exactly below.
+      const textTokens = (text: string): number => contextTokenCount(JSON.stringify(text));
+      const memoryTokens = memoryTexts.map(textTokens);
+      let estimatedTokens = textTokens(request.prompt) + requestFrameTokens +
+        request.items.length * questionFrameTokens() + memoryTokens.reduce((sum, tokens) => sum + tokens, 0);
+      for (const { index } of shrinkable) {
+        if (estimatedBytes <= byteLimit && estimatedTokens <= tokenLimit - reserved - 16) break;
+        const detail = memoryTexts[index] ?? "";
+        const summary = request.items[index]?.text ?? "";
+        const summaryTokens = textTokens(summary);
+        estimatedTokens -= (memoryTokens[index] ?? 0) - summaryTokens;
+        estimatedBytes -= textBytes(detail) - textBytes(summary);
+        memoryTokens[index] = summaryTokens;
+        memoryTexts[index] = summary;
       }
       const base = serialize([], conversation.messages.length > 0);
-      if (Buffer.byteLength(base) > maximumRequestBytes) return result("fallback", "input_limit");
-      const baseTokens = contextTokenCount(base);
-      if (baseTokens > 4096) return result("fallback", "input_limit");
-      let historyBudget = Math.min(1024, Math.max(0, 4096 - baseTokens - 16));
+      if (Buffer.byteLength(base) > byteLimit) return result("fallback", "input_limit");
+      const baseTokens = estimatedTokens;
+      if (baseTokens > tokenLimit) return result("fallback", "input_limit");
+      let historyBudget = Math.min(1024, Math.max(0, tokenLimit - baseTokens - 16));
       let context = selectConversationContext({ prompt: request.prompt, messages: conversation.messages, tokenBudget: historyBudget });
       let payload = serialize(context.text, context.truncated);
       let requestTokens = contextTokenCount(payload);
       // Count the serialized request, including repeated criteria and JSON escaping.
-      while (requestTokens > 4096 || Buffer.byteLength(payload) > maximumRequestBytes) {
+      while (requestTokens > tokenLimit || Buffer.byteLength(payload) > byteLimit) {
         if (historyBudget === 0) return result("fallback", "input_limit");
-        historyBudget = Math.max(0, historyBudget - Math.max(64, requestTokens - 4096));
+        historyBudget = Math.max(0, historyBudget - Math.max(64, requestTokens - tokenLimit));
         context = selectConversationContext({ prompt: request.prompt, messages: conversation.messages, tokenBudget: historyBudget });
         payload = serialize(context.text, context.truncated);
         requestTokens = contextTokenCount(payload);

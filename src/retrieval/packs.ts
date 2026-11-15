@@ -36,8 +36,11 @@ const JEV_DETAIL_MAXIMUM_TOKENS = 300;
 const PROMPT_ITEM_LIMIT = 6;
 const PROBABLE_ITEM_LIMIT = 2;
 // Weak candidates that Jev may rescue (ADR-0168): a higher score and at most two per prompt.
-const JEV_WEAK_MINIMUM_SCORE = 0.55;
+// 0.6 since the fused pool sends many more of them (ADR-0175).
+const JEV_WEAK_MINIMUM_SCORE = 0.6;
 const JEV_WEAK_ITEM_LIMIT = 2;
+// Candidates Jev judges in one request: the local selection, then the next by rank fusion (ADR-0175).
+const JEV_CANDIDATE_LIMIT = 18;
 const SESSION_BUCKET_PAGE_SIZE = 16;
 const SESSION_SNAPSHOT_CHECKPOINT_INTERVAL = 16;
 const RECEIPT_OMISSION_DETAIL_LIMIT = 128;
@@ -47,6 +50,12 @@ const AUTOMATIC_LEXICAL_CANDIDATE_LIMIT = 128;
 const AUTOMATIC_SEMANTIC_CANDIDATE_LIMIT = 64;
 const AUTOMATIC_SIGNAL_TERM_LIMIT = 16;
 const AUTOMATIC_SIGNAL_CANDIDATE_LIMIT = 64;
+const AUTOMATIC_BM25_TERM_LIMIT = 256;
+const BM25_K1 = 1.2;
+const BM25_B = 0.75;
+// Reciprocal rank fusion of semantic and BM25 ranks orders the candidates Jev judges
+// beyond the local selection; exact metadata counts as one more first-place vote.
+const FUSION_RANK_OFFSET = 60;
 const AUTOMATIC_RARE_TERM_FRACTION = 0.01;
 const AUTOMATIC_SINGLE_RARE_TERM_MINIMUM_LENGTH = 3;
 // These words still participate in lexical and multi-term exact matching. Only
@@ -100,6 +109,8 @@ interface ScoredMemory {
   readonly reasons: readonly string[];
   readonly similarity: number;
   readonly rankingSimilarity: number;
+  // Orders the candidates Jev judges beyond the local selection.
+  readonly fusedScore: number;
   readonly features: PromptMemoryFeatures;
 }
 
@@ -110,6 +121,8 @@ export interface PromptMemoryFeatures {
   readonly semanticLift: number;
   readonly semanticRank: number | undefined;
   readonly lexicalRank: number | undefined;
+  readonly bm25Rank: number | undefined;
+  readonly fusedScore: number;
   readonly lexicalCoverage: number;
   readonly lexicalMatchedCount: number;
   readonly exact: boolean;
@@ -1095,6 +1108,7 @@ async function automaticCandidates(request: {
   readonly rankingTerms: readonly string[];
   readonly rankingTermWeights: ReadonlyMap<string, number>;
   readonly rareRankingTerms: ReadonlySet<string>;
+  readonly bm25Terms: readonly { readonly term: string; readonly idf: number }[];
 }> {
   const eligibleIds = new Set(request.memories.map((memory) => memory.memoryId));
   const scopedPostingsByTerm = new Map<string, readonly string[]>();
@@ -1224,6 +1238,17 @@ async function automaticCandidates(request: {
     }
   }
   const memoryById = new Map(request.memories.map((memory) => [memory.memoryId, memory] as const));
+  // Okapi BM25 IDF over the Memories in scope; the rarest terms of a long prompt suffice.
+  const bm25Terms = request.terms
+    .filter((term) => documentFrequency(term) > 0)
+    .sort((left, right) => documentFrequency(left) - documentFrequency(right) ||
+      right.length - left.length || left.localeCompare(right))
+    .slice(0, AUTOMATIC_BM25_TERM_LIMIT)
+    .map((term) => ({
+      term,
+      idf: Math.log(1 + (request.memories.length - documentFrequency(term) + 0.5) /
+        (documentFrequency(term) + 0.5))
+    }));
   return {
     memories: [...candidateIds]
       .map((memoryId) => memoryById.get(memoryId))
@@ -1234,7 +1259,8 @@ async function automaticCandidates(request: {
     directMemoryIds,
     rankingTerms,
     rankingTermWeights,
-    rareRankingTerms
+    rareRankingTerms,
+    bm25Terms
   };
 }
 
@@ -1474,6 +1500,8 @@ export interface UserPromptShadowPackRequest {
   readonly recentPrompts?: readonly string[];
   readonly conversation?: ConversationView;
   readonly relevanceFilter?: AutomaticRelevanceFilter;
+  /** Overrides how many candidates Jev judges; for evaluation. */
+  readonly jevCandidateLimit?: number;
   readonly foregroundDeadlineAt?: number;
   readonly signals: {
     readonly files: readonly string[];
@@ -1583,6 +1611,19 @@ async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest
   const semanticRanking = [...semantic.scores.entries()]
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
   const semanticRank = new Map(semanticRanking.map(([memoryId], index) => [memoryId, index + 1]));
+  const bm25Ranking = candidates.memories.flatMap((memory) => {
+    const document = searchIndex.documentsByMemoryId.get(memory.memoryId);
+    if (document === undefined) return [];
+    const lengthNorm = BM25_K1 * (1 - BM25_B + BM25_B * document.termCount /
+      Math.max(1, searchIndex.averageTermCount));
+    let score = 0;
+    for (const { term, idf } of candidates.bm25Terms) {
+      const frequency = document.termFrequencies.get(term) ?? 0;
+      if (frequency > 0) score += idf * frequency * (BM25_K1 + 1) / (frequency + lengthNorm);
+    }
+    return score > 0 ? [[memory.memoryId, score] as const] : [];
+  }).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  const bm25Rank = new Map(bm25Ranking.map(([memoryId], index) => [memoryId, index + 1]));
   // Upper median: `semanticRanking` is sorted from most to least similar.
   const medianSimilarity = semanticRanking.length < PROMPT_SEMANTIC_MEDIAN_MINIMUM_SCOPE
     ? PROMPT_SEMANTIC_TYPICAL_MEDIAN
@@ -1645,6 +1686,13 @@ async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest
       contextualSemanticCorroboration;
     const standaloneSemantic = semanticRank.get(memory.memoryId) === 1 &&
       semanticLift >= PROMPT_SEMANTIC_STANDALONE_LIFT;
+    const memorySemanticRank = semanticRank.get(memory.memoryId);
+    const memoryBm25Rank = bm25Rank.get(memory.memoryId);
+    const fusedScore = (directIdentity ? 1 : 0) +
+      (memorySemanticRank === undefined ? 0 : 1 / (FUSION_RANK_OFFSET + memorySemanticRank)) +
+      (memoryBm25Rank === undefined ? 0 : 1 / (FUSION_RANK_OFFSET + memoryBm25Rank)) +
+      (exact ? 1 / (FUSION_RANK_OFFSET + 1) : 0) +
+      (applicability ? 0.5 / (FUSION_RANK_OFFSET + 1) : 0);
     let score = directIdentity ? 5 : 0;
     if (exact) score += 4;
     if (standaloneSemantic) score += 4;
@@ -1680,11 +1728,14 @@ async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest
       reasons,
       similarity,
       rankingSimilarity,
+      fusedScore,
       features: {
         similarity,
         semanticLift,
-        semanticRank: semanticRank.get(memory.memoryId),
+        semanticRank: memorySemanticRank,
         lexicalRank: rank,
+        bm25Rank: memoryBm25Rank,
+        fusedScore,
         lexicalCoverage: coverage,
         lexicalMatchedCount: lexicalEvidence.matchedCount,
         exact,
@@ -1870,16 +1921,21 @@ async function prepareUserPromptShadowPackCore(
       }
     }
   }
-  // The local gate called most of the relevant Memory the weekly audit found weak (ADR-0168).
-  // With Jev to judge them, the nearest weak candidates fill its remaining slots; without a Jev
-  // judgment they are removed again below.
-  const weakForJev = new Set<string>();
+  // The local gate loses most relevant Memory before Jev (ADR-0168), and no single local
+  // signal ranks the rest well. With Jev to judge them, the candidates next by reciprocal
+  // rank fusion of semantic and BM25 ranks join the local selection in one request, up to
+  // `jevCandidateLimit` (ADR-0175); without a Jev judgment they are removed again below.
+  const poolForJev = new Set<string>();
   if (request.relevanceFilter !== undefined && !postSoft && !skipsPromptRetrieval(normalizedPrompt)) {
-    const weak = scored.filter((item) => item.band === "weak" &&
+    const candidateLimit = request.jevCandidateLimit ?? JEV_CANDIDATE_LIMIT;
+    const sent = new Set(selected.map((item) => item.memoryId));
+    const pool = scored.filter((item) => !sent.has(item.memory.memoryId) &&
       !epoch.injectedRevisions.has(`${item.memory.memoryId}:${item.memory.revisionId}`))
-      .sort((left, right) => right.rankingSimilarity - left.rankingSimilarity);
-    for (const item of weak) {
-      if (selected.length >= PROMPT_ITEM_LIMIT) break;
+      .sort((left, right) => right.fusedScore - left.fusedScore ||
+        right.rankingSimilarity - left.rankingSimilarity ||
+        left.memory.memoryId.localeCompare(right.memory.memoryId));
+    for (const item of pool) {
+      if (selected.length >= candidateLimit) break;
       const tier = tierFor(item.memory, request.projectId);
       const representation = representationFor(item.memory, tier, false);
       if (representation?.kind !== "compact") continue;
@@ -1887,13 +1943,13 @@ async function prepareUserPromptShadowPackCore(
       const candidate: ShadowPackItem = {
         memoryId: item.memory.memoryId, memoryRef: item.memory.memoryRef, revisionId: item.memory.revisionId,
         scope: item.memory.scope, authority: item.memory.authority, representationKind: representation.kind,
-        relevanceBand: "weak", priorityTier: tier, score: item.score, reasons: [...item.reasons, "jev_weak_candidate"],
+        relevanceBand: item.band, priorityTier: tier, score: item.score, reasons: [...item.reasons, "jev_pool_candidate"],
         text, renderedTokenCount: tokenizer.encode(text).length
       };
-      const trial = renderPack([...selected, candidate], "relevant", includeMemoryLegend);
-      if (trial.renderedTokenCount > PROMPT_HARD_LIMIT || epoch.tokenTotal + trial.renderedTokenCount > hardLimit) continue;
+      // A candidate that cannot fit even alone can never be injected.
+      if (renderPack([candidate], "relevant", includeMemoryLegend).renderedTokenCount > PROMPT_HARD_LIMIT) continue;
       selected.push(candidate);
-      weakForJev.add(candidate.memoryId);
+      poolForJev.add(candidate.memoryId);
     }
   }
   let jev: JevTelemetry | undefined;
@@ -1922,20 +1978,41 @@ async function prepareUserPromptShadowPackCore(
     jev = judgment.telemetry;
     if (judgment.scores !== undefined && jev.state === "filtered") {
       for (const item of judgment.scores) jevScores.set(item.memoryId, item.score);
-      const weakKept = [...weakForJev].filter(id => (jevScores.get(id) ?? 0) >= Math.max(judgment.telemetry.threshold, JEV_WEAK_MINIMUM_SCORE))
-        .sort((left, right) => (jevScores.get(right) ?? 0) - (jevScores.get(left) ?? 0)).slice(0, JEV_WEAK_ITEM_LIMIT);
-      const retained = selected.filter(item => {
-        const keep = weakForJev.has(item.memoryId) ? weakKept.includes(item.memoryId)
-          : (jevScores.get(item.memoryId) ?? 0) >= judgment.telemetry.threshold;
+      const threshold = judgment.telemetry.threshold;
+      // A weak candidate has a low prior: it needs a higher score, and few are kept (ADR-0168).
+      const weakKept = new Set(selected.filter(item => poolForJev.has(item.memoryId) && item.relevanceBand === "weak" &&
+        (jevScores.get(item.memoryId) ?? 0) >= Math.max(threshold, JEV_WEAK_MINIMUM_SCORE))
+        .sort((left, right) => (jevScores.get(right.memoryId) ?? 0) - (jevScores.get(left.memoryId) ?? 0))
+        .slice(0, JEV_WEAK_ITEM_LIMIT).map(item => item.memoryId));
+      const kept = selected.filter(item => {
+        const keep = poolForJev.has(item.memoryId) && item.relevanceBand === "weak" ? weakKept.has(item.memoryId)
+          : (jevScores.get(item.memoryId) ?? 0) >= threshold;
         if (!keep) promptOmissionReasons.set(item.memoryId, "jev_below_threshold");
         return keep;
-      }).map(item => ({ ...item, reasons: [...item.reasons, `jev_score:${String(jevScores.get(item.memoryId))}`] }));
+      }).map((item, order) => ({ item: { ...item, reasons: [...item.reasons, `jev_score:${String(jevScores.get(item.memoryId))}`] }, order }))
+        .sort((left, right) => (jevScores.get(right.item.memoryId) ?? 0) - (jevScores.get(left.item.memoryId) ?? 0) ||
+          left.order - right.order)
+        .map(entry => entry.item);
+      // The most useful by Jev's judgment fill the item limit and the token budget.
+      const retained: ShadowPackItem[] = [];
+      for (const item of kept) {
+        if (retained.length >= PROMPT_ITEM_LIMIT) {
+          promptOmissionReasons.set(item.memoryId, "item_limit");
+          continue;
+        }
+        const trial = renderPack([...retained, item], "relevant", includeMemoryLegend);
+        if (trial.renderedTokenCount > PROMPT_HARD_LIMIT || epoch.tokenTotal + trial.renderedTokenCount > hardLimit) {
+          promptOmissionReasons.set(item.memoryId, "budget_not_fit");
+          continue;
+        }
+        retained.push(item);
+      }
       selected.splice(0, selected.length, ...retained);
     }
   }
-  // Weak candidates enter the pack only through a Jev judgment.
-  if (weakForJev.size > 0 && jev?.state !== "filtered") {
-    selected.splice(0, selected.length, ...selected.filter((item) => !weakForJev.has(item.memoryId)));
+  // Pool candidates enter the pack only through a Jev judgment.
+  if (poolForJev.size > 0 && jev?.state !== "filtered") {
+    selected.splice(0, selected.length, ...selected.filter((item) => !poolForJev.has(item.memoryId)));
   }
   // Local evidence alone admits mostly noise. When Jev is enabled but gave no
   // judgment (timeout, network, cooldown, sensitive input), only near-certain
@@ -1967,9 +2044,8 @@ async function prepareUserPromptShadowPackCore(
     revisionId: item.memory.revisionId,
     relevanceBand: item.band,
     score: item.score,
-    reasons: jevScores.has(item.memory.memoryId)
-      ? [...item.reasons, `jev_score:${String(jevScores.get(item.memory.memoryId))}`]
-      : item.reasons,
+    reasons: [...item.reasons, ...(poolForJev.has(item.memory.memoryId) ? ["jev_pool_candidate"] : []),
+      ...(jevScores.has(item.memory.memoryId) ? [`jev_score:${String(jevScores.get(item.memory.memoryId))}`] : [])],
     omissionReason: item.band === "weak"
       ? promptOmissionReasons.get(item.memory.memoryId) ?? "weak_relevance"
       : epoch.injectedRevisions.has(`${item.memory.memoryId}:${item.memory.revisionId}`)

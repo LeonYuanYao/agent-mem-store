@@ -1,7 +1,7 @@
 /**
  * Weekly recall audit (ADR-0167): where automatic injection loses relevant Memory.
- * For a sample of real prompts, Codex (`--model`, default gpt-6.1-terra) labels the nearest
- * Memories that existed when the prompt was asked, plus what was injected. Each relevant
+ * For a sample of real prompts, Codex (`--model`, default gpt-6.1-terra) labels the Memories nearest
+ * by local score and by rank fusion that existed when the prompt was asked, plus what was injected. Each relevant
  * Memory is then traced through that prompt's receipt: injected, already in context, rejected
  * by Jev, cut by item limits, judged weak by the local gate, or never examined.
  *
@@ -96,8 +96,11 @@ async function buildCases(): Promise<AuditCase[]> {
       recentPrompts: entry.recent, adapter: loaded.adapter, requestedAt: new Date().toISOString(), snapshot });
     // Only Memories that existed when the prompt was asked could have been recalled.
     const existed = (memoryId: string): boolean => { const createdAt = catalog.get(memoryId)?.createdAt; return createdAt !== undefined && createdAt <= entry.at; };
-    const nearest = [...scoring.items].sort((left, right) => right.score - left.score).map(item => item.memoryId).filter(existed)
-      .slice(0, Number(values.neighbors));
+    // The nearest by the local score and by rank fusion (ADR-0175): a pool drawn from one ranking
+    // alone cannot show what that ranking misses.
+    const nearestBy = (key: (item: (typeof scoring.items)[number]) => number): string[] => [...scoring.items]
+      .sort((left, right) => key(right) - key(left)).map(item => item.memoryId).filter(existed).slice(0, Number(values.neighbors));
+    const nearest = [...new Set([...nearestBy(item => item.score), ...nearestBy(item => item.features.fusedScore)])];
     const injected = [...receiptItems].filter(([, item]) => item.outcome === "selected").map(([memoryId]) => memoryId);
     const candidates = [...new Set([...nearest, ...injected])].flatMap((memoryId): Pair[] => {
       const memory = catalog.get(memoryId);
@@ -116,7 +119,7 @@ async function buildCases(): Promise<AuditCase[]> {
 
 const stageNames: Record<Stage, string> = {
   injected: "已注入", already_present: "已在上下文里", jev_rejected: "被 Jev 拒绝", limit: "被条数或预算挤掉",
-  jev_unavailable: "Jev 不可用时被保守过滤", local_weak: "本地初筛判为太弱", unavailable: "没有可注入的摘要", not_examined: "没进入候选"
+  jev_unavailable: "Jev 不可用时被保守过滤", local_weak: "没进 Jev 候选（本地排序靠后）", unavailable: "没有可注入的摘要", not_examined: "没进入候选"
 };
 
 function report(cases: AuditCase[]): void {
