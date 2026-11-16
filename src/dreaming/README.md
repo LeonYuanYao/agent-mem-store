@@ -4,7 +4,7 @@
 
 ## Responsibility
 
-Turns a day's captured Sessions into verified, tiered knowledge: session-level extraction with tool output, cross-session merge, repository verification with a defense pass, and local tiering. Shadow mode writes only a Vault report; it never writes canonical Memory or changes injection.
+Turns a day's captured Sessions into verified, tiered knowledge: session-level extraction with tool output, cross-session merge, an appraisal of lasting value, repository verification with a defense pass, and local tiering. Shadow mode writes only a Vault report; it never writes canonical Memory or changes injection.
 
 ## Start here
 
@@ -23,6 +23,7 @@ The Worker reads `[dreaming]` each iteration. When enabled it hands captured eve
 - **select** builds the repository map across all live clones of the Project, infers each Session's checked-out branches from the reflog, and enqueues stream chunks. A Session belongs to the Project it started in and is read whole, even after a `cd` moved its later events to a nested repository's Project. A Session that continues after a run is read again later, from where the previous segment ended. Temporary roots (`/tmp`, `/var/folders`) and Projects without a live root are never dreamed.
 - **extract** renders one chunk of a Session (prompts, replies, tool calls with bounded results) and asks the model for durable candidates. Quotes are checked locally against the chunk. A prompt wrapped by a chat bridge (botmux routing rules, skill lists, identity blocks) is reduced to its `<user_message>`, so bridge instructions are never read as something the user said. A candidate marked as user-stated keeps the user message its quote came from; if the quote comes from a reply or tool output instead, it is not treated as user-stated.
 - **merge** deduplicates candidates of one claim type per call; candidates the model drops survive as their own items.
+- **appraise** (end of merge) has the judge model keep the items of lasting value, a Session's items judged together; user-stated items and requested runs are not appraised. The rest skip prepare, verify and defend and are tiered pool (one-off: drop) (ADR-0177).
 - **prepare** runs deterministic pre-search (identifiers at baselines, on the owner's unmerged branches, and in guidance agents already read: instruction files at any depth, repository `skills/` directories and host skills) and attaches source branches.
 - **verify** / **defend** run the model with the shell enabled and `msverify` as the only evidence source; negative verdicts get an adversarial second pass. Before confirming, the verifier must check that guidance; the verifier reports where guidance already states a claim separately from its truth. A user-stated claim carries the user's words, and the verifier decides whether they state the user's lasting rule, an instruction for one task (kept searchable, injected only if it recurs), a pasted task description, or none of these.
 - **tier** applies [tier.ts](tier.ts); a catch-all Project (only root is the home directory or above) keeps global knowledge only, and `catch_all_projects = false` keeps the schedule from creating its runs at all (ADR-0171). A Project whose every root lies under `skip_roots` gets neither scheduled runs nor recent-work notes (ADR-0172). **report** writes `_MemStore/Dreams/<local date>-<project root name>-<run>.md` and refreshes `总览.md`, the last 14 days of kept items (every tier but drop) with global knowledge first and each item linked to its report. `memstore dream report [RUN_ID]` re-renders completed runs in the current format. In apply mode the report stage first applies the run's queued items one batch per step (waiting, items still pending, while the configuration is not current): inject items, and review items whose statement dreaming wrote; the report lists every outcome.
@@ -33,7 +34,7 @@ The Worker reads `[dreaming]` each iteration. When enabled it hands captured eve
 
 ## State and side effects
 
-Migration 0067 owns `dream_runs`, `dream_sessions`, `dream_chunks`, `dream_candidates` and `dream_items`. Each Session is claimed by exactly one run. Per-run files (repository map, `msverify` wrapper) live under `<runtime>/state/dreaming/<run>/`. Reports are the only Vault writes.
+Migration 0067 owns `dream_runs`, `dream_sessions`, `dream_chunks`, `dream_candidates` and `dream_items` (0078 adds `appraisal_json`). Each Session is claimed by exactly one run. Per-run files (repository map, `msverify` wrapper) live under `<runtime>/state/dreaming/<run>/`. Reports are the only Vault writes.
 
 ## Invariants and change risks
 

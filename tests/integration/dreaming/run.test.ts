@@ -198,6 +198,114 @@ test("a dream run extracts, merges, verifies, defends and tiers a Session withou
   expect((await scheduleDueDreams({ runtimeRoot, now: later, configuration: { ...configuration, hour: 0 }, allowTemporaryRoots: true })).created).toEqual([]);
 });
 
+test("an appraised run verifies only the items of lasting value and keeps the rest out of Memory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-appraise-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await mkdir(vaultRoot, { recursive: true });
+  const clone = await workspace(root);
+  const sessionId = "appraise-session";
+  const project = await resolveProject({ sessionId, path: clone, runtimeRoot });
+  if (project.status !== "resolved") throw new Error("Project did not resolve.");
+  const events = [
+    { eventKind: "UserPromptSubmit", turnId: "t1", payload: { prompt: "以后提 MR 都用 Bits。看看 setVideo 做了什么" } },
+    { eventKind: "PostToolUse", turnId: "t1", payload: { toolName: "Bash", cwd: clone, input: { command: "cat src/preview.ts" },
+      response: "export function setVideo() { reloadEffect(); }" } },
+    { eventKind: "Stop", turnId: "t1", payload: { assistantMessage: "setVideo 会重新加载特效。" } },
+    { eventKind: "SessionEnd", payload: { reason: "other" } }
+  ] as const;
+  for (const [index, event] of events.entries()) {
+    await captureEvent({ runtimeRoot, event: {
+      schemaVersion: 1, eventId: `msevent_appraise_${String(index)}`, deduplicationKey: `appraise:${String(index)}`, agent: "codex",
+      eventKind: event.eventKind, occurredAt: new Date().toISOString(), projectId: project.projectId, sessionId,
+      ...("turnId" in event ? { turnId: event.turnId } : {}), payload: event.payload
+    } });
+  }
+  const now = new Date(Date.now() + 60_000).toISOString();
+  await handOffCaptureToDreaming({ runtimeRoot, now, minimumAgeMilliseconds: 0 });
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true, verify_batch_size: 8 });
+  await startDreamRun({ runtimeRoot, projectId: project.projectId, now });
+  const log: string[] = [];
+  const appraised: string[][] = [];
+  const model: DreamModel = {
+    ...fakeModel(log),
+    appraise(request) {
+      log.push(`appraise:${String(request.groups.flat().length)}`);
+      appraised.push(...request.groups.map((group) => group.map((item) => item.memory)));
+      return Promise.resolve({ usage: { tokens: 20, seconds: 1 }, results: request.groups.flat().map((item) => ({
+        id: item.id, reason: "test",
+        value: item.memory.startsWith(statements.wrong) ? "code_detail" as const : item.memory.startsWith(statements.oneOff) ? "one_off" as const : "keep_usage" as const
+      })) });
+    }
+  };
+  for (let step = 0; step < 50; step += 1) {
+    const result = await runNextDreamStep({ runtimeRoot, vaultRoot, now, configuration, model, allowTemporaryRoots: true });
+    if (result.state === "idle") break;
+  }
+  // The user's own rule is not appraised; the items of one Session are judged together, with their detail.
+  expect(appraised).toHaveLength(1);
+  expect(appraised[0]).toHaveLength(3);
+  expect(appraised[0]).toContain(`${statements.code}\n\n${statements.codeDetail}`);
+  expect(appraised.flat().some((memory) => memory.startsWith(statements.preference))).toBe(false);
+  // Low-value items are neither verified nor defended.
+  expect(log).toEqual(["extract:1/1", "merge:2", "appraise:3", "verify:2"]);
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    const tiers = Object.fromEntries(database.prepare("SELECT statement, tier, tier_reason FROM dream_items").all()
+      .map((row) => [String(row.statement), `${String(row.tier)}:${String(row.tier_reason)}`]));
+    expect(tiers).toEqual({
+      [statements.code]: "inject:confirmed",
+      [statements.preference]: "inject:explicit_user",
+      [statements.wrong]: "pool:low_value_code_detail",
+      [statements.oneOff]: "drop:low_value_one_off"
+    });
+    const [run] = await inspectDreams(runtimeRoot, 1);
+    expect(run).toMatchObject({ stage: "completed" });
+    expect(JSON.parse(String(database.prepare("SELECT stats_json FROM dream_runs").get()?.stats_json))).toMatchObject({ appraise_calls: 1, appraised: 3, appraised_low_value: 2 });
+  } finally {
+    database.close();
+  }
+  const dreams = join(vaultRoot, "_MemStore", "Dreams");
+  const report = await readFile(join(dreams, (await readdir(dreams)).find((name) => name !== "总览.md") ?? ""), "utf8");
+  expect(report).toContain("长期价值低：模块内部的实现细节");
+});
+
+test("appraisal can be switched off", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-appraise-off-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await mkdir(vaultRoot, { recursive: true });
+  const clone = await workspace(root);
+  const project = await resolveProject({ sessionId: "appraise-off", path: clone, runtimeRoot });
+  if (project.status !== "resolved") throw new Error("Project did not resolve.");
+  const events = [
+    { eventKind: "UserPromptSubmit", turnId: "t1", payload: { prompt: "以后提 MR 都用 Bits。看看 setVideo 做了什么" } },
+    { eventKind: "PostToolUse", turnId: "t1", payload: { toolName: "Bash", cwd: clone, input: { command: "cat src/preview.ts" },
+      response: "export function setVideo() { reloadEffect(); }" } },
+    { eventKind: "SessionEnd", payload: { reason: "other" } }
+  ] as const;
+  for (const [index, event] of events.entries()) {
+    await captureEvent({ runtimeRoot, event: {
+      schemaVersion: 1, eventId: `msevent_appraise_off_${String(index)}`, deduplicationKey: `appraise-off:${String(index)}`, agent: "codex",
+      eventKind: event.eventKind, occurredAt: new Date().toISOString(), projectId: project.projectId, sessionId: "appraise-off",
+      ...("turnId" in event ? { turnId: event.turnId } : {}), payload: event.payload
+    } });
+  }
+  const now = new Date(Date.now() + 60_000).toISOString();
+  await handOffCaptureToDreaming({ runtimeRoot, now, minimumAgeMilliseconds: 0 });
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true, verify_batch_size: 8, appraise: false });
+  await startDreamRun({ runtimeRoot, projectId: project.projectId, now });
+  const log: string[] = [];
+  const model: DreamModel = { ...fakeModel(log), appraise: () => Promise.reject(new Error("appraisal is off")) };
+  for (let step = 0; step < 50; step += 1) {
+    const result = await runNextDreamStep({ runtimeRoot, vaultRoot, now, configuration, model, allowTemporaryRoots: true });
+    if (result.state === "idle") break;
+  }
+  expect(log).toEqual(["extract:1/1", "merge:2", "verify:4", "defend:1"]);
+});
+
 test("in apply mode a nightly run writes its inject tier as dreaming Memory before reporting it", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-dream-apply-run-"));
   directories.push(root);

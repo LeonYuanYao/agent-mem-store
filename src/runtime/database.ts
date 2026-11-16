@@ -417,6 +417,11 @@ const migrations: readonly Migration[] = [
     version: 77,
     name: "recent_work_notes",
     path: new URL("../../migrations/0077-recent-work-notes.sql", import.meta.url)
+  },
+  {
+    version: 78,
+    name: "dream_appraisal",
+    path: new URL("../../migrations/0078-dream-appraisal.sql", import.meta.url)
   }
 ];
 

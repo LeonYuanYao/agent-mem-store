@@ -10,7 +10,7 @@ import { MemStoreCommandError } from "../contracts/envelope.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { cloneOf, sessionSourceBranches, type SourceBranch } from "./branches.js";
 import { resolveSkipRoots, skippedRoots, type DreamingConfiguration } from "./config.js";
-import { DreamModelError, transientModelErrors, type DreamModel, type Verdict } from "./model.js";
+import { DreamModelError, transientModelErrors, type Appraisal, type DreamModel, type Verdict } from "./model.js";
 import { EvidenceReader } from "./msverify.js";
 import { presearch, renderPresearch } from "./presearch.js";
 import { buildRepoMap, repoMapSchema, temporaryRootPattern, type RepoMap } from "./repo-map.js";
@@ -35,6 +35,11 @@ const hardFailureWeight = 16;
 const mergeGroupSize = 120;
 const prepareBatchSize = 10;
 const defenseBatchSize = 4;
+// One appraisal call holds up to this many items; a Session is split only when it alone has more.
+const appraiseBatchSize = 30;
+const appraiseSessionLimit = 50;
+/** Items still to verify: not appraised, or appraised as worth keeping (ADR-0177). */
+const worthVerifying = "(appraisal_json IS NULL OR json_extract(appraisal_json, '$.value') LIKE 'keep%')";
 
 type Stage = "select" | "extract" | "merge" | "prepare" | "verify" | "defend" | "tier" | "report" | "completed" | "failed";
 
@@ -354,6 +359,60 @@ export async function runNextDreamStep(request: {
   }
 }
 
+/**
+ * Appraises the next batch of merged items (ADR-0177): the judge model sees the items of each
+ * Session together and keeps those of lasting value. User-stated items are not appraised (the
+ * verifier still tells a lasting rule from a one-task request), and neither are the items of a
+ * run the user asked for. Returns undefined when nothing is left to appraise.
+ */
+async function appraiseNextBatch(
+  database: DatabaseSync,
+  run: RunRow,
+  request: Parameters<typeof runNextDreamStep>[0]
+): Promise<string | undefined> {
+  if (!request.configuration.appraise || run.request !== undefined || request.model.appraise === undefined) return undefined;
+  const pending = database.prepare(
+    `SELECT item_id, statement, claim_type, session_ids_json, detail FROM dream_items
+     WHERE run_id = ? AND appraisal_json IS NULL AND explicit_user = 0 ORDER BY item_id`
+  ).all(run.runId);
+  if (pending.length === 0) return undefined;
+  const bySession = new Map<string, typeof pending>();
+  for (const item of pending) {
+    const session = parseJson<string[]>(item.session_ids_json, [])[0] ?? "";
+    bySession.set(session, [...(bySession.get(session) ?? []), item]);
+  }
+  // Whole Sessions, largest first, until the batch is full.
+  const groups: (typeof pending)[] = [];
+  let size = 0;
+  for (const group of [...bySession.values()].sort((left, right) => right.length - left.length)) {
+    const part = group.slice(0, appraiseSessionLimit);
+    if (size > 0 && size + part.length > appraiseBatchSize) continue;
+    groups.push(part);
+    size += part.length;
+    if (size >= appraiseBatchSize) break;
+  }
+  const { roots } = await projectRoots(database, run.projectId, request.allowTemporaryRoots);
+  const aliases = new Map<string, Record<string, unknown>>();
+  const payload = groups.map((group) => group.map((item) => {
+    const alias = `A${String(aliases.size + 1)}`;
+    aliases.set(alias, item);
+    const detail = typeof item.detail === "string" && item.detail !== "" ? `\n\n${item.detail}` : "";
+    return { id: alias, claim_type: String(item.claim_type), sessions: parseJson<string[]>(item.session_ids_json, []).length,
+      memory: `${String(item.statement)}${detail}`.slice(0, 1_000) };
+  }));
+  const { results, usage } = await request.model.appraise({ projectLabel: roots.join(", ") || run.projectId, groups: payload });
+  let low = 0;
+  for (const [alias, item] of aliases) {
+    // An item the model skipped is kept: appraisal only ever removes what it judged.
+    const result = results.find((candidate) => candidate.id === alias) ?? { id: alias, value: "keep_rule", reason: "appraiser_omitted" };
+    if (!result.value.startsWith("keep")) low += 1;
+    database.prepare("UPDATE dream_items SET appraisal_json = ? WHERE item_id = ?")
+      .run(json({ value: result.value, reason: result.reason }), String(item.item_id));
+  }
+  advance(database, run, "merge", request.now, addStats(run, { appraise_calls: 1, appraise_tokens: usage.tokens, appraised: aliases.size, appraised_low_value: low }));
+  return `appraised ${String(aliases.size)} -> ${String(aliases.size - low)} kept`;
+}
+
 async function stepRun(
   database: DatabaseSync,
   run: RunRow,
@@ -483,6 +542,8 @@ async function stepRun(
          WHERE c.run_id = ? ORDER BY c.claim_type, c.candidate_id`
       ).all(run.runId).filter((row) => !assigned.has(String(row.candidate_id)));
       if (candidates.length === 0) {
+        const appraised = await appraiseNextBatch(database, run, request);
+        if (appraised !== undefined) return appraised;
         advance(database, run, "prepare", now);
         return "merge_complete";
       }
@@ -526,7 +587,8 @@ async function stepRun(
     }
     case "prepare": {
       const map = await loadMap(runtimeRoot, run.runId);
-      const items = database.prepare("SELECT item_id, statement, session_ids_json FROM dream_items WHERE run_id = ? AND presearch_json IS NULL LIMIT ?")
+      const items = database.prepare(`SELECT item_id, statement, session_ids_json FROM dream_items
+        WHERE run_id = ? AND presearch_json IS NULL AND ${worthVerifying} LIMIT ?`)
         .all(run.runId, prepareBatchSize);
       if (items.length === 0) {
         advance(database, run, "verify", now);
@@ -548,7 +610,7 @@ async function stepRun(
       const map = await loadMap(runtimeRoot, run.runId);
       const items = database.prepare(
         `SELECT item_id, statement, check_hints_json, source_paths_json, presearch_json, first_seen_at, explicit_user, member_ids_json, detail
-         FROM dream_items WHERE run_id = ? AND verdict_json IS NULL ORDER BY item_id LIMIT ?`
+         FROM dream_items WHERE run_id = ? AND verdict_json IS NULL AND ${worthVerifying} ORDER BY item_id LIMIT ?`
       ).all(run.runId, configuration.verify_batch_size * configuration.verify_parallelism);
       if (items.length === 0) {
         advance(database, run, "defend", now);
@@ -655,6 +717,14 @@ async function stepRun(
       const items = database.prepare("SELECT * FROM dream_items WHERE run_id = ?").all(run.runId);
       const counts: Record<string, number> = {};
       for (const item of items) {
+        const appraisal = parseJson<Appraisal | undefined>(item.appraisal_json, undefined);
+        if (appraisal !== undefined && !appraisal.value.startsWith("keep")) {
+          // Not verified: a one-off is dropped, other low-value knowledge stays in the report.
+          const tier = appraisal.value === "one_off" ? "drop" : "pool";
+          database.prepare("UPDATE dream_items SET tier = ?, tier_reason = ? WHERE item_id = ?").run(tier, `low_value_${appraisal.value}`, String(item.item_id));
+          counts[`tier_${tier}`] = (counts[`tier_${tier}`] ?? 0) + 1;
+          continue;
+        }
         const verdict = parseJson<Verdict | undefined>(item.verdict_json, undefined);
         const defense = parseJson<{ final_verdict?: string; branch?: string } | undefined>(item.defense_json, undefined);
         const finalVerdict = defense?.final_verdict ?? verdict?.verdict ?? "inconclusive";

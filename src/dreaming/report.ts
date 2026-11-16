@@ -37,7 +37,11 @@ const reasonLabels: Record<string, string> = {
   already_in_autoloaded_docs: "已写在自动加载的文档/skill 中",
   catch_all_project: "主目录兜底项目只保留全局知识",
   user_requested: "按你的要求提炼并通过验证",
-  user_task_instruction: "用户对当次任务的要求，只进可搜索池"
+  user_task_instruction: "用户对当次任务的要求，只进可搜索池",
+  low_value_code_detail: "长期价值低：模块内部的实现细节",
+  low_value_narrow: "长期价值低：适用面窄或信息量小",
+  low_value_redundant: "长期价值低：与同一会话保留的条目重复",
+  low_value_one_off: "一次性信息"
 };
 
 const userSupportLabels: Record<string, string> = {
