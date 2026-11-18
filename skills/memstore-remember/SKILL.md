@@ -51,7 +51,10 @@ Extraction is asynchronous by default: omit `--wait`, report the queued operatio
 
 ## Interpret the result
 
+Read the JSON from stdout alone; do not merge stderr into it with `2>&1`. If the output cannot be read, check with `memstore recall search` before saving again. Repeating `assert` with the same text and scope is safe: it returns `unchanged` with the existing Memory.
+
 - `created` or `completed`: report the Memory and operation identities.
+- `unchanged`: the same assertion or document is already stored; report its Memory identity.
 - `queued` or `retrying`: report the operation ID and the next inspection command; do not claim extraction completed.
 - `queued` with `pipeline: "dreaming"`: report the `run_id`; dreaming verifies the material and, when `applies` is true, writes what survives within minutes. Point to `memstore dream status --json` and the run's report under `_MemStore/Dreams/`; do not claim memories were written yet.
 - `waiting_verification`, `conflict`, or `quarantined`: explain that Human review is required.

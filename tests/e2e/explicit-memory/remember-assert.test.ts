@@ -63,3 +63,38 @@ test("remember assert preserves Human authority, exact content, scope, and start
     result: { mode: "read_only_inspection", luna: { state: "healthy" } }
   });
 }, 15_000);
+
+test("remember assert of the same text returns the existing Memory instead of a duplicate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-explicit-assert-repeat-"));
+  temporaryDirectories.push(root);
+  const vaultRoot = join(root, "vault");
+  const runtimeRoot = join(root, "runtime");
+  await initializeMemStore({ vaultRoot, runtimeRoot, preview: false });
+  const assertText = async (text: string, ...options: string[]) => {
+    const command = await execFileAsync("pnpm", [
+      "exec", "tsx", "src/cli/main.ts", "remember", "assert", "--scope", "global",
+      "--text", text, ...options, "--json", "--vault", vaultRoot, "--runtime", runtimeRoot
+    ], { cwd: process.cwd(), encoding: "utf8" });
+    return {
+      stderr: command.stderr,
+      result: (JSON.parse(command.stdout) as { result: Record<string, unknown> }).result
+    };
+  };
+  const body = "Run evaluation cases in English by default.";
+
+  const first = await assertText(body);
+  const repeated = await assertText(`${body}\n`);
+  const preview = await assertText(body, "--preview");
+  const differentStartup = await assertText(body, "--startup", "always");
+
+  expect(first.result).toMatchObject({ state: "created" });
+  expect(repeated.result).toMatchObject({ state: "unchanged", memoryId: first.result.memoryId });
+  expect(repeated.result).not.toHaveProperty("operationId");
+  expect(preview.result).toMatchObject({
+    dry_run: true, would_create: [], existing_memory_id: first.result.memoryId
+  });
+  expect(differentStartup.result).toMatchObject({ state: "created" });
+  expect(differentStartup.result.memoryId).not.toBe(first.result.memoryId);
+  // Agents read stdout and stderr together; the node:sqlite warning broke their JSON parse.
+  expect(first.stderr).not.toContain("ExperimentalWarning");
+}, 30_000);

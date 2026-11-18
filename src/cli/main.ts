@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 
+import { silenceSqliteExperimentalWarning } from "./sqlite-warning.js";
+
+// Everything below loads by dynamic import so this runs before node:sqlite does.
+silenceSqliteExperimentalWarning();
+
 const arguments_ = process.argv.slice(2);
 
 if (arguments_[0] === "hook" && arguments_[1] === "codex") {

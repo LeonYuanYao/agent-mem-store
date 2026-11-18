@@ -63,7 +63,9 @@ must pass exact-plan validation. This command does not enable automatic scheduli
 
 ## Invariants and change risks
 
-Keep stdout machine-readable for JSON and hook output. Do not pull expensive model/index initialization into lightweight hooks. Preserve preview/apply semantics, exit codes and documented command parity.
+Keep stdout machine-readable for JSON and hook output. Agents often merge stderr
+into it, so main.ts drops Node's `node:sqlite` experimental warning; that only
+works because everything after it loads by dynamic import (ADR-0178). Do not pull expensive model/index initialization into lightweight hooks. Preserve preview/apply semantics, exit codes and documented command parity.
 
 ## Verification
 

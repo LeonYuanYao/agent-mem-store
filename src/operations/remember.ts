@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { access, readFile, realpath } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 
 import {
@@ -13,7 +13,8 @@ import { startRequestedDreamRun } from "../dreaming/run.js";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { classifyLocalSensitivity } from "../contracts/sensitivity.js";
 import { inspectProject, resolveProject } from "../projects/index.js";
-import { openRuntimeDatabase } from "../runtime/database.js";
+import { openRuntimeDatabase, openRuntimeDatabaseReadOnly } from "../runtime/database.js";
+import { readCanonicalMemory } from "../vault/index.js";
 
 export type RememberScope = "project" | "global";
 export type StartupPolicy = "auto" | "always" | "never";
@@ -41,6 +42,44 @@ export async function resolveRememberScope(request: {
   return { kind: "project", projectId: project.projectId };
 }
 
+/** An active Human-authored Memory with the same text, scope and startup, if any. */
+async function findSameAssertion(request: {
+  readonly runtimeRoot: string;
+  readonly vaultRoot: string;
+  readonly body: string;
+  readonly scope: ResolvedScope;
+  readonly startup: StartupPolicy;
+}): Promise<{ readonly memoryId: string; readonly memoryRef?: number; readonly path: string } | undefined> {
+  // Preview must not create a Runtime; with no database there is nothing to match.
+  const databaseExists = await access(join(request.runtimeRoot, "state", "memstore.sqlite"))
+    .then(() => true, () => false);
+  if (!databaseExists) return undefined;
+  const database = await openRuntimeDatabaseReadOnly(request.runtimeRoot);
+  let memoryIds: string[];
+  try {
+    memoryIds = database.prepare(
+      `SELECT memory_id FROM memory_catalog
+       WHERE authority = 'human_authored' AND lifecycle = 'active'
+         AND scope_kind = ? AND project_id IS ?`
+    ).all(request.scope.kind, request.scope.kind === "project" ? request.scope.projectId : null)
+      .map((row) => z.string().parse(row.memory_id));
+  } finally {
+    database.close();
+  }
+  const body = request.body.trim();
+  for (const memoryId of memoryIds) {
+    const loaded = await readCanonicalMemory({ ...request, memoryId });
+    if (loaded?.memory.body.trim() === body && loaded.memory.startup === request.startup) {
+      return {
+        memoryId,
+        ...(loaded.memory.memoryRef === undefined ? {} : { memoryRef: loaded.memory.memoryRef }),
+        path: loaded.path
+      };
+    }
+  }
+  return undefined;
+}
+
 export async function rememberAssert(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
@@ -65,18 +104,22 @@ export async function rememberAssert(request: {
     const projectBlocked = inspected !== undefined &&
       inspected.status === "unresolved" &&
       inspected.reason !== "unregistered_project";
+    const existing = sensitivity.state === "normal" && !("projectResolution" in plannedScope)
+      ? await findSameAssertion({ ...request, body, scope: plannedScope })
+      : undefined;
     return {
       dry_run: true,
       would_accept: sensitivity.state === "normal" && !projectBlocked,
       authority: "human_authored",
       scope: plannedScope,
       startup: request.startup,
-      would_create: sensitivity.state === "normal" && !projectBlocked
+      would_create: sensitivity.state === "normal" && !projectBlocked && existing === undefined
         ? [
             ...(inspected?.status === "unresolved" ? ["project_registry_entry"] : []),
             "canonical_memory"
           ]
         : [],
+      ...(existing === undefined ? {} : { existing_memory_id: existing.memoryId }),
       warnings: [
         ...(sensitivity.state === "normal" ? [] : [{ code: sensitivity.state, category: sensitivity.category }]),
         ...(projectBlocked ? [{ code: "project_unresolved", reason: inspected.reason }] : [])
@@ -84,6 +127,24 @@ export async function rememberAssert(request: {
     };
   }
   const scope = await resolveRememberScope(request);
+  // A retry after an unreadable result must not save the same assertion twice.
+  const existing = sensitivity.state === "normal"
+    ? await findSameAssertion({ ...request, body, scope })
+    : undefined;
+  if (existing !== undefined) {
+    const reference = existing.memoryRef === undefined ? existing.memoryId : `M:${String(existing.memoryRef)}`;
+    return {
+      dry_run: false,
+      authority: "human_authored",
+      scope,
+      startup: request.startup,
+      state: "unchanged",
+      memoryId: existing.memoryId,
+      ...(existing.memoryRef === undefined ? {} : { memoryRef: existing.memoryRef }),
+      path: existing.path,
+      next: `memstore recall show ${reference} --json`
+    };
+  }
   let globalAuthorizationId: string | undefined;
   if (scope.kind === "global" && sensitivity.state === "normal") {
     const authorization = await recordHumanGlobalAuthorization({
