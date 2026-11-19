@@ -48,7 +48,8 @@ A prompt of up to 160 characters that follows an Assistant reply adds a third fu
 list: an excerpt of that reply (at most 320 tokens, chosen as for Jev's context) is
 embedded in the time left before the semantic deadline, and the ten Memories most
 similar to it get a reciprocal-rank vote. Only the Jev pool changes; local selection,
-scores and bands do not, and a late embedding drops just this list. See
+scores and bands do not, and a late embedding drops just this list; receipts record
+`timings.assistantContext` (`used` or `late`, with its embedding time). See
 [ADR-0180](../../docs/adr/0180-rank-a-short-prompts-pool-by-the-reply-it-answers.md).
 
 Lexical ranking in both automatic and explicit recall uses BM25 over

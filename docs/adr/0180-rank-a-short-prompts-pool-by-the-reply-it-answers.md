@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Rank a short prompt's pool by the reply it answers
@@ -20,7 +20,8 @@ Decision:
 - Only the pool changes. Local scores, bands, the local selection and the fallback without
   Jev are unchanged, so the reply never injects anything on its own.
 - The excerpt is embedded after the prompt's own embedding, in the time left before the
-  300 ms semantic deadline; a late embedding drops this list and nothing else.
+  300 ms semantic deadline; a late embedding drops this list and nothing else. Receipts
+  record `timings.assistantContext` (`used` or `late`, with its embedding time).
 
 Evaluation (2026-11-19, `tmp/recall-eval`, the 140 calibration prompts): each prompt's last
 three turns were rebuilt from captured events and passed to both pipelines, as the

@@ -6,7 +6,7 @@ import { afterEach, expect, test } from "vitest";
 import type { ConversationView } from "../../../src/retrieval/conversation-cache.js";
 import { buildRetrievalIndex, type EmbeddingAdapter } from "../../../src/retrieval/index.js";
 import type { AutomaticRelevanceFilter } from "../../../src/retrieval/jev.js";
-import { prepareUserPromptShadowPack } from "../../../src/retrieval/packs.js";
+import { inspectRetrievalReceipt, prepareUserPromptShadowPack } from "../../../src/retrieval/packs.js";
 import { writeCanonicalMemory } from "../../../src/vault/index.js";
 import { makeCanonicalMemory } from "../../helpers/canonical-memory.js";
 
@@ -67,7 +67,8 @@ async function poolFor(location: { runtimeRoot: string; vaultRoot: string }, ses
   const pack = await prepareUserPromptShadowPack({ ...location, projectId, sessionId, prompt, adapter, relevanceFilter: judge,
     jevCandidateLimit: 3, signals: { files: [], symbols: [], errors: [], commands: [] }, requestedAt: "2026-11-19T12:01:00.000Z",
     ...(conversation === undefined ? {} : { conversation }) });
-  return { pool: pools[0] ?? [], injected: pack.items.map(item => item.memoryId) };
+  const receipt = await inspectRetrievalReceipt(location.runtimeRoot, pack.receiptId);
+  return { pool: pools[0] ?? [], injected: pack.items.map(item => item.memoryId), timings: receipt?.timings };
 }
 
 test("a short prompt's Jev pool takes in what the previous reply was about", async () => {
@@ -78,6 +79,8 @@ test("a short prompt's Jev pool takes in what the previous reply was about", asy
   const withReply = await poolFor(location, "with-reply", "ok, do that then", answered);
   expect(withReply.pool).toContain(releaseTrain.memoryId);
   expect(withReply.injected).toEqual([releaseTrain.memoryId]);
+  expect(withReply.timings?.assistantContext?.state).toBe("used");
+  expect(without.timings?.assistantContext).toBeUndefined();
 });
 
 test("a long prompt or a history ending in a user message adds no reply ranking", async () => {

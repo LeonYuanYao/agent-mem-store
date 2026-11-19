@@ -165,6 +165,13 @@ interface RetrievalStageTimings {
   readonly receiptWriteMs: number;
   readonly totalMs: number;
   readonly jev?: JevTelemetry | undefined;
+  // Whether the reply a short prompt answers ranked the Jev pool (ADR-0180).
+  readonly assistantContext?: AssistantContextTiming | undefined;
+}
+
+interface AssistantContextTiming {
+  readonly state: "used" | "late";
+  readonly embeddingMs: number;
 }
 
 type RetrievalPreReceiptTimings = Omit<RetrievalStageTimings, "receiptWriteMs" | "totalMs">;
@@ -177,7 +184,8 @@ const retrievalStageTimingsSchema = z.object({
   rankingAndRelationshipMs: z.number().nonnegative(),
   receiptWriteMs: z.number().nonnegative(),
   totalMs: z.number().nonnegative(),
-  jev: jevTelemetrySchema.optional()
+  jev: jevTelemetrySchema.optional(),
+  assistantContext: z.object({ state: z.enum(["used", "late"]), embeddingMs: z.number().nonnegative() }).optional()
 });
 
 export interface ShadowPackItem {
@@ -1306,6 +1314,7 @@ async function semanticScores(request: {
   readonly scores: ReadonlyMap<string, number>;
   readonly rankingScores: ReadonlyMap<string, number>;
   readonly contextScores?: ReadonlyMap<string, number>;
+  readonly contextEmbedding?: AssistantContextTiming;
   readonly embeddingMs: number;
   readonly vectorScanMs: number;
 }> {
@@ -1376,7 +1385,8 @@ async function semanticScores(request: {
   // The reply excerpt is embedded only in time left before the deadline, so a slow
   // embedding drops this one list rather than the prompt's own semantic ranking.
   let normalizedContext: readonly number[] | undefined;
-  const contextRemaining = request.deadlineAt - performance.now();
+  const contextStarted = performance.now();
+  const contextRemaining = request.deadlineAt - contextStarted;
   if (request.contextQuery !== undefined && contextRemaining > 0) {
     let contextTimeout: ReturnType<typeof setTimeout> | undefined;
     const contextEmbedded = await Promise.race([
@@ -1392,6 +1402,10 @@ async function semanticScores(request: {
     normalizedContext = vector === undefined ? undefined : normalizeVector(vector);
   }
   const contextScores = normalizedContext === undefined ? undefined : new Map<string, number>();
+  const contextEmbedding: AssistantContextTiming | undefined = request.contextQuery === undefined ? undefined : {
+    state: normalizedContext === undefined ? "late" : "used",
+    embeddingMs: Math.max(0, performance.now() - contextStarted)
+  };
   const vectorScanStarted = performance.now();
   let resolvedValues: Float32Array;
   if (request.snapshot !== undefined) resolvedValues = request.snapshot.vectors;
@@ -1433,7 +1447,8 @@ async function semanticScores(request: {
     vectorScanMs: Math.max(0, performance.now() - vectorScanStarted),
     scores,
     rankingScores,
-    ...(contextScores === undefined ? {} : { contextScores })
+    ...(contextScores === undefined ? {} : { contextScores }),
+    ...(contextEmbedding === undefined ? {} : { contextEmbedding })
   };
 }
 
@@ -2157,7 +2172,8 @@ async function prepareUserPromptShadowPackCore(
       embeddingMs: semantic.embeddingMs,
       vectorScanMs: semantic.vectorScanMs,
       rankingAndRelationshipMs: Math.max(0, performance.now() - rankingAndRelationshipStarted - (jev?.elapsedMs ?? 0)),
-      ...(jev === undefined ? {} : { jev })
+      ...(jev === undefined ? {} : { jev }),
+      ...(semantic.contextEmbedding === undefined ? {} : { assistantContext: semantic.contextEmbedding })
     },
     requestedAt,
     ...(request.eventId === undefined ? {} : { eventId: request.eventId }),
