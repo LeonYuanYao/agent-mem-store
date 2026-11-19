@@ -122,7 +122,7 @@ const stageNames: Record<Stage, string> = {
   jev_unavailable: "Jev 不可用时被保守过滤", local_weak: "没进 Jev 候选（本地排序靠后）", unavailable: "没有可注入的摘要", not_examined: "没进入候选"
 };
 
-function report(cases: AuditCase[]): void {
+function report(cases: AuditCase[], labeling: { readonly batches: number; readonly failedBatches: number }): void {
   const percent = (part: number, whole: number): string => whole === 0 ? "-" : `${(100 * part / whole).toFixed(1)}%`;
   const pairs = cases.flatMap(entry => entry.candidates.filter(pair => pair.label !== undefined).map(pair => ({ entry, pair })));
   const relevant = pairs.filter(({ pair }) => pair.label === "relevant");
@@ -136,12 +136,16 @@ function report(cases: AuditCase[]): void {
     since, generatedAt: new Date().toISOString(), model: values.model, prompts: cases.length, pairs: pairs.length,
     relevant: relevant.length, recall: percent(relevant.filter(({ pair }) => served(pair.stage)).length, relevant.length),
     stages, injected: injected.length, precision: percent(injected.filter(({ pair }) => pair.label === "relevant").length, injected.length),
-    promptsServed: `${String(promptsServed.size)}/${String(promptsWithRelevant.size)}`, noisyPrompts: noisyPrompts.size
+    promptsServed: `${String(promptsServed.size)}/${String(promptsWithRelevant.size)}`, noisyPrompts: noisyPrompts.size,
+    labelingBatches: labeling.batches, labelingFailedBatches: labeling.failedBatches
   };
   writeFileSync(join(out, "summary.json"), JSON.stringify(summary, null, 1));
   const missed = relevant.filter(({ pair }) => !served(pair.stage)).slice(0, 8);
+  const failure = labeling.failedBatches === 0 ? [] : [
+    `**⚠️ 标注失败 ${String(labeling.failedBatches)}/${String(labeling.batches)} 批，下面的数字不完整，不能当作本期结果。**` +
+    "用同一命令重跑可续跑；失败原因见 out 目录的 `labeling-errors.log`。", ""];
   const lines = [
-    `**MemStore 召回审计**（${since.slice(0, 10)} 起，${values.model} 标注）`, "",
+    `**MemStore 召回审计**（${since.slice(0, 10)} 起，${values.model} 标注）`, "", ...failure,
     `抽样 ${String(cases.length)} 个提问，标注 ${String(pairs.length)} 对；相关 ${String(relevant.length)} 对。`,
     `- 相关召回 ${summary.recall}（已注入或已在上下文里）；拿到相关记忆的提问 ${summary.promptsServed}`,
     `- 注入精确率 ${summary.precision}（注入 ${String(injected.length)} 条）；带噪音的提问 ${String(noisyPrompts.size)} 个`, "",
@@ -157,9 +161,11 @@ function report(cases: AuditCase[]): void {
 }
 
 const cases = await buildCases();
-const labels = await labelRelevance({ out, cases, model: values.model, effort: values.effort, parallel: Number(values.parallel) });
+const { labels, batches, failedBatches } = await labelRelevance({ out, cases, model: values.model, effort: values.effort, parallel: Number(values.parallel) });
 for (const entry of cases) for (const pair of entry.candidates) {
   const value = labels.get(`${entry.id}|${pair.memoryId}`);
   if (value !== undefined) pair.label = value;
 }
-report(cases);
+report(cases, { batches, failedBatches });
+// Incomplete labels are not an audit result: fail so a scheduled run cannot pass them off as one.
+if (failedBatches > 0) process.exitCode = 1;

@@ -150,7 +150,11 @@ function report(cases: Case[]): void {
 }
 
 const cases = await buildCases();
-const labels = await labelRelevance({ out, cases, model: values.model, effort: "high", parallel: Number(values.parallel) });
+const { labels, batches, failedBatches } = await labelRelevance({ out, cases, model: values.model, effort: "high", parallel: Number(values.parallel) });
+if (failedBatches > 0) {
+  console.error(`labeling failed for ${String(failedBatches)} of ${String(batches)} batches; the numbers below are incomplete. Rerun to resume.`);
+  process.exitCode = 1;
+}
 for (const entry of cases) for (const candidate of entry.candidates) {
   const value = labels.get(`${entry.id}|${candidate.memoryId}`);
   if (value !== undefined) candidate.label = value;

@@ -3,9 +3,11 @@
  * hooks, skills and workspace instructions; blind to scores) labels each prompt-Memory pair relevant / partial / irrelevant. Shared by
  * `evaluate-injection.ts` and `audit-recall.ts`. Batches are resumable: finished ones are files
  * under `<out>/labels/`. Pair ids sent to the model are short (p1, p2, ...); models miscopy long ones.
+ * A batch that still fails after its retry is counted and the tail of Codex's output is appended to
+ * `<out>/labeling-errors.log`, so callers can refuse to report incomplete numbers as results.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -41,7 +43,9 @@ function isolatedCodexHome(): string {
   return home;
 }
 
-function labelBatch(codexHome: string, model: string, effort: string, batch: readonly LabelCase[]): Promise<Map<string, Label> | undefined> {
+interface BatchResult { readonly labels: Map<string, Label> | undefined; readonly diagnostic: string }
+
+function labelBatch(codexHome: string, model: string, effort: string, batch: readonly LabelCase[]): Promise<BatchResult> {
   const work = mkdtempSync(join(tmpdir(), "memstore-label-"));
   writeFileSync(join(work, "schema.json"), JSON.stringify(labelSchema));
   const aliases = new Map<string, string>();
@@ -60,10 +64,16 @@ function labelBatch(codexHome: string, model: string, effort: string, batch: rea
   return new Promise((done) => {
     // Codex reaches its model service through the caller's proxy, as dreaming does.
     const proxies = Object.fromEntries(proxyEnvironment.flatMap(name => { const value = process.env[name]; return value === undefined ? [] : [[name, value]]; }));
-    const child = spawn(process.env.MEMSTORE_CODEX_EXECUTABLE ?? "codex", args, { cwd: work, stdio: ["pipe", "ignore", "ignore"],
+    const child = spawn(process.env.MEMSTORE_CODEX_EXECUTABLE ?? "codex", args, { cwd: work, stdio: ["pipe", "pipe", "pipe"],
       env: { PATH: process.env.PATH ?? "", HOME: work, CODEX_HOME: codexHome, ...proxies } });
+    // Keep only the tail: Codex echoes the whole prompt before any error it reports.
+    let output = "";
+    const keep = (chunk: Buffer): void => { output = (output + chunk.toString("utf8")).slice(-3000); };
+    child.stdout.on("data", keep);
+    child.stderr.on("data", keep);
+    child.on("error", error => { output += `\nspawn failed: ${error.message}`; });
     const timer = setTimeout(() => { child.kill("SIGTERM"); }, 15 * 60_000);
-    child.on("close", () => {
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
       let labels: Map<string, Label> | undefined;
       try {
@@ -71,16 +81,24 @@ function labelBatch(codexHome: string, model: string, effort: string, batch: rea
         labels = new Map(parsed.results.flatMap(result => { const pair = aliases.get(result.pair); return pair === undefined ? [] : [[pair, result.label] as const]; }));
       } catch { labels = undefined; }
       rmSync(work, { recursive: true, force: true });
-      done(labels);
+      done({ labels, diagnostic: `exit ${String(code)}${signal === null ? "" : ` (${signal})`}; proxy ${Object.keys(proxies).length > 0 ? "set" : "unset"}\n${output}` });
     });
     child.stdin.end(`${relevanceInstructions}\n\n待标注（JSON）：\n${JSON.stringify(payload)}`);
   });
 }
 
-/** Labels every pair of `cases`, resuming finished batches; returns pair ("caseId|memoryId") to label. */
+export interface RelevanceLabels {
+  /** Pair ("caseId|memoryId") to label, from this run and earlier ones. */
+  readonly labels: Map<string, Label>;
+  readonly batches: number;
+  /** Batches without labels after this run; their pairs are missing from `labels`. */
+  readonly failedBatches: number;
+}
+
+/** Labels every pair of `cases`, resuming finished batches. */
 export async function labelRelevance(request: {
   readonly out: string; readonly cases: readonly LabelCase[]; readonly model: string; readonly effort: string; readonly parallel: number;
-}): Promise<Map<string, Label>> {
+}): Promise<RelevanceLabels> {
   mkdirSync(join(request.out, "labels"), { recursive: true, mode: 0o700 });
   const batches: LabelCase[][] = [];
   let current: LabelCase[] = [];
@@ -93,19 +111,25 @@ export async function labelRelevance(request: {
   const queue = batches.map((batch, index) => ({ batch, file: join(request.out, "labels", `batch-${String(index).padStart(3, "0")}.json`) }))
     .filter(job => !existsSync(job.file));
   const codexHome = isolatedCodexHome();
+  let failedBatches = 0;
   const worker = async (): Promise<void> => {
     for (let job = queue.shift(); job !== undefined; job = queue.shift()) {
       const expected = job.batch.flatMap(entry => entry.candidates.map(candidate => `${entry.id}|${candidate.memoryId}`));
       // One retry: a model occasionally skips a pair.
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const labels = await labelBatch(codexHome, request.model, request.effort, job.batch);
+        const { labels, diagnostic } = await labelBatch(codexHome, request.model, request.effort, job.batch);
         if (labels !== undefined && expected.every(pair => labels.has(pair))) { writeFileSync(job.file, JSON.stringify(Object.fromEntries(labels))); break; }
-        if (attempt === 1) console.error(`labeling failed for ${job.file}; rerun to retry`);
+        if (attempt === 1) {
+          failedBatches += 1;
+          console.error(`labeling failed for ${job.file}; rerun to retry (details in labeling-errors.log)`);
+          appendFileSync(join(request.out, "labeling-errors.log"), `== ${new Date().toISOString()} ${job.file}\n${diagnostic}\n\n`, { mode: 0o600 });
+        }
       }
     }
   };
   try { await Promise.all(Array.from({ length: request.parallel }, worker)); }
   finally { rmSync(codexHome, { recursive: true, force: true }); }
-  return new Map(readdirSync(join(request.out, "labels")).flatMap(file =>
+  const labels = new Map(readdirSync(join(request.out, "labels")).flatMap(file =>
     Object.entries(JSON.parse(readFileSync(join(request.out, "labels", file), "utf8")) as Record<string, Label>)));
+  return { labels, batches: batches.length, failedBatches };
 }
