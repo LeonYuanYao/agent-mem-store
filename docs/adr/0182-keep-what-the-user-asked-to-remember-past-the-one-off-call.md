@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Keep what the user asked to remember past the verifier's one-off call
