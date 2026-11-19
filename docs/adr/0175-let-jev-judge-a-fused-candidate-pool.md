@@ -83,3 +83,13 @@ injection did not improve: 33 to 32 relevant Memories injected, precision 50.8% 
 scored most added relevant candidates 0.1 to 0.56, nearly all for short follow-ups such as "做吧"
 whose task it cannot see, below the 0.6 a weak candidate needs. bge-m3 would add 570 MB on disk,
 about 800 MB of worker memory and 30 ms median, 140 ms p90 per prompt on CPU.
+
+Rejected: Codex Luna (gpt-6-luna) as the judge in place of Jev (2026-11-19). Given Jev's own
+question and criteria, the prompt, recent user prompts and Memory body, one Codex call per prompt
+scored the same 2,488 pooled pairs. Luna separated relevant from irrelevant Memory with AUC 0.889
+at medium effort and 0.701 at low (Jev 0.951; Jev minus Luna medium 0.019-0.114, 95% bootstrap
+interval). At Jev's live rule and the same injected count (65), Luna medium injected 32 relevant
+Memories against Jev's 35 and 3 irrelevant against 8: more conservative, not better at recall.
+Low effort gave near-binary scores. Through Codex a call took 13-15 s median with about 17k input
+tokens, far beyond the 1.3 s foreground budget. The labels come from Terra, a model of Luna's own
+family, so any bias favored Luna.
