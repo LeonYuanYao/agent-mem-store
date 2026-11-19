@@ -26,6 +26,9 @@ export const dreamingConfigurationSchema = z.object({
   // After merging, the judge model keeps only items of lasting value; the rest skip verification
   // and are not written as Memory. Runs the user asked for are not appraised (ADR-0177).
   appraise: z.boolean().default(true),
+  // After verification, the judge model withdraws verifier rewrites that no longer say what the
+  // original claim said; the original stands, unconfirmed (ADR-0183).
+  check_refinements: z.boolean().default(true),
   // A short-lived note of where each Session's work stands, for the next Session (ADR-0164).
   recent_work: z.boolean().default(true),
   recent_work_idle_minutes: z.number().int().min(5).max(24 * 60).default(20),

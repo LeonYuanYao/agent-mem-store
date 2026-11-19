@@ -71,6 +71,15 @@ export const reconciliationSchema = z.object({
 export type Reconciliation = z.infer<typeof reconciliationSchema>;
 const reconcileSchema = z.object({ results: z.array(reconciliationSchema) });
 
+/** Whether a verifier rewrite still says what its original claim set out to say (ADR-0183). */
+export const refinementCheckSchema = z.object({
+  id: z.string(),
+  keeps_point: z.boolean(),
+  reason: z.string()
+});
+export type RefinementCheck = z.infer<typeof refinementCheckSchema>;
+const refinementChecksSchema = z.object({ results: z.array(refinementCheckSchema) });
+
 /** Long-term value of a merged item (ADR-0177); only the keep_* values are verified and written. */
 export const appraisalValues = ["keep_rule", "keep_usage", "keep_pitfall", "code_detail", "redundant", "narrow", "one_off"] as const;
 export const appraisalSchema = z.object({
@@ -150,6 +159,12 @@ export interface DreamModel {
    */
   appraise?(request: { readonly projectLabel: string; readonly groups: readonly (readonly AppraiseItem[])[] }):
     Promise<{ readonly results: Appraisal[]; readonly usage: ModelUsage }>;
+  /**
+   * Whether each verifier rewrite still says what its original set out to say (ADR-0183). Optional:
+   * without it every rewrite stands.
+   */
+  checkRefinements?(request: { readonly pairs: readonly { readonly id: string; readonly original: string; readonly refined: string }[] }):
+    Promise<{ readonly results: RefinementCheck[]; readonly usage: ModelUsage }>;
   /** Apply mode: compares new items with the closest existing Memory and earlier items of the batch. */
   reconcile(request: { readonly items: readonly ReconcileItem[] }): Promise<{ readonly results: Reconciliation[]; readonly usage: ModelUsage }>;
   /** Which Global rules hold in every session and which instruction files lack them (ADR-0181). */
@@ -315,6 +330,18 @@ export const instructionJudgmentSchema = z.object({
 });
 export type InstructionJudgment = z.infer<typeof instructionJudgmentSchema>;
 const instructionsSchema = z.object({ results: z.array(instructionJudgmentSchema) });
+
+const refinementPrompt = `下面每一对里，original 是从 coding agent 的会话或用户交给的材料里提炼出的一条知识，refined 是验证器查过代码之后的改写。证据只支持一部分时，验证器会把说法收窄，改写版会替代原说法写进长期记忆库，以后注入给 agent。
+
+验证器有时改过了头：把说法换成它在代码里看到的另一条知识。这时原说法要告诉 agent 的那件事（一条规则、一种做法、一个坑或一个结论）在改写版里没有了，改写版讲的是另一个流程、某个具体实例、某个配置事实，或者只剩原说法的次要细节。
+
+逐对比较，判断 refined 是否还在告诉 agent original 要说的那件事：
+- keeps_point = true：还在。只是加了适用条件、缩小了范围、修正了细节，或者说得更准确。
+- keeps_point = false：那件事没有了，或者被换成了别的事。
+拿不准时填 true。reason 用一句话写明 original 要说的是什么、refined 是否还在说它。
+
+只输出 JSON。待比较：
+`;
 
 const instructionsPrompt = `你在帮用户维护 coding agent 的全局指令文件。files 是每个会话启动时都会加载的用户级指令文件（从 path 可以看出它属于哪个 agent）；rules 是用户长期记忆库里作用域为「全局」的记忆。记忆库只在记忆和当前提问相似时才注入，所以每个会话都该遵守、却和具体提问无关的规则（例如回复用什么语言、哪些用户配置不能碰、长期记忆写到哪里）很少被注入；这类规则应该写进指令文件。
 对每条 rule：
@@ -498,6 +525,12 @@ export class CodexDreamModel implements DreamModel {
 
   public async reconcile(request: { items: readonly ReconcileItem[] }) {
     const { output, usage } = await this.#invoke(reconcilePrompt + JSON.stringify(request.items, null, 1), reconcileSchema, this.#options.extractEffort, false, true);
+    return { results: output.results, usage };
+  }
+
+  public async checkRefinements(request: { pairs: readonly { id: string; original: string; refined: string }[] }) {
+    const { output, usage } = await this.#invoke(refinementPrompt + JSON.stringify(request.pairs, null, 1), refinementChecksSchema,
+      this.#options.extractEffort, false, true);
     return { results: output.results, usage };
   }
 

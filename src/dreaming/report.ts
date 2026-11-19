@@ -213,7 +213,8 @@ export async function writeDreamReport(request: {
     const group = items.filter((item) => item.tier === tier);
     lines.push(`## ${tierTitles[tier] ?? tier} · ${String(group.length)}`, "");
     for (const item of group) {
-      const verdict = parse<{ verdict?: string; evidence?: string[]; reason?: string; user_support?: string; documented_at?: string }>(item.verdict_json, {});
+      const verdict = parse<{ verdict?: string; evidence?: string[]; reason?: string; user_support?: string; documented_at?: string;
+        withdrawn_refinement?: string }>(item.verdict_json, {});
       const defense = parse<{ decision?: string; final_verdict?: string; reason?: string } | undefined>(item.defense_json, undefined);
       const sessions = parse<string[]>(item.session_ids_json, []).length;
       // The refined statement is what dreaming would keep; the original is shown for review.
@@ -222,6 +223,10 @@ export async function writeDreamReport(request: {
       const tag = item.scope === "global" ? "〔全局〕" : "";
       lines.push(`- ${tag}${displayStatement(item)}`);
       if (typeof item.refined_statement === "string") lines.push(`  - 收窄前：${escapeLine(String(item.statement))}`);
+      // A withdrawn rewrite (ADR-0183) is shown so a reviewer can see what the verifier proposed.
+      if (typeof verdict.withdrawn_refinement === "string" && verdict.withdrawn_refinement !== "") {
+        lines.push(`  - 验证器的改写没保住原意，已退回：${escapeLine(verdict.withdrawn_refinement)}`);
+      }
       const support = verdict.user_support === undefined ? undefined : userSupportLabels[verdict.user_support];
       const userSupportNote = support === undefined ? "" : ` · 原话：${support}`;
       const defended = defense === undefined ? "" : ` → defense ${defense.decision ?? "-"}: ${defense.final_verdict ?? "-"}`;

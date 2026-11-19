@@ -613,6 +613,72 @@ test("remember extract hands its selection to dreaming, which verifies and write
   }
 });
 
+test("a verifier rewrite that lost the original's point is withdrawn; the original stands", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-refine-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await mkdir(vaultRoot, { recursive: true });
+  const clone = await workspace(root);
+  await mkdir(runtimeRoot, { recursive: true });
+  await writeFile(join(runtimeRoot, "config.toml"), "schema_version = 1\n\n[dreaming]\nenabled = true\nmode = \"apply\"\n");
+  const notes = join(root, "deploy.md");
+  await writeFile(notes, "新增迁移时先停 worker、应用迁移，再构建。\n奥德赛的商港先补食物。\n");
+  const rule = "新增数据库迁移时，先停止 worker、应用迁移并核对 schema 版本，再构建并重启 worker。";
+  const swapped = "0050/0051 激活流程先把迁移应用到 SQLite 备份副本，再替换 dist。";
+  const port = "奥德赛的商港先补食物再补木料。";
+  const narrowed = "奥德赛的商港在归航前先补食物再补木料。";
+  const checked: { id: string; original: string; refined: string }[][] = [];
+  const now = new Date().toISOString();
+  const model: DreamModel = {
+    extract: () => Promise.resolve({ usage: { tokens: 1, seconds: 1 }, candidates: [
+      { statement: rule, claim_type: "workflow_process", scope: "project", explicit_user: false, turn_refs: ["T01"], quote: "", check_hints: [], detail: "" },
+      { statement: port, claim_type: "external_system", scope: "project", explicit_user: false, turn_refs: ["T01"], quote: "", check_hints: [], detail: "" }
+    ] }),
+    merge: () => Promise.reject(new Error("unexpected merge")),
+    // The verifier swaps the rule for another process it found in the repository, and narrows the other claim.
+    verify: (request) => Promise.resolve({ usage: { tokens: 1, seconds: 1 }, results: request.claims.map((claim): Verdict => ({
+      id: claim.id, claim_type: "workflow_process", durability: "long_term", scope: "project", subsystem: "deploy",
+      verdict: claim.text.startsWith(rule) ? "confirmed" : "not_repo_verifiable", branch: "", evidence: [], reason: "",
+      refined_statement: claim.text.startsWith(rule) ? swapped : narrowed, documented_at: claim.text.startsWith(rule) ? "docs/activation.md" : "",
+      user_support: "not_applicable", detail_check: "none" })) }),
+    defend: () => Promise.reject(new Error("unexpected defend")),
+    checkRefinements: (request) => {
+      checked.push([...request.pairs]);
+      return Promise.resolve({ usage: { tokens: 1, seconds: 1 }, results: request.pairs.map((pair) => ({
+        id: pair.id, keeps_point: pair.refined !== swapped, reason: pair.refined === swapped ? "换成了另一个流程" : "只是收窄" })) });
+    },
+    reconcile: (request) => Promise.resolve({ usage: { tokens: 1, seconds: 1 },
+      results: request.items.map((item) => ({ id: item.id, decision: "new" as const, target: "", merged_statement: "", reason: "different fact" })) })
+  };
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true, mode: "apply" });
+  await rememberExtract({ runtimeRoot, vaultRoot, path: clone, source: `file:${notes}`, scope: "project", startup: "auto", preview: false, requestedAt: now });
+  for (let step = 0; step < 50; step += 1) {
+    if ((await runNextDreamStep({ runtimeRoot, vaultRoot, now, configuration, model, allowTemporaryRoots: true })).state === "idle") break;
+  }
+  expect(checked).toHaveLength(1);
+  expect(checked[0]?.map((pair) => pair.original).sort()).toEqual([port, rule].sort());
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    const rows = database.prepare(
+      "SELECT statement, COALESCE(refined_statement, statement) AS text, tier, tier_reason, apply_state, verdict_json FROM dream_items ORDER BY statement"
+    ).all();
+    const withdrawn = rows.find((row) => row.statement === rule);
+    const kept = rows.find((row) => row.statement === port);
+    // The rule is written as it was stated; the evidence was about another process, so it is unconfirmed.
+    expect(withdrawn).toMatchObject({ text: rule, tier: "inject", tier_reason: "user_requested", apply_state: "written" });
+    expect(JSON.parse(String(withdrawn?.verdict_json))).toMatchObject({
+      verdict: "inconclusive", documented_at: "", refinement_check: "withdrawn", withdrawn_refinement: swapped, withdrawn_verdict: "confirmed" });
+    expect(kept).toMatchObject({ text: narrowed, apply_state: "written" });
+    expect(JSON.parse(String(kept?.verdict_json))).toMatchObject({ verdict: "not_repo_verifiable", refinement_check: "kept" });
+    const run = database.prepare("SELECT stats_json, report_path FROM dream_runs").get();
+    expect(JSON.parse(String(run?.stats_json))).toMatchObject({ refinement_check_calls: 1, refinements_checked: 2, refinements_withdrawn: 1 });
+    expect(await readFile(String(run?.report_path), "utf8")).toContain(`验证器的改写没保住原意，已退回：${swapped}`);
+  } finally {
+    database.close();
+  }
+});
+
 test("a machine can stop scheduling dreams for the catch-all Project", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-dream-catch-all-"));
   directories.push(root);

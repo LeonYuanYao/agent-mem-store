@@ -39,6 +39,8 @@ const defenseBatchSize = 4;
 // One appraisal call holds up to this many items; a Session is split only when it alone has more.
 const appraiseBatchSize = 30;
 const appraiseSessionLimit = 50;
+// One call compares up to this many verifier rewrites with their originals (ADR-0183).
+const refinementCheckBatchSize = 30;
 /** Items still to verify: not appraised, or appraised as worth keeping (ADR-0177). */
 const worthVerifying = "(appraisal_json IS NULL OR json_extract(appraisal_json, '$.value') LIKE 'keep%')";
 
@@ -361,6 +363,59 @@ export async function runNextDreamStep(request: {
 }
 
 /**
+ * Checks the next batch of verifier rewrites (ADR-0183). The verifier sometimes rewrites a claim into
+ * another fact it found in the code; the judge model compares each rewrite with its original, and a
+ * rewrite that no longer says what the original said is withdrawn. The original then stands, and since
+ * the evidence was about something else, it is unconfirmed: inconclusive, or not_repo_verifiable when
+ * the verifier found it outside the repositories' reach. Returns undefined when nothing is left to check.
+ */
+async function checkNextRefinements(
+  database: DatabaseSync,
+  run: RunRow,
+  request: Parameters<typeof runNextDreamStep>[0]
+): Promise<string | undefined> {
+  if (!request.configuration.check_refinements || request.model.checkRefinements === undefined) return undefined;
+  const items = database.prepare(
+    `SELECT item_id, statement, refined_statement, verdict_json FROM dream_items
+     WHERE run_id = ? AND refined_statement IS NOT NULL AND refined_statement != statement
+       AND json_extract(verdict_json, '$.refinement_check') IS NULL
+     ORDER BY item_id LIMIT ?`
+  ).all(run.runId, refinementCheckBatchSize);
+  if (items.length === 0) return undefined;
+  const aliases = new Map(items.map((item, position) => [`R${String(position + 1)}`, item]));
+  const { results, usage } = await request.model.checkRefinements({
+    pairs: [...aliases].map(([alias, item]) => ({ id: alias, original: String(item.statement), refined: String(item.refined_statement) }))
+  });
+  let withdrawn = 0;
+  for (const [alias, item] of aliases) {
+    const verdict = parseJson<Verdict>(item.verdict_json, {} as Verdict);
+    const check = results.find((candidate) => candidate.id === alias);
+    // A rewrite the judge skipped stands: the check only ever withdraws what it judged.
+    if (check === undefined || check.keeps_point) {
+      database.prepare("UPDATE dream_items SET verdict_json = ? WHERE item_id = ?")
+        .run(json({ ...verdict, refinement_check: "kept" }), String(item.item_id));
+      continue;
+    }
+    withdrawn += 1;
+    database.prepare("UPDATE dream_items SET verdict_json = ?, refined_statement = NULL WHERE item_id = ?").run(json({
+      ...verdict,
+      verdict: verdict.verdict === "not_repo_verifiable" ? "not_repo_verifiable" : "inconclusive",
+      branch: "",
+      documented_at: "",
+      refined_statement: "",
+      refinement_check: "withdrawn",
+      withdrawn_refinement: verdict.refined_statement,
+      withdrawn_verdict: verdict.verdict,
+      withdrawn_reason: check.reason
+    }), String(item.item_id));
+  }
+  advance(database, run, "verify", request.now, addStats(run, {
+    refinement_check_calls: 1, refinement_check_tokens: usage.tokens, refinements_checked: aliases.size, refinements_withdrawn: withdrawn
+  }));
+  return `checked ${String(aliases.size)} rewrites -> ${String(withdrawn)} withdrawn`;
+}
+
+/**
  * Appraises the next batch of merged items (ADR-0177): the judge model sees the items of each
  * Session together and keeps those of lasting value. User-stated items are not appraised (the
  * verifier still tells a lasting rule from a one-task request), and neither are the items of a
@@ -614,6 +669,8 @@ async function stepRun(
          FROM dream_items WHERE run_id = ? AND verdict_json IS NULL AND ${worthVerifying} ORDER BY item_id LIMIT ?`
       ).all(run.runId, configuration.verify_batch_size * configuration.verify_parallelism);
       if (items.length === 0) {
+        const checked = await checkNextRefinements(database, run, request);
+        if (checked !== undefined) return checked;
         advance(database, run, "defend", now);
         return "verify_complete";
       }
