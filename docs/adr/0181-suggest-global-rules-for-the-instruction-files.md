@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Suggest Global rules for the instruction files
