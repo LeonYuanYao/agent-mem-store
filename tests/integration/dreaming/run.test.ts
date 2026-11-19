@@ -564,8 +564,9 @@ test("remember extract hands its selection to dreaming, which verifies and write
         claim_type: "external_system", scope: "project", explicit_user: false, turn_refs: ["T01"], quote: "", check_hints: [], detail: "" }] });
     },
     merge: () => Promise.reject(new Error("unexpected merge")),
+    // The verifier calls the file's rule one-off; the user asked to keep it, so it is written anyway (ADR-0182).
     verify: (request) => Promise.resolve({ usage: { tokens: 1, seconds: 1 }, results: request.claims.map((claim): Verdict => ({
-      id: claim.id, claim_type: "external_system", durability: "long_term", scope: "project", subsystem: "Odyssey", verdict: "not_repo_verifiable",
+      id: claim.id, claim_type: "external_system", durability: claim.text.includes("商港") ? "episodic" : "long_term", scope: "project", subsystem: "Odyssey", verdict: "not_repo_verifiable",
       branch: "", evidence: [], reason: "external game rule", refined_statement: "", documented_at: "", user_support: "not_applicable",
       detail_check: "none" })) }),
     defend: () => Promise.reject(new Error("unexpected defend")),

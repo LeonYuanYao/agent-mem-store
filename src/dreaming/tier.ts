@@ -28,7 +28,10 @@ export interface TierInput {
   readonly userSupport?: string;
   /** Where guidance the agent already reads states the item, judged apart from its truth ("" or absent when nowhere). */
   readonly documentedAt?: string;
-  /** The user asked to remember this material (`remember extract`): what survives verification is kept. */
+  /**
+   * The user asked to remember this material (`remember extract`): what survives verification is kept,
+   * whatever the verifier's durability guess (ADR-0182).
+   */
   readonly userRequested?: boolean;
   /** The Project is a catch-all root (see `isCatchAllRoot`): it keeps global knowledge only. */
   readonly catchAllProject?: boolean;
@@ -70,7 +73,10 @@ export function tierOf(input: TierInput): { readonly tier: DreamTier; readonly r
   if (input.retiredOnly === true) return { tier: "drop", reason: "retired_subject" };
   // The user's own instruction for one task may still be a preference: keep it searchable instead of dropping it.
   const userTaskInstruction = input.explicitUser && input.userSupport === "user_task_instruction";
-  if (input.durability === "episodic" && !userTaskInstruction && input.appraisedLasting !== true) return { tier: "drop", reason: "episodic" };
+  // The verifier's durability guess on a lone claim yields to a judgment of lasting value: the appraisal's (ADR-0179),
+  // or the user's own request to keep the material (ADR-0182), whose extraction already leaves out one-off state.
+  const keptForGood = input.appraisedLasting === true || input.userRequested === true;
+  if (input.durability === "episodic" && !userTaskInstruction && !keptForGood) return { tier: "drop", reason: "episodic" };
   if (input.catchAllProject === true && input.scope !== "global") return { tier: "drop", reason: "catch_all_project" };
   if (input.verdict === "contradicted" || input.verdict === "stale") return { tier: "review", reason: input.verdict };
   if (input.verdict === "documented" || (input.documentedAt ?? "") !== "") return { tier: "drop", reason: "already_in_autoloaded_docs" };

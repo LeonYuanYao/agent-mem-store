@@ -49,7 +49,10 @@ test("a user-stated item is injected only when the user's own words support it",
 
 test("material the user asked to remember is injected once it survives verification", () => {
   expect(tierOf({ ...base, verdict: "not_repo_verifiable", userRequested: true })).toEqual({ tier: "inject", reason: "user_requested" });
-  expect(tierOf({ ...base, durability: "episodic", userRequested: true }).tier).toBe("drop");
+  // The user asked to keep it; the verifier's one-off guess on the lone claim does not drop it (ADR-0182).
+  expect(tierOf({ ...base, verdict: "not_repo_verifiable", durability: "episodic", userRequested: true })).toEqual({ tier: "inject", reason: "user_requested" });
+  expect(tierOf({ ...base, verdict: "confirmed", durability: "episodic", userRequested: true, documentedAt: "AGENTS.md:3" }).tier).toBe("drop");
+  expect(tierOf({ ...base, verdict: "contradicted", durability: "episodic", userRequested: true }).tier).toBe("review");
   expect(tierOf({ ...base, verdict: "contradicted", userRequested: true }).tier).toBe("review");
   expect(tierOf({ ...base, verdict: "documented", userRequested: true }).tier).toBe("drop");
   expect(tierOf({ ...base, verdict: "branch_scoped", branch: "feat/x", userRequested: true }).tier).toBe("branch");
