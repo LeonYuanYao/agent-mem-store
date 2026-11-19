@@ -4,6 +4,7 @@ import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
 
 import type { ConversationView } from "./conversation-cache.js";
+import { selectConversationContext } from "./conversation-context.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { readInjectionAuthorityGate, readSessionStartInjection, type InjectionAuthorityGate } from "../configuration/hook-display.js";
 import { dreamingPolicyVersion } from "../memories/origins.js";
@@ -90,6 +91,11 @@ const RECENT_PROMPT_HISTORY_LIMIT = 3;
 const RECENT_PROMPT_HISTORY_TOKEN_BUDGET = 256;
 const RECENT_PROMPT_RECENCY_WEIGHTS = [4, 2, 1] as const;
 const CONTEXT_DEPENDENT_PROMPT_MAX_CHARACTERS = 160;
+// A short prompt also ranks Memories by an excerpt of the reply it answers; the ten
+// most similar join the fused Jev pool as a third list (ADR-0180).
+const ASSISTANT_CONTEXT_PROMPT_MAX_CHARACTERS = CONTEXT_DEPENDENT_PROMPT_MAX_CHARACTERS;
+const ASSISTANT_CONTEXT_TOKEN_BUDGET = 320;
+const ASSISTANT_CONTEXT_FUSION_TOP = 10;
 const MEMORY_LEGEND_VERSION = 3;
 const MINIMUM_SESSION_ITEM_INCREMENT = tokenizer.encode(
   "\n[M:1 S:G A:H R:C] x"
@@ -131,6 +137,7 @@ export interface PromptMemoryFeatures {
   readonly directIdentity: boolean;
   readonly standaloneSemantic: boolean;
   readonly contextualSemanticCorroboration: boolean;
+  readonly assistantContextRank?: number | undefined;
 }
 
 interface TermEvidence {
@@ -1289,6 +1296,7 @@ async function semanticScores(request: {
   readonly memories: readonly IndexedMemory[];
   readonly query: string;
   readonly rankingQuery?: string;
+  readonly contextQuery?: string;
   readonly adapter?: EmbeddingAdapter;
   readonly deadlineAt: number;
   readonly snapshot?: RetrievalSnapshot;
@@ -1297,6 +1305,7 @@ async function semanticScores(request: {
   readonly stage: "complete" | "lexical_only";
   readonly scores: ReadonlyMap<string, number>;
   readonly rankingScores: ReadonlyMap<string, number>;
+  readonly contextScores?: ReadonlyMap<string, number>;
   readonly embeddingMs: number;
   readonly vectorScanMs: number;
 }> {
@@ -1324,11 +1333,10 @@ async function semanticScores(request: {
     };
   }
   const embeddingStarted = performance.now();
+  const separateRanking = request.rankingQuery !== undefined && request.rankingQuery !== request.query;
   const embeddingQueries = [
     request.query,
-    ...(request.rankingQuery === undefined || request.rankingQuery === request.query
-      ? []
-      : [request.rankingQuery])
+    ...(separateRanking ? [request.rankingQuery] : [])
   ];
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const embedded = await Promise.race([
@@ -1361,10 +1369,29 @@ async function semanticScores(request: {
       vectorScanMs: 0
     };
   }
-  const rankingEmbedding = embedded[1];
+  const rankingEmbedding = separateRanking ? embedded[1] : undefined;
   const normalizedRanking = rankingEmbedding === undefined
     ? normalized
     : normalizeVector(rankingEmbedding) ?? normalized;
+  // The reply excerpt is embedded only in time left before the deadline, so a slow
+  // embedding drops this one list rather than the prompt's own semantic ranking.
+  let normalizedContext: readonly number[] | undefined;
+  const contextRemaining = request.deadlineAt - performance.now();
+  if (request.contextQuery !== undefined && contextRemaining > 0) {
+    let contextTimeout: ReturnType<typeof setTimeout> | undefined;
+    const contextEmbedded = await Promise.race([
+      (request.adapter.embedQuery ?? request.adapter.embed)([request.contextQuery]),
+      new Promise<undefined>((resolve) => {
+        contextTimeout = setTimeout(() => {
+          resolve(undefined);
+        }, contextRemaining);
+      })
+    ]);
+    if (contextTimeout !== undefined) clearTimeout(contextTimeout);
+    const vector = contextEmbedded?.[0];
+    normalizedContext = vector === undefined ? undefined : normalizeVector(vector);
+  }
+  const contextScores = normalizedContext === undefined ? undefined : new Map<string, number>();
   const vectorScanStarted = performance.now();
   let resolvedValues: Float32Array;
   if (request.snapshot !== undefined) resolvedValues = request.snapshot.vectors;
@@ -1391,13 +1418,22 @@ async function semanticScores(request: {
       memory.vectorOrdinal * dimensions,
       dimensions
     ));
+    if (normalizedContext !== undefined) {
+      contextScores?.set(memory.memoryId, dotVector(
+        normalizedContext,
+        resolvedValues,
+        memory.vectorOrdinal * dimensions,
+        dimensions
+      ));
+    }
   }
   return {
     stage: "complete",
     embeddingMs,
     vectorScanMs: Math.max(0, performance.now() - vectorScanStarted),
     scores,
-    rankingScores
+    rankingScores,
+    ...(contextScores === undefined ? {} : { contextScores })
   };
 }
 
@@ -1452,6 +1488,19 @@ function boundedRecentPrompts(prompts: readonly string[]): readonly string[] {
     allocated += tokenLimit;
     return truncateHistoryPrompt(prompt, tokenLimit);
   });
+}
+
+/**
+ * What a short prompt answers: an excerpt of the reply right before it, chosen as for
+ * Jev (first substantive paragraph, a referred-to proposal, then term overlap).
+ */
+function assistantContextQuery(prompt: string, conversation: ConversationView | undefined): string | undefined {
+  if (conversation === undefined || Array.from(prompt).length > ASSISTANT_CONTEXT_PROMPT_MAX_CHARACTERS) return undefined;
+  const latest = conversation.messages.at(-1);
+  if (latest?.role !== "assistant" || latest.text.trim() === "") return undefined;
+  const selected = selectConversationContext({ prompt, messages: [latest], tokenBudget: ASSISTANT_CONTEXT_TOKEN_BUDGET });
+  const text = selected.fragments.map((fragment) => fragment.text).join("\n\n").trim();
+  return text === "" ? undefined : truncateHistoryPrompt(text, ASSISTANT_CONTEXT_TOKEN_BUDGET);
 }
 
 async function relationshipBoosts(
@@ -1526,7 +1575,7 @@ export interface UserPromptShadowPackRequest {
  * injection and by threshold calibration (`inspectUserPromptScoring`).
  */
 async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest,
-  "recentPrompts" | "signals" | "adapter" | "snapshot" | "foregroundControl">, scope: {
+  "recentPrompts" | "conversation" | "signals" | "adapter" | "snapshot" | "foregroundControl">, scope: {
   readonly active: Awaited<ReturnType<typeof loadActiveScope>>["active"];
   readonly memories: Awaited<ReturnType<typeof loadActiveScope>>["memories"];
   readonly normalizedPrompt: string;
@@ -1545,6 +1594,8 @@ async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest
     normalizedPrompt,
     ...(contextualHistoryAvailable ? recentPromptContext : [])
   ].join("\n");
+  const contextQuery = skipsPromptRetrieval(normalizedPrompt) ? undefined
+    : assistantContextQuery(normalizedPrompt, request.conversation);
   const semantic = skipsPromptRetrieval(normalizedPrompt)
     ? {
         stage: "lexical_only" as const,
@@ -1558,6 +1609,7 @@ async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest
         memories,
         query: semanticQuery,
         ...(contextualHistoryAvailable ? { rankingQuery: normalizedPrompt } : {}),
+        ...(contextQuery === undefined ? {} : { contextQuery }),
         deadlineAt: started + AUTOMATIC_SEMANTIC_DEADLINE_MS,
         ...(request.foregroundControl === undefined
           ? {}
@@ -1624,6 +1676,10 @@ async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest
     return score > 0 ? [[memory.memoryId, score] as const] : [];
   }).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
   const bm25Rank = new Map(bm25Ranking.map(([memoryId], index) => [memoryId, index + 1]));
+  const assistantContextRank = new Map([...(semantic.contextScores ?? new Map<string, number>()).entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, ASSISTANT_CONTEXT_FUSION_TOP)
+    .map(([memoryId], index) => [memoryId, index + 1]));
   // Upper median: `semanticRanking` is sorted from most to least similar.
   const medianSimilarity = semanticRanking.length < PROMPT_SEMANTIC_MEDIAN_MINIMUM_SCOPE
     ? PROMPT_SEMANTIC_TYPICAL_MEDIAN
@@ -1688,9 +1744,11 @@ async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest
       semanticLift >= PROMPT_SEMANTIC_STANDALONE_LIFT;
     const memorySemanticRank = semanticRank.get(memory.memoryId);
     const memoryBm25Rank = bm25Rank.get(memory.memoryId);
+    const memoryContextRank = assistantContextRank.get(memory.memoryId);
     const fusedScore = (directIdentity ? 1 : 0) +
       (memorySemanticRank === undefined ? 0 : 1 / (FUSION_RANK_OFFSET + memorySemanticRank)) +
       (memoryBm25Rank === undefined ? 0 : 1 / (FUSION_RANK_OFFSET + memoryBm25Rank)) +
+      (memoryContextRank === undefined ? 0 : 1 / (FUSION_RANK_OFFSET + memoryContextRank)) +
       (exact ? 1 / (FUSION_RANK_OFFSET + 1) : 0) +
       (applicability ? 0.5 / (FUSION_RANK_OFFSET + 1) : 0);
     let score = directIdentity ? 5 : 0;
@@ -1743,7 +1801,8 @@ async function scoreUserPromptMemories(request: Pick<UserPromptShadowPackRequest
         signalMatch,
         directIdentity,
         standaloneSemantic,
-        contextualSemanticCorroboration
+        contextualSemanticCorroboration,
+        assistantContextRank: memoryContextRank
       }
     });
   }
@@ -2172,6 +2231,7 @@ export async function inspectUserPromptScoring(request: {
   readonly projectId: string;
   readonly prompt: string;
   readonly recentPrompts?: readonly string[];
+  readonly conversation?: ConversationView;
   readonly adapter: EmbeddingAdapter;
   readonly requestedAt: string;
   readonly snapshot?: RetrievalSnapshot;

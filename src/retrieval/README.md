@@ -44,6 +44,13 @@ pool candidates are dropped and the ADR-0152 fallback applies. Jev's latency bar
 grows with the candidate count, while a second parallel request would pay a proxied
 TLS handshake. See [ADR-0175](../../docs/adr/0175-let-jev-judge-a-fused-candidate-pool.md).
 
+A prompt of up to 160 characters that follows an Assistant reply adds a third fusion
+list: an excerpt of that reply (at most 320 tokens, chosen as for Jev's context) is
+embedded in the time left before the semantic deadline, and the ten Memories most
+similar to it get a reciprocal-rank vote. Only the Jev pool changes; local selection,
+scores and bands do not, and a late embedding drops just this list. See
+[ADR-0180](../../docs/adr/0180-rank-a-short-prompts-pool-by-the-reply-it-answers.md).
+
 Lexical ranking in both automatic and explicit recall uses BM25 over
 [snapshot.ts](snapshot.ts) search terms: words, their Latin and CJK runs and CJK
 character bigrams, so a Chinese word is found inside a longer run of Chinese text.
@@ -67,7 +74,8 @@ at 1,024 local `o200k_base` tokens including labels/JSON. Current request, candi
 and criteria take precedence within a 4,096-token serialized request and 48 KiB cap,
 each growing by 512 tokens and 6 KiB per candidate beyond six (ADR-0175);
 provider token accounting may differ. No additional model call extracts keywords.
-Local recall still uses its existing User-only history rules. Jev must resolve the
+Local scoring still uses its existing User-only history rules; only the Jev pool
+also ranks by the latest reply (ADR-0180). Jev must resolve the
 current action, target and conditions before judging applicability; Assistant text
 is neither factual proof nor authority. Local fallback and Human eligibility remain
 unchanged. See [ADR-0146](../../docs/adr/0146-bound-jev-conversation-context.md).
