@@ -7,6 +7,7 @@ import { afterEach, expect, test } from "vitest";
 import { captureEvent } from "../../../src/capture/index.js";
 import { dreamingConfigurationSchema } from "../../../src/dreaming/config.js";
 import { handOffCaptureToDreaming } from "../../../src/dreaming/handoff.js";
+import { readInstructionSuggestions } from "../../../src/dreaming/instructions.js";
 import { DreamModelError, type DreamModel, type Verdict } from "../../../src/dreaming/model.js";
 import { inspectDreams, renderDreamReports, runNextDreamStep, scheduleDueDreams, startDreamRun } from "../../../src/dreaming/run.js";
 import { rememberExtract } from "../../../src/operations/remember.js";
@@ -330,9 +331,15 @@ test("in apply mode a nightly run writes its inject tier as dreaming Memory befo
     } });
   }
   const now = new Date(Date.now() + 60_000).toISOString();
-  const configuration = dreamingConfigurationSchema.parse({ enabled: true, mode: "apply", verify_batch_size: 8 });
+  const agents = join(root, ".codex", "AGENTS.md");
+  await mkdir(join(root, ".codex"));
+  await writeFile(agents, "# Global\n\nBe concise.\n");
+  const configuration = dreamingConfigurationSchema.parse({ enabled: true, mode: "apply", verify_batch_size: 8, host_instruction_files: [agents] });
   await startDreamRun({ runtimeRoot, projectId: project.projectId, now });
-  const model = fakeModel([]);
+  // ADR-0181: the Global rule the run wrote is judged for the instruction file before the report.
+  const model: DreamModel = { ...fakeModel([]), judgeInstructions: (request) => Promise.resolve({ usage: { tokens: 5, seconds: 1 },
+    results: request.rules.map((rule) => ({ id: rule.id, applies_everywhere: true, reason: "every session",
+      files: request.files.map((file) => ({ file: file.id, covered: false, merge_into: "", proposal: "Use Bits for every MR." })) })) }) };
   const steps: string[] = [];
   for (let step = 0; step < 50; step += 1) {
     const result = await runNextDreamStep({ runtimeRoot, vaultRoot, now, configuration, model, allowTemporaryRoots: true });
@@ -340,6 +347,11 @@ test("in apply mode a nightly run writes its inject tier as dreaming Memory befo
     steps.push(`${result.stage ?? ""}:${result.detail ?? ""}`);
   }
   expect(steps).toContain("report:applied 2");
+  expect(steps.indexOf("report:instruction suggestions judged")).toBeGreaterThan(steps.indexOf("report:applied 2"));
+  expect(steps.filter((step) => step.startsWith("report:instruction"))).toHaveLength(1);
+  expect((await readInstructionSuggestions(runtimeRoot)).suggestions.map((suggestion) => suggestion.files)).toEqual([
+    [{ path: agents, mergeInto: "", text: "Use Bits for every MR." }]
+  ]);
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     expect(database.prepare("SELECT authority, scope_kind, lifecycle FROM memory_catalog ORDER BY scope_kind").all())

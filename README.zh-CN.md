@@ -124,7 +124,11 @@ memstore dream status
 memstore dream report [RUN_ID]   # 按当前格式重新生成报告和总览
 memstore dream apply --from 2026-10-16 --preview   # 预演 apply 模式会写入什么
 memstore dream rollback [RUN_ID] [--apply]          # 归档 dreaming 写入的记忆（可恢复）
+memstore instructions [--refresh]                   # 建议写进全局指令文件的全局规则
+memstore instructions dismiss M:<id>                # 不再建议这一条
 ```
+
+每个会话都该遵守的规则（「用中文回复」「不碰代理」）和具体提问不相似，很少被注入。全局记忆或 `host_instruction_files` 有变化时，下一次 dreaming 由判断模型找出指令文件里还没写的这类规则，给出建议文字和应并入的现有条目；每日简报只列一次新建议。MemStore 不会改这些文件（`instruction_suggestions = false` 关闭；[ADR-0181](docs/adr/0181-suggest-global-rules-for-the-instruction-files.md)）。
 
 模型调用通过 Codex（`codex_home`，默认 `~/.codex`，与旧的 Luna 适配器相互独立，开启 dreaming 不会重新启动旧的治理和质量任务）：提炼 Luna medium，验证 Luna high（可用 `extract_effort`、`verify_effort`、`verify_parallelism` 调整）。其他选项见 [SPEC](SPEC.md) 的 Nightly dreaming 一节和 [ADR-0147](docs/adr/0147-nightly-dreaming.md)。
 

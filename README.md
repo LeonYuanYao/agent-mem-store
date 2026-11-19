@@ -186,7 +186,16 @@ memstore dream report [RUN_ID]   # re-render reports and the overview
 memstore dream apply --from 2026-10-16 --preview   # what apply mode would write
 memstore dream rollback [RUN_ID] [--apply]          # archive Memory dreaming wrote
 memstore dream digest [--since ISO]                 # what dreaming changed, as a chat message
+memstore instructions [--refresh]                   # Global rules suggested for the instruction files
+memstore instructions dismiss M:<id>                # never suggest this one again
 ```
+
+Rules that hold in every session ("reply in Chinese", "never touch the proxy") are rarely similar
+enough to a prompt to be injected. When Global Memories or the `host_instruction_files` change, the
+next dream run has the judge model find such rules that a file does not state yet and suggests the
+text and the entry to merge it into; the digest lists new suggestions once. MemStore never edits
+those files (`instruction_suggestions = false` turns this off;
+[ADR-0181](docs/adr/0181-suggest-global-rules-for-the-instruction-files.md)).
 
 A Session idle for 20 minutes gets a short note of where its work stands; the first
 prompt of the next Session in the Project receives the latest three

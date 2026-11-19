@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { dreamDigest } from "../dreaming/digest.js";
+import { dismissInstructionSuggestion, instructionSuggestionLines, readInstructionSuggestions, refreshInstructionSuggestions } from "../dreaming/instructions.js";
 import { recallSources } from "../retrieval/sources.js";
 import { fetchLarkDocument, rememberDocument } from "../operations/remember-document.js";
 import { readDreamingConfiguration, type DreamingConfiguration } from "../dreaming/config.js";
@@ -226,6 +227,7 @@ function parseCommon(arguments_: readonly string[]) {
       "native-store": { type: "string", multiple: true },
       preview: { type: "boolean", default: false },
       apply: { type: "boolean", default: false },
+      refresh: { type: "boolean", default: false },
       json: { type: "boolean", default: false }
     }
   });
@@ -479,7 +481,7 @@ async function runRepair(arguments_: readonly string[]): Promise<unknown> {
 function writeResult(command: string, result: unknown, json: boolean): void {
   if (json) process.stdout.write(`${JSON.stringify(successEnvelope(command, result))}\n`);
   // The digest is a chat message: plain text unless --json.
-  else if (command === "dream.digest") process.stdout.write(`${(result as { text: string }).text}\n`);
+  else if (command === "dream.digest" || command === "instructions.list") process.stdout.write(`${(result as { text: string }).text}\n`);
   else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
@@ -968,6 +970,38 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       }),
       json: parsed.values.json
     };
+  }
+  // Global rules suggested for the user-wide instruction files (ADR-0181).
+  if (command === "instructions") {
+    if (parsed.positionals[1] === "dismiss") {
+      const reference = /^M:(\d+)$/u.exec(parsed.positionals[2] ?? "")?.[1];
+      if (reference === undefined) throw new MemStoreCommandError("memory_id_required", "instructions dismiss requires M:<number>.");
+      return { command: "instructions.dismiss",
+        result: await dismissInstructionSuggestion({ runtimeRoot: location.runtimeRoot, memoryRef: Number(reference), now }), json: parsed.values.json };
+    }
+    if (parsed.positionals[1] !== undefined) throw new MemStoreCommandError("unknown_command", "Use `memstore instructions [--refresh]` or `memstore instructions dismiss M:<id>`.");
+    const configuration = await readDreamingConfiguration(location.runtimeRoot);
+    let outcome: string | undefined;
+    if (parsed.values.refresh) {
+      const configured = await configuredWorkerAdapters(location.runtimeRoot, { includeEmbedding: false });
+      try {
+        const factory = configured.adapters?.dreamModel;
+        if (factory === undefined) throw new MemStoreCommandError("dream_model_unavailable", "Dreaming model is unavailable.");
+        outcome = (await refreshInstructionSuggestions({ runtimeRoot: location.runtimeRoot, vaultRoot: location.vaultRoot,
+          files: configuration.host_instruction_files, model: factory(configuration), now, force: true })).outcome;
+      } finally {
+        await configured.dispose();
+      }
+    }
+    const state = await readInstructionSuggestions(location.runtimeRoot);
+    const text = state.suggestions.length === 0
+      ? `没有待处理的建议${state.judgedAt === undefined ? "（还没判断过；用 --refresh 立即判断）" : `（上次判断 ${state.judgedAt}）`}。`
+      : ["**建议写进全局指令文件**", ...instructionSuggestionLines(state.suggestions),
+        "", "写入后下次判断会自动消失；不需要的：`memstore instructions dismiss M:<id>`"].join("\n");
+    return { command: "instructions.list", json: parsed.values.json,
+      result: { judged_at: state.judgedAt ?? null, ...(outcome === undefined ? {} : { outcome }),
+        ...(state.failedAt === undefined ? {} : { failed_at: state.failedAt, failure: state.failure ?? "" }),
+        suggestions: state.suggestions, text } };
   }
   if (command === "dream" && parsed.positionals[1] === "digest") {
     const configuration = await readDreamingConfiguration(location.runtimeRoot);
@@ -1785,7 +1819,7 @@ async function run(arguments_: readonly string[]): Promise<void> {
     }
     return;
   }
-  if (["archive", "restore", "purge-memory", "doctor", "vault", "worker", "dream", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
+  if (["archive", "restore", "purge-memory", "doctor", "vault", "worker", "dream", "instructions", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
       (command === "operation" && arguments_[1] === "retry")) {
     const output = await runOperations(arguments_);
     writeResult(output.command, output.result, output.json);

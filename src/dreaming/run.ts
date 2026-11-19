@@ -7,6 +7,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { Temporal } from "@js-temporal/polyfill";
 
 import { MemStoreCommandError } from "../contracts/envelope.js";
+import { refreshInstructionSuggestions } from "./instructions.js";
 import { openRuntimeDatabase } from "../runtime/database.js";
 import { cloneOf, sessionSourceBranches, type SourceBranch } from "./branches.js";
 import { resolveSkipRoots, skippedRoots, type DreamingConfiguration } from "./config.js";
@@ -774,6 +775,21 @@ async function stepRun(
           for (const outcome of outcomes) counts[`apply_${outcome.state}`] = (counts[`apply_${outcome.state}`] ?? 0) + 1;
           advance(database, run, "report", now, addStats(run, counts));
           return `applied ${String(outcomes.length)}`;
+        }
+      }
+      // Global rules every session should follow, for the instruction files (ADR-0181): its own
+      // step, and only when the Global Memories or the files changed since the last judgment.
+      if (configuration.instruction_suggestions && configuration.host_instruction_files.length > 0) {
+        const refreshed = await refreshInstructionSuggestions({
+          runtimeRoot, vaultRoot: request.vaultRoot, files: configuration.host_instruction_files, model: request.model, now
+        });
+        if (refreshed.outcome === "judged" || refreshed.outcome === "failed") {
+          advance(database, run, "report", now, addStats(run, {
+            instruction_calls: refreshed.outcome === "judged" && refreshed.usage === undefined ? 0 : 1,
+            instruction_tokens: refreshed.usage?.tokens ?? 0,
+            instruction_suggestions: refreshed.state.suggestions.length
+          }));
+          return `instruction suggestions ${refreshed.outcome}`;
         }
       }
       const timeZone = request.configuration.timezone;

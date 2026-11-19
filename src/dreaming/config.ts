@@ -52,6 +52,8 @@ export const dreamingConfigurationSchema = z.object({
   // User-wide instruction files every session loads (for example the agents' global AGENTS.md or
   // CLAUDE.md): knowledge they state is already known, and apply treats them as Human-authored.
   host_instruction_files: z.array(z.string().min(1)).max(10).default([]),
+  // Suggest Global rules that hold in every session for those files (ADR-0181); never edits them.
+  instruction_suggestions: z.boolean().default(true),
   // Codex home for dreaming's model calls. Independent of MEMSTORE_LUNA_CODEX_HOME so enabling
   // dreaming does not also restart legacy Luna governance and quality work.
   codex_home: z.string().min(1).default("~/.codex")
