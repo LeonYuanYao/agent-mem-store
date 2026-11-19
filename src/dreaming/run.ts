@@ -735,6 +735,8 @@ async function stepRun(
           // The user's own words are not about retired code, whatever evidence the verifier found.
           retiredOnly: item.explicit_user !== 1 && retiredEvidence(verdict?.evidence ?? [], configuration.retired.flatMap((entry) => entry.paths)),
           userRequested: run.request !== undefined,
+          // Low-value appraisals stopped above, so an appraisal here judged the item worth keeping.
+          appraisedLasting: appraisal !== undefined,
           verdict: finalVerdict,
           durability: verdict?.durability ?? "long_term",
           branch: defense?.branch || verdict?.branch || "",

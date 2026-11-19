@@ -26,6 +26,13 @@ test("negative, redundant and episodic knowledge never reaches injection", () =>
   expect(tierOf({ ...base, verdict: "confirmed", durability: "episodic" })).toEqual({ tier: "drop", reason: "episodic" });
 });
 
+test("an item the appraisal kept is not dropped on the verifier's durability guess", () => {
+  expect(tierOf({ ...base, verdict: "confirmed", durability: "episodic", appraisedLasting: true })).toEqual({ tier: "inject", reason: "confirmed" });
+  expect(tierOf({ ...base, verdict: "not_repo_verifiable", durability: "episodic", appraisedLasting: true }).tier).toBe("pool");
+  // Other drops still apply.
+  expect(tierOf({ ...base, verdict: "confirmed", durability: "episodic", appraisedLasting: true, documentedAt: "AGENTS.md:3" }).tier).toBe("drop");
+});
+
 test("a user-stated item is injected only when the user's own words support it", () => {
   expect(tierOf({ ...base, explicitUser: true, userSupport: "user_stated_rule" })).toEqual({ tier: "inject", reason: "explicit_user" });
   expect(tierOf({ ...base, explicitUser: true, userSupport: "pasted_task_instruction" })).toEqual({ tier: "pool", reason: "single_session_inconclusive" });

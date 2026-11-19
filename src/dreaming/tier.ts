@@ -32,6 +32,11 @@ export interface TierInput {
   readonly userRequested?: boolean;
   /** The Project is a catch-all root (see `isCatchAllRoot`): it keeps global knowledge only. */
   readonly catchAllProject?: boolean;
+  /**
+   * The appraisal, reading the item with the rest of its Session, judged it of lasting value
+   * (ADR-0177). The verifier's durability guess on the lone claim does not override that (ADR-0179).
+   */
+  readonly appraisedLasting?: boolean;
 }
 
 /**
@@ -65,7 +70,7 @@ export function tierOf(input: TierInput): { readonly tier: DreamTier; readonly r
   if (input.retiredOnly === true) return { tier: "drop", reason: "retired_subject" };
   // The user's own instruction for one task may still be a preference: keep it searchable instead of dropping it.
   const userTaskInstruction = input.explicitUser && input.userSupport === "user_task_instruction";
-  if (input.durability === "episodic" && !userTaskInstruction) return { tier: "drop", reason: "episodic" };
+  if (input.durability === "episodic" && !userTaskInstruction && input.appraisedLasting !== true) return { tier: "drop", reason: "episodic" };
   if (input.catchAllProject === true && input.scope !== "global") return { tier: "drop", reason: "catch_all_project" };
   if (input.verdict === "contradicted" || input.verdict === "stale") return { tier: "review", reason: input.verdict };
   if (input.verdict === "documented" || (input.documentedAt ?? "") !== "") return { tier: "drop", reason: "already_in_autoloaded_docs" };
