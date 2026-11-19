@@ -63,7 +63,10 @@ export async function dreamDigest(request: {
   for (const item of items) counts[item.state] += 1;
   const day = Temporal.Instant.from(request.now).toZonedDateTimeISO(request.timeZone).toPlainDate().toString().slice(5);
   if (counts.written + counts.revised + counts.review_due === 0) {
-    const summary = counts.observed === 0 ? `MemStore ${day}：dreaming 没有改动记忆。` : `MemStore ${day}：dreaming 没有新写入或修订，${String(counts.observed)} 条判为已知。`;
+    // A digest with nothing to report says so in these words, and the scheduled task then sends
+    // nothing; one with suggestions must not, or they would never be delivered.
+    const summary = suggestions.length > 0 ? `**MemStore ${day}**：dreaming 没有新的记忆改动；有 ${String(suggestions.length)} 条规则建议写进全局指令文件。`
+      : counts.observed === 0 ? `MemStore ${day}：dreaming 没有改动记忆。` : `MemStore ${day}：dreaming 没有新写入或修订，${String(counts.observed)} 条判为已知。`;
     return { since: request.since, runIds: runs.map((run) => run.runId), counts, instructionSuggestions: suggestions.length,
       text: [summary, ...suggestionBlock(suggestions)].join("\n") };
   }

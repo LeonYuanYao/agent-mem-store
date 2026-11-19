@@ -90,7 +90,9 @@ test("only a rule for every session that a file lacks is suggested, once per cha
   const ref = (await readCanonicalMemory({ runtimeRoot, vaultRoot, memoryId: chinese.memoryId }))?.memory.memoryRef;
   const day = await dreamDigest({ runtimeRoot, vaultRoot, since: "2026-11-19T03:00:00.000Z", now: "2026-11-20T03:30:00.000Z", timeZone: "Asia/Shanghai" });
   expect(day.instructionSuggestions).toBe(1);
-  expect(day.text).toContain("MemStore 11-20：dreaming 没有改动记忆。");
+  // The scheduled digest sends nothing for these phrases; a digest with suggestions avoids them.
+  expect(day.text).toContain("有 1 条规则建议写进全局指令文件");
+  expect(day.text).not.toMatch(/没有改动记忆|没有新写入或修订/u);
   expect(day.text).toContain(`- M:${String(ref)} 默认用中文回复用户`);
   expect(day.text).toContain(`写进 \`${codex}\`（并入「Personality and Behavior」）：Codex: reply in Chinese`);
   const next = await dreamDigest({ runtimeRoot, vaultRoot, since: "2026-11-20T03:30:00.000Z", now: "2026-11-21T03:30:00.000Z", timeZone: "Asia/Shanghai" });
