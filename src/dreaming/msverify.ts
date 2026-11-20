@@ -90,6 +90,12 @@ export class EvidenceReader {
     return lines.length > 0 ? lines : ["no matches in any repository baseline"];
   }
 
+  /** Where each repository grep reads lives on disk, named the way grep names its files. */
+  public repositories(): { readonly path: string; readonly directory: string }[] {
+    return this.#map.repos.filter((repo) => repo.sha !== null && repo.kind !== "submodule")
+      .map((repo) => ({ path: repo.path, directory: repo.directory }));
+  }
+
   /** Files CLAUDE.md files import, in repositories and on the host, named the way grep names them (ADR-0187). */
   public async claudeImports(): Promise<Set<string>> {
     const paths = new Set<string>();

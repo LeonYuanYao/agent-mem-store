@@ -1,6 +1,7 @@
-import { readdir, readFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { readdir, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import type { EvidenceReader } from "./msverify.js";
@@ -12,7 +13,8 @@ import type { EvidenceReader } from "./msverify.js";
  * Memory is injected into Claude Code and Codex alike while their guidance differs: Claude Code
  * loads CLAUDE.md files and what they import, Codex loads AGENTS.md files, and each has its own
  * skills. A claim stated only in one agent's guidance is dropped only if no other agent works in
- * the Project, or that agent's guidance states the same passage too.
+ * the Project, or that agent's guidance states the same passage too. A file no agent loads, such as a
+ * product's own skill resources or a README, documents nothing (ADR-0188).
  */
 export type Agent = "claude" | "codex";
 export const everyAgent: readonly Agent[] = ["claude", "codex"];
@@ -36,8 +38,10 @@ export function activeAgents(database: DatabaseSync, projectId: string, now: str
 export interface GuidanceContext {
   /** Files CLAUDE.md files import, named as grep and the verifier name them. */
   readonly claudeImports: ReadonlySet<string>;
-  /** Skill names installed for each agent on this machine. */
-  readonly skills: Readonly<Record<Agent, ReadonlySet<string>>>;
+  /** Real paths of the skill directories each agent loads: those installed on this machine and each repository's own. */
+  readonly skillDirectories: Readonly<Record<Agent, readonly string[]>>;
+  /** Where repository-relative names live on disk, longest name first. */
+  readonly repositories: readonly { readonly path: string; readonly directory: string }[];
 }
 
 function hostRootAgent(root: string): Agent | undefined {
@@ -46,31 +50,67 @@ function hostRootAgent(root: string): Agent | undefined {
   return undefined;
 }
 
-export async function guidanceContext(reader: EvidenceReader | undefined, hostRoots: readonly string[]): Promise<GuidanceContext> {
-  const skills: Record<Agent, Set<string>> = { claude: new Set(), codex: new Set() };
+/** A repository's own skill directories: Claude Code reads `.claude/skills`, Codex `.agents/skills` and `.codex/skills`. */
+const repositorySkillRoots: readonly [string, Agent][] = [[".claude/skills", "claude"], [".agents/skills", "codex"], [".codex/skills", "codex"]];
+
+async function skillEntries(root: string): Promise<string[]> {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const paths = await Promise.all(entries.map((entry) => realpath(join(root, entry.name)).catch(() => undefined)));
+  return paths.filter((path): path is string => path !== undefined);
+}
+
+export async function guidanceContext(reader: Pick<EvidenceReader, "repositories" | "claudeImports"> | undefined,
+  hostRoots: readonly string[]): Promise<GuidanceContext> {
+  const skillDirectories: Record<Agent, string[]> = { claude: [], codex: [] };
   for (const root of hostRoots) {
     const agent = hostRootAgent(root);
     if (agent === undefined || root.endsWith(".md")) continue;
-    for (const entry of await readdir(root, { withFileTypes: true }).catch(() => [])) skills[agent].add(entry.name);
+    skillDirectories[agent].push(...await skillEntries(root));
   }
-  return { claudeImports: reader === undefined ? new Set() : await reader.claudeImports(), skills };
+  const repositories: { path: string; directory: string }[] = [];
+  for (const repo of reader?.repositories() ?? []) {
+    const directory = await realpath(repo.directory).catch(() => repo.directory);
+    repositories.push({ path: repo.path, directory });
+    for (const [root, agent] of repositorySkillRoots) skillDirectories[agent].push(...await skillEntries(join(directory, root)));
+  }
+  repositories.sort((left, right) => right.path.length - left.path.length);
+  return { claudeImports: reader === undefined ? new Set() : await reader.claudeImports(), skillDirectories, repositories };
 }
 
-/** Which agents load a guidance file; undefined when that cannot be told, which counts as every agent. */
+/** Where a file named the way grep names it lives on disk, through any symbolic link. */
+function onDisk(path: string, context: GuidanceContext): string | undefined {
+  let absolute: string | undefined;
+  if (path.startsWith("~/")) absolute = join(homedir(), path.slice(2));
+  else if (isAbsolute(path)) absolute = path;
+  else {
+    const repo = context.repositories.find((entry) => entry.path !== "." && path.startsWith(`${entry.path}/`)) ??
+      context.repositories.find((entry) => entry.path === ".");
+    if (repo !== undefined) absolute = join(repo.directory, repo.path === "." ? path : path.slice(repo.path.length + 1));
+  }
+  if (absolute === undefined) return undefined;
+  try { return realpathSync(absolute); } catch { /* not in the checkout */ }
+  try { return join(realpathSync(dirname(absolute)), basename(absolute)); } catch { return absolute; }
+}
+
+/**
+ * Which agents load a guidance file. Instruction files go to the agent that reads them; a skill file to
+ * the agents whose skill directories hold it. Any other file, such as a product's own skill resources
+ * or a README, is loaded by no agent (ADR-0188). `.ai/bootstrap.md` and `.ai/context.md`, which
+ * instruction files point agents to, cannot be told and count for every agent.
+ */
 export function loadingAgents(path: string, context: GuidanceContext): readonly Agent[] | undefined {
   const name = basename(path);
   if (name === "CLAUDE.md" || name === "CLAUDE.local.md" || context.claudeImports.has(path)) return ["claude"];
   if (name === "AGENTS.md" || name === "AGENTS.override.md") return ["codex"];
-  const skill = /(?:^|\/)skills\/([^/]+)\//u.exec(path)?.[1];
-  if (skill !== undefined) {
-    const agents = everyAgent.filter((agent) => context.skills[agent].has(skill) ||
-      (agent === "claude" ? /(?:^|\/)\.claude\/skills\//u : /(?:^|\/)\.(?:agents|codex)\/skills\//u).test(path));
-    return agents.length > 0 ? agents : undefined;
-  }
+  const file = onDisk(path, context);
+  const skilled = file === undefined ? [] : everyAgent.filter((agent) =>
+    context.skillDirectories[agent].some((directory) => file === directory || file.startsWith(`${directory}/`)));
+  if (skilled.length > 0) return skilled;
   // Files under each agent's home directory, as the verifier names them.
   if (/^~\/\.claude\//u.test(path)) return ["claude"];
   if (/^~\/\.codex\//u.test(path)) return ["codex"];
-  return undefined;
+  if (/(?:^|\/)\.ai\/(?:bootstrap|context)\.md$/u.test(path)) return undefined;
+  return [];
 }
 
 /** The `path:line[-line]` references of a `documented_at` answer. */
