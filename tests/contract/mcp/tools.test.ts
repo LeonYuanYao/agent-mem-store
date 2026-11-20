@@ -47,6 +47,7 @@ test("the stdio server exposes progressive recall plus reversible lifecycle tool
     "memstore_provenance",
     "memstore_related",
     "memstore_report_irrelevant",
+    "memstore_rescope",
     "memstore_restore",
     "memstore_search"
   ]);
@@ -120,6 +121,16 @@ test("MCP archive and restore preview by default and apply through the shared li
     ok: true,
     command: "memory.restore",
     result: { dryRun: false, state: "restored", memoryRef: "M:1" }
+  });
+  // The scope moves through a successor Memory (ADR-0186).
+  const rescoped = await client.callTool({
+    name: "memstore_rescope",
+    arguments: { memory_id: "M:1", scope: "global", apply: true }
+  });
+  expect(rescoped.structuredContent).toMatchObject({
+    ok: true,
+    command: "memory.rescope",
+    result: { dryRun: false, state: "rescoped", memoryRef: "M:1", to: { kind: "global" }, successor: { memoryRef: "M:2" } }
   });
   await client.close();
   await server.close();

@@ -221,8 +221,9 @@ Setup manages three Skills:
   Bad Cases; it does not authorize silent background code repair.
 
 The MCP server exposes `memstore_search`, `memstore_get`, `memstore_provenance`,
-`memstore_related`, `memstore_report_irrelevant`, `memstore_archive`, and
-`memstore_restore`. Remembering uses the Skill/CLI path; physical deletion is CLI-only.
+`memstore_related`, `memstore_report_irrelevant`, `memstore_archive`,
+`memstore_restore`, and `memstore_rescope`. Remembering uses the Skill/CLI path;
+physical deletion is CLI-only.
 
 ### Storage, governance, and retention
 
@@ -545,6 +546,17 @@ memstore archive M:123 --reason obsolete --apply
 memstore restore M:123 --apply
 ```
 
+On the user's request, `rescope` moves one active Memory to Global scope or to
+another Project. A revision cannot change scope, so the knowledge moves to a new
+Memory in the target scope with the same text, authority and startup, and the old
+one is archived pointing at it (ADR-0186):
+
+```sh
+memstore rescope M:123 --scope global
+memstore rescope M:123 --scope global --apply
+memstore rescope M:123 --scope project --project-id msproj_... --apply
+```
+
 Permanent single-Memory deletion is CLI-only and accepts Archived Memory only.
 It refuses protected content, requires a verified backup, and binds apply to the
 exact previewed target and backup:
@@ -555,8 +567,8 @@ memstore purge-memory M:123 --backup /path/to/verified-vault-backup \
   --gate <approvalDigest-from-preview> --apply
 ```
 
-`memstore_archive` and `memstore_restore` provide the same reversible operations
-to MCP clients. Omitting `apply` previews the change. Physical purge is not
+`memstore_archive`, `memstore_restore` and `memstore_rescope` provide the same
+operations to MCP clients. Omitting `apply` previews the change. Physical purge is not
 exposed through MCP.
 
 The built binaries are `memstore` and `memstore-mcp`. The MCP server reads

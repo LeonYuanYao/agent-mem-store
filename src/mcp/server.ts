@@ -7,7 +7,9 @@ import {
   previewMemoryLifecycleChange,
   type MemoryLifecycleAction
 } from "../operations/memory-lifecycle.js";
+import { applyMemoryScopeChange, previewMemoryScopeChange } from "../operations/memory-scope.js";
 import { executeRecall, type RecallContext } from "../operations/recall.js";
+import { resolveRememberScope } from "../operations/remember.js";
 import type { EmbeddingAdapter } from "../retrieval/index.js";
 import type { RetrievalJudge } from "../retrieval/judge.js";
 
@@ -189,6 +191,33 @@ export function createMemStoreMcpServer(
     "memory.restore",
     () => lifecycle(input, "restore")
   ));
+
+  server.registerTool("memstore_rescope", {
+    title: "Change the scope of a MemStore memory",
+    description: "Only when the user explicitly asks to change one Memory's scope (for example from this Project to Global): preview or apply the move. " +
+      "The knowledge moves to a new Memory in the target scope with a new M: reference, and the old one is archived pointing at it.",
+    inputSchema: {
+      memory_id: z.string().min(1).describe("Portable M:<number> reference or canonical msmem_ UUID."),
+      scope: z.enum(["global", "project"]).describe("Target scope. project means the Project of the current working directory unless project_id is given."),
+      project_id: z.string().min(1).optional(),
+      reason: z.string().min(1).max(200).optional(),
+      apply: z.boolean().optional().describe("Omit or set false to preview; true applies the move.")
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false
+    }
+  }, async (input) => runTool("memory.rescope", async () => {
+    const scope = input.scope === "project" && input.project_id !== undefined
+      ? { kind: "project" as const, projectId: input.project_id }
+      : await resolveRememberScope({ scope: input.scope, path: options.path, runtimeRoot: options.runtimeRoot });
+    const request = {
+      runtimeRoot: options.runtimeRoot, vaultRoot: options.vaultRoot, memory: input.memory_id, scope,
+      changedAt: options.now?.() ?? new Date().toISOString(), ...(input.reason === undefined ? {} : { reason: input.reason })
+    };
+    return input.apply === true ? applyMemoryScopeChange(request) : previewMemoryScopeChange(request);
+  }));
 
   return server;
 }

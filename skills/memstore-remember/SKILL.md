@@ -1,6 +1,6 @@
 ---
 name: memstore-remember
-description: Save an exact Human-authored assertion, store a whole document (Markdown file or Feishu/Lark doc) for recall, or have MemStore distill durable knowledge (nightly dreaming when enabled, otherwise Luna) from the current turn, session, a recorded turn, or a file. Use when the user asks to remember, preserve, learn, or promote a decision, preference, constraint, repair, or other reusable knowledge, or to store a document in MemStore, at Project or Global scope.
+description: Save an exact Human-authored assertion, store a whole document (Markdown file or Feishu/Lark doc) for recall, or have MemStore distill durable knowledge (nightly dreaming when enabled, otherwise Luna) from the current turn, session, a recorded turn, or a file. Use when the user asks to remember, preserve, learn, or promote a decision, preference, constraint, repair, or other reusable knowledge, or to store a document in MemStore, at Project or Global scope. Also use when the user asks to move an existing Memory to Global or to another Project (change its scope).
 ---
 
 # MemStore Remember
@@ -30,6 +30,21 @@ memstore remember doc --stdin --source <url-or-path> --title <title> --json
 - Importing the same source again updates the same Memory (`updated`, same M:id) or reports `unchanged`. Use this to refresh a document after it changes.
 - `needs_sensitivity_review`: show the user `matched_value` and ask whether it is a credential. Only if they confirm it is not, run again with `--confirm-sensitive '<matched_value>'`. `blocked_secret`: the document contains a secret; ask the user to remove it. Never confirm on the user's behalf.
 - A document is retrieved by its card, title and headings. Default to `--scope project`; use `--scope global` for documents that apply across projects.
+
+## Change the scope of a stored Memory
+
+When the user asks to move an existing Memory to Global scope or to another Project (“把 M:123 改成全局”), use `memstore rescope`. Do not archive it and extract the material again: that rewrites the statement.
+
+```text
+memstore rescope M:123 --scope global --json
+memstore rescope M:123 --scope global --apply --json
+memstore rescope M:123 --scope project [--project-id msproj_...] --apply --json
+```
+
+- It previews by default; add `--apply` once the user has asked for the move. `--scope project` targets the Project of the working directory unless `--project-id` is given.
+- `rescoped`: the knowledge now lives in a new Memory (`successor.memoryRef`, a new M: number) with the same text, authority and startup; the old one is archived and points at it. Report both references.
+- `unchanged`: it already has that scope. An archived Memory must be restored first.
+- The MCP tool `memstore_rescope` does the same.
 
 ## Run the command
 
@@ -61,4 +76,4 @@ Read the JSON from stdout alone; do not merge stderr into it with `2>&1`. If the
 - `blocked_secret`: do not repeat suspected secret content.
 - `dead_letter` or `failed`: report the visible failure and operation ID.
 
-Never upgrade Agent-derived knowledge to Human-authored authority, broaden Project to Global, or bypass Candidate, Luna or dreaming processing.
+Never upgrade Agent-derived knowledge to Human-authored authority, broaden Project to Global without the user asking for it, or bypass Candidate, Luna or dreaming processing.

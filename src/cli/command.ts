@@ -32,6 +32,7 @@ import { loadConfiguration } from "../configuration/index.js";
 import { previewCorpusRetention, applyCorpusRetention, parseCorpusRetentionPreview, inspectCorpusRetention, loadCorpusRetentionConfiguration } from "../capacity/corpus-retention.js";
 import { readSessionProjectRoute, setSessionProjectRoute } from "../projects/session-route.js";
 import { migrateSessionProject } from "../operations/session-migration.js";
+import { applyMemoryScopeChange, previewMemoryScopeChange } from "../operations/memory-scope.js";
 import { loadArchiveRetentionMonths } from "../lifecycle/archive-retention.js";
 import { prepareShadowEmbedding } from "../operations/embedding-install.js";
 import { migrateMemoryCategories } from "../operations/category-migration.js";
@@ -141,6 +142,7 @@ import {
 import {
   rememberAssert,
   rememberExtract,
+  resolveRememberScope,
   type RememberScope,
   type StartupPolicy
 } from "../operations/remember.js";
@@ -650,6 +652,29 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       result: parsed.values.apply
         ? await applyMemoryLifecycleChange(request)
         : await previewMemoryLifecycleChange(request),
+      json: parsed.values.json
+    };
+  }
+  if (command === "rescope") {
+    // Moves a Memory to another scope on the user's request (ADR-0186); previews by default.
+    if (parsed.values.preview && parsed.values.apply) {
+      throw new MemStoreCommandError("memory_scope_mode_conflict", "Use either --preview or --apply, not both. rescope previews by default.");
+    }
+    const memory = parsed.positionals[1];
+    if (memory === undefined || (parsed.values.scope !== "global" && parsed.values.scope !== "project")) {
+      throw new MemStoreCommandError("invalid_arguments", "rescope requires M:<number> and --scope global|project.");
+    }
+    const target = parsed.values.scope === "project" && parsed.values["project-id"] !== undefined
+      ? { kind: "project" as const, projectId: parsed.values["project-id"] }
+      : await resolveRememberScope({ scope: parsed.values.scope, path: resolve(parsed.values.path ?? process.cwd()), runtimeRoot: location.runtimeRoot });
+    const request = {
+      ...location, memory, scope: target, changedAt: now,
+      ...(parsed.values.reason === undefined ? {} : { reason: parsed.values.reason }),
+      ...(parsed.values["confirm-sensitive"] === undefined ? {} : { reviewedSensitiveValue: parsed.values["confirm-sensitive"] })
+    };
+    return {
+      command: "memory.rescope",
+      result: parsed.values.apply ? await applyMemoryScopeChange(request) : await previewMemoryScopeChange(request),
       json: parsed.values.json
     };
   }
@@ -1604,6 +1629,7 @@ Everyday use:
   memstore recall search QUERY
   memstore recall sources M:123
   memstore archive M:123 [--reason TEXT] [--apply]
+  memstore rescope M:123 --scope global|project [--project-id ID] [--reason TEXT] [--apply]
   memstore restore M:123 [--apply]
   memstore purge-memory M:123 --backup PATH [--gate DIGEST --apply]
   memstore review generate --preview
@@ -1819,7 +1845,7 @@ async function run(arguments_: readonly string[]): Promise<void> {
     }
     return;
   }
-  if (["archive", "restore", "purge-memory", "doctor", "vault", "worker", "dream", "instructions", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
+  if (["archive", "restore", "rescope", "purge-memory", "doctor", "vault", "worker", "dream", "instructions", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
       (command === "operation" && arguments_[1] === "retry")) {
     const output = await runOperations(arguments_);
     writeResult(output.command, output.result, output.json);

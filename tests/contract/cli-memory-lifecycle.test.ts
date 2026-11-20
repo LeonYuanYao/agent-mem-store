@@ -85,3 +85,20 @@ test("CLI exposes preview-first archive, restore, and approval-bound purge-memor
     ...rootsArguments
   ])).resolves.toMatchObject({ result: { dryRun: false, state: "purged" } });
 }, 20_000);
+
+test("CLI rescope previews by default and moves a Memory to global scope on --apply", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-cli-rescope-"));
+  roots.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await writeCanonicalMemory({ runtimeRoot, vaultRoot, actor: "agent", memory: makeCanonicalMemory({
+    memoryId: "msmem_123e4567-e89b-42d3-a456-426614179211", revisionId: "msrev_123e4567-e89b-42d3-a456-426614179212",
+    body: "Never print secret files.", authority: "agent_derived"
+  }) });
+  const rootsArguments = ["--runtime", runtimeRoot, "--vault", vaultRoot];
+  await expect(runCli(["rescope", "M:1", "--scope", "global", ...rootsArguments]))
+    .resolves.toMatchObject({ command: "memory.rescope", result: { dryRun: true, state: "preview", to: { kind: "global" } } });
+  await expect(runCli(["rescope", "M:1", "--scope", "global", "--apply", ...rootsArguments]))
+    .resolves.toMatchObject({ result: { state: "rescoped", successor: { memoryRef: "M:2" } } });
+  await expect(runCli(["rescope", "M:1", ...rootsArguments])).rejects.toThrow();
+});
