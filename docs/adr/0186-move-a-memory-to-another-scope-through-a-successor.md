@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Move a Memory to another scope through a successor

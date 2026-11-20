@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Tell the extractor the scope the user asked for

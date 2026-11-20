@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Follow CLAUDE.md imports when finding guidance agents already have
