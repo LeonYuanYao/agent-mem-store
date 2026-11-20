@@ -205,7 +205,7 @@ test("large historical receipt volume does not consume the semantic deadline", a
   });
 
   expect(result.semanticStage).toBe("complete");
-}, 15_000);
+});
 
 test("large Project scope is parsed before the semantic deadline", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-pack-large-scope-"));
@@ -425,7 +425,7 @@ test("a long prompt over a production-sized snapshot stays inside the warm-path 
     expect.objectContaining({ memoryId: targetMemoryId })
   ]));
   expect(elapsedMilliseconds).toBeLessThan(500);
-}, 15_000);
+});
 
 test("automatic SessionStart fails open when Runtime SQLite is temporarily busy", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-pack-busy-runtime-"));

@@ -71,4 +71,4 @@ test("purge preview has a stable JSON envelope and purge run --preview remains d
     command: "purge.preview",
     result: { dryRun: true, eligibleCount: 1 }
   });
-}, 15_000);
+});

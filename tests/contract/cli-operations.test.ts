@@ -53,7 +53,7 @@ test("doctor and Vault validation expose stable read-only JSON envelopes", async
     command: "vault.validate",
     result: { state: "valid", memoryCount: 0 }
   });
-}, 15_000);
+});
 
 test("Sensitivity status and exact body-free assessment are reachable through the CLI", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-cli-sensitivity-"));
@@ -99,7 +99,7 @@ test("Sensitivity status and exact body-free assessment are reachable through th
         reviewability: "safe_resubmission_or_readable_source_required"
       }
     });
-}, 15_000);
+});
 
 test("mutation previews do not create Review Inbox or backup files", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-cli-preview-"));
@@ -120,7 +120,7 @@ test("mutation previews do not create Review Inbox or backup files", async () =>
     code: "ENOENT"
   });
   await expect(access(backupPath)).rejects.toMatchObject({ code: "ENOENT" });
-}, 15_000);
+});
 
 test("Shadow status is reachable through the public CLI", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-cli-shadow-status-"));
@@ -155,7 +155,7 @@ test("Shadow status is reachable through the public CLI", async () => {
     ok: true,
     command: "shadow.report"
   });
-}, 15_000);
+});
 
 test("a reviewed source-first verification run is recorded through the public CLI", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-cli-shadow-verification-"));
@@ -221,7 +221,7 @@ test("a reviewed source-first verification run is recorded through the public CL
     command: "shadow.verification",
     result: { runId, counts: { missed_durable: 1 }, recall: 0 }
   });
-}, 15_000);
+});
 
 test("quality pipeline preview and status are reachable through the public CLI", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-cli-quality-status-"));
@@ -243,7 +243,7 @@ test("quality pipeline preview and status are reachable through the public CLI",
     command: "quality.duplicate-status",
     result: { totalCount: 0, pendingCount: 0 }
   });
-}, 15_000);
+});
 
 test("quality retry previews and reopens only repairable terminal work in a new epoch", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-cli-quality-retry-"));
@@ -350,4 +350,4 @@ test("quality retry previews and reopens only repairable terminal work in a new 
       rejectedCount: 0
     }
   });
-}, 15_000);
+});

@@ -803,7 +803,7 @@ test("a token-saturated SessionStart snapshot stops optional scanning before the
   } finally {
     await server.close();
   }
-}, 15_000);
+});
 
 test("the foreground server never returns a different Project's memory", async () => {
   const roots = await fixture();

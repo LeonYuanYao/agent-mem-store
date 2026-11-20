@@ -96,7 +96,7 @@ test("files a CLAUDE.md imports with @ count as guidance the agent already has",
   await writeFile(join(host, "rules", "extra.md"), "- Host imported quuxrule.\n");
   expect((await new EvidenceReader({ ...map, hostSkillRoots: [join(host, "CLAUDE.md")] }).grep("quuxrule", { autoload: true })).join("\n"))
     .toContain("rules/extra.md:1");
-}, 30_000);
+});
 
 test("the repository map reads every repository at its baseline, never the checkout", async () => {
   const { clone } = await fixture();
@@ -131,7 +131,7 @@ test("the repository map reads every repository at its baseline, never the check
   const branch = await reader.branchGrep("keepState", new Date().toISOString());
   expect(branch.join("\n")).toContain("engine@branch:feature/keep-state");
   expect(branch.join("\n")).toContain("NOT-in-baseline");
-}, 30_000);
+});
 
 test("source ranks order implementation, tests, docs and examples", async () => {
   const { clone } = await fixture();
@@ -143,7 +143,7 @@ test("source ranks order implementation, tests, docs and examples", async () => 
   expect(sourceRank(engine, "src/__tests__/preview.test.ts")).toBe("R2-tests");
   expect(sourceRank(engine, "docs/guide.md")).toBe("R2-project-docs-or-skill");
   expect(sourceRank(engine, "examples/demo.json")).toBe("R4-example");
-}, 30_000);
+});
 
 test("the branch a Session ran on is recovered from the reflog", async () => {
   const { clone } = await fixture();
@@ -162,4 +162,4 @@ test("the branch a Session ran on is recovered from the reflog", async () => {
   const branches = await sessionSourceBranches({ map, clone, startedAt: during });
   expect(branches).toContainEqual({ repo: "engine", branch: "feature/unmerged", mergedIntoBaseline: false });
   expect(branches).toContainEqual({ repo: ".", branch: "main", mergedIntoBaseline: true });
-}, 30_000);
+});

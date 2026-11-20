@@ -55,7 +55,7 @@ test.skipIf(nativeExecutable === undefined)("native snooze callback reaches the 
   inspected.close();
   expect(JSON.parse(await readFile(join(runtime, "state", "notifier-last-action.json"), "utf8")))
     .toMatchObject({ state: "completed", action: "snooze" });
-}, 20_000);
+});
 
 test.skipIf(nativeExecutable === undefined)("native callback rejects unknown actions and non-Obsidian links without dispatching", async () => {
   if (nativeExecutable === undefined) throw new Error("Native executable required.");

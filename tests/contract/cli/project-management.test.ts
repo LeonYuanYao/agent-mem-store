@@ -52,4 +52,4 @@ test("project link and recoverable unlink share strict preview and marker semant
   expect((await readdir(projectRoot)).some((name) =>
     name.startsWith(".memstore-project.disabled.")
   )).toBe(true);
-}, 15_000);
+});

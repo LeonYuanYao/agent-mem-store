@@ -62,7 +62,7 @@ test("remember assert preserves Human authority, exact content, scope, and start
     command: "status",
     result: { mode: "read_only_inspection", luna: { state: "healthy" } }
   });
-}, 15_000);
+});
 
 test("remember assert of the same text returns the existing Memory instead of a duplicate", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-explicit-assert-repeat-"));
@@ -97,4 +97,4 @@ test("remember assert of the same text returns the existing Memory instead of a 
   expect(differentStartup.result.memoryId).not.toBe(first.result.memoryId);
   // Agents read stdout and stderr together; the node:sqlite warning broke their JSON parse.
   expect(first.stderr).not.toContain("ExperimentalWarning");
-}, 30_000);
+});

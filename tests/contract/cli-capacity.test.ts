@@ -98,7 +98,7 @@ test("capacity rebalance preview is dry and apply creates only reversible exclus
   } finally {
     database.close();
   }
-}, 15_000);
+});
 
 test("corpus CLI requires the reviewed digest before archiving and reports its disabled default", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-cli-corpus-"));
@@ -134,4 +134,4 @@ test("corpus CLI requires the reviewed digest before archiving and reports its d
   expect(JSON.parse((await invoke("apply", "--file", previewFile, "--apply", "--gate", decoded.result.digest)).stdout))
     .toMatchObject({ ok: true, command: "capacity.corpus.apply", result: { completed: true, skippedMemoryIds: [] } });
   expect(JSON.parse((await invoke("status")).stdout)).toMatchObject({ ok: true, result: { mode: "off", activeAgentCount: 1 } });
-}, 20_000);
+});
