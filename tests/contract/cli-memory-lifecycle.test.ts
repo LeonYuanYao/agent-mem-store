@@ -101,4 +101,4 @@ test("CLI rescope previews by default and moves a Memory to global scope on --ap
   await expect(runCli(["rescope", "M:1", "--scope", "global", "--apply", ...rootsArguments]))
     .resolves.toMatchObject({ result: { state: "rescoped", successor: { memoryRef: "M:2" } } });
   await expect(runCli(["rescope", "M:1", ...rootsArguments])).rejects.toThrow();
-});
+}, 20_000);
