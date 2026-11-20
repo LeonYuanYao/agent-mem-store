@@ -572,7 +572,9 @@ async function stepRun(
             `INSERT INTO dream_candidates(candidate_id, run_id, session_id, chunk_index, statement, claim_type, scope,
                explicit_user, quote_found, check_hints_json, source_paths_json, user_words_json, detail, source_event_ids_json)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).run(`msdc_${randomUUID()}`, run.runId, sessionId, index, candidate.statement, candidate.claim_type, candidate.scope,
+          ).run(`msdc_${randomUUID()}`, run.runId, sessionId, index, candidate.statement, candidate.claim_type,
+            // A requested run's scope is the user's choice (ADR-0006), whatever the extractor guessed.
+            run.request?.scope ?? candidate.scope,
             explicit ? 1 : 0, quote.length > 0 && source.includes(quote) ? 1 : 0, json(candidate.check_hints), json(paths),
             explicit ? json(user.words) : null, candidate.detail.trim() === "" ? null : candidate.detail.trim().slice(0, detailCharacters),
             sourceEvents.length === 0 ? null : json(sourceEvents));
@@ -620,7 +622,7 @@ async function stepRun(
           `INSERT INTO dream_items(item_id, run_id, statement, claim_type, scope, member_ids_json, session_ids_json,
              explicit_user, first_seen_at, check_hints_json, source_paths_json, detail)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(`msdi_${randomUUID()}`, run.runId, statement, claimType, scope, json(members.map((member) => String(member.candidate_id))),
+        ).run(`msdi_${randomUUID()}`, run.runId, statement, claimType, run.request?.scope ?? scope, json(members.map((member) => String(member.candidate_id))),
           json(sessions), members.some((member) => member.explicit_user === 1) ? 1 : 0,
           members.map((member) => String(member.first_event_at)).sort()[0] ?? now,
           json([...new Set([...hints, ...members.flatMap((member) => parseJson<string[]>(member.check_hints_json, []))])].slice(0, 10)),
@@ -791,7 +793,7 @@ async function stepRun(
         const verdict = parseJson<Verdict | undefined>(item.verdict_json, undefined);
         const defense = parseJson<{ final_verdict?: string; branch?: string } | undefined>(item.defense_json, undefined);
         let finalVerdict = defense?.final_verdict ?? verdict?.verdict ?? "inconclusive";
-        const scope = verdict?.scope ?? (item.scope === "global" ? "global" : "project");
+        const scope = run.request?.scope ?? verdict?.scope ?? (item.scope === "global" ? "global" : "project");
         let documentedAt = verdict?.documented_at ?? "";
         if (documentedAt !== "") {
           guidance ??= await guidanceContext(reader, map?.hostSkillRoots ??

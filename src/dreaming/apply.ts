@@ -102,13 +102,13 @@ export function categoryFor(claimType: string): MemoryCategory {
 }
 
 /**
- * Global Memory needs global intent (ADR-0006): the user's own lasting rule, or a
- * `remember extract --scope global` request, is written globally. Other global
- * items stay with the Project they came from.
+ * Global Memory needs global intent (ADR-0006): a `remember extract` request decides the scope
+ * of everything it keeps; otherwise the user's own lasting rule is written globally, and other
+ * global items stay with the Project they came from.
  */
 export function memoryScopeFor(item: ApplyItem): CanonicalMemory["scope"] {
-  const intended = item.requestedScope === "global" ||
-    (item.scope === "global" && item.explicitUser && item.verdict.user_support === "user_stated_rule");
+  const intended = item.requestedScope !== undefined ? item.requestedScope === "global"
+    : item.scope === "global" && item.explicitUser && item.verdict.user_support === "user_stated_rule";
   return intended ? { kind: "global" } : { kind: "project", projectId: item.projectId };
 }
 

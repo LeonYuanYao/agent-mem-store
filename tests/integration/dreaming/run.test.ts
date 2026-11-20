@@ -624,12 +624,13 @@ test("remember extract hands its selection to dreaming, which verifies and write
       expect(request.requested).toBe(true);
       const statement = request.chunk.includes("### T01 FILE") ? "奥德赛的商港先补食物再补木料。" : "奥德赛的归航资源奖励只在归航成功时发放。";
       return Promise.resolve({ usage: { tokens: 1, seconds: 1 }, candidates: [{ statement,
-        claim_type: "external_system", scope: "project", explicit_user: false, turn_refs: ["T01"], quote: "", check_hints: [], detail: "" }] });
+        // The extractor's own scope guess yields to the request's.
+        claim_type: "external_system", scope: "global", explicit_user: false, turn_refs: ["T01"], quote: "", check_hints: [], detail: "" }] });
     },
     merge: () => Promise.reject(new Error("unexpected merge")),
     // The verifier calls the file's rule one-off; the user asked to keep it, so it is written anyway (ADR-0182).
     verify: (request) => Promise.resolve({ usage: { tokens: 1, seconds: 1 }, results: request.claims.map((claim): Verdict => ({
-      id: claim.id, claim_type: "external_system", durability: claim.text.includes("商港") ? "episodic" : "long_term", scope: "project", subsystem: "Odyssey", verdict: "not_repo_verifiable",
+      id: claim.id, claim_type: "external_system", durability: claim.text.includes("商港") ? "episodic" : "long_term", scope: "global", subsystem: "Odyssey", verdict: "not_repo_verifiable",
       branch: "", evidence: [], reason: "external game rule", refined_statement: "", documented_at: "", user_support: "not_applicable",
       detail_check: "none" })) }),
     defend: () => Promise.reject(new Error("unexpected defend")),
@@ -652,8 +653,9 @@ test("remember extract hands its selection to dreaming, which verifies and write
   expect(chunks[0]).toContain("这局奥德赛归航后才拿到资源奖励");
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
-    expect(database.prepare("SELECT tier, tier_reason, apply_state FROM dream_items").get())
-      .toMatchObject({ tier: "inject", tier_reason: "user_requested", apply_state: "written" });
+    expect(database.prepare("SELECT tier, tier_reason, apply_state, scope FROM dream_items").get())
+      .toMatchObject({ tier: "inject", tier_reason: "user_requested", apply_state: "written", scope: "project" });
+    expect(database.prepare("SELECT DISTINCT scope FROM dream_candidates").all()).toEqual([{ scope: "project" }]);
     expect(database.prepare("SELECT authority, scope_kind FROM memory_catalog").all()).toEqual([{ authority: "agent_derived", scope_kind: "project" }]);
     // No Luna operation is queued while dreaming is enabled.
     expect(database.prepare("SELECT COUNT(*) AS n FROM luna_operations").get()).toMatchObject({ n: 0 });

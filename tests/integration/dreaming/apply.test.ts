@@ -293,6 +293,24 @@ test("detail goes into the body, survives a revision without detail, and is drop
   expect((await read(revised?.memoryId))?.body).toBe(`${merged}\n\n${detail}`);
 });
 
+test("a remember extract request decides the scope of what it writes, even the user's own global rule", async () => {
+  const { runtimeRoot, vaultRoot, projectId } = await fixture();
+  const runId = "msdream_0000000a-0000-4000-8000-00000000000a";
+  await addRun(runtimeRoot, projectId, runId, "2026-10-16T19:00:00.000Z", [
+    { id: "msdi_requested_rule", text: texts.userRule, scope: "global", claimType: "preference", explicit: true, userSupport: "user_stated_rule" }
+  ]);
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare("UPDATE dream_runs SET request_json = ? WHERE run_id = ?").run(JSON.stringify({ eventIds: [], selector: "current-turn", scope: "project", apply: true }), runId);
+  } finally {
+    database.close();
+  }
+  const [outcome] = (await applyCompletedRuns({ runtimeRoot, vaultRoot, now: "2026-10-17T00:00:00.000Z", model: fakeModel([]), timeZone: "Asia/Shanghai",
+    preview: false, runId })).outcomes;
+  expect(outcome?.state).toBe("written");
+  expect((await catalog(runtimeRoot))[String(outcome?.memoryId)]).toBe("agent_derived/project/active");
+});
+
 test("knowledge a user-wide instruction file already states is not written", async () => {
   const { runtimeRoot, vaultRoot, projectId } = await fixture();
   const instructions = join(vaultRoot, "..", "CLAUDE.md");
