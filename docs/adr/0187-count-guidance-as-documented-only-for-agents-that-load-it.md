@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Count guidance as documented only for the agents that load it
