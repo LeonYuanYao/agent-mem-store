@@ -257,7 +257,7 @@ sessions 是这条知识出现在几个会话里；出现在多个会话里说�
 const verifyPrompt = (tool: string, repoMap: string, claims: string): string => `你是记忆验证器。逐条核实下面的记忆说法。证据只能来自 msverify（只读，基于各仓库的基准 commit，与本地分支和未提交改动无关）：
   ${tool} map
   ${tool} grep [-i] [--repo R] [--path GLOB] PATTERN     PATTERN 为扩展正则（可用 a|b）；每个命中会标注 [来源等级 文件最后修改日期]
-  ${tool} grep --autoload [-i] PATTERN                     只搜 agent 已经会读到的说明：任意层级的 AGENTS.md、CLAUDE.md、.ai/bootstrap.md、.ai/context.md，仓库内 skills 目录，以及本机 skill 和用户的全局说明文件
+  ${tool} grep --autoload [-i] PATTERN                     只搜 agent 已经会读到的说明：任意层级的 AGENTS.md、CLAUDE.md（含它用 @ 引用的文件）、.ai/bootstrap.md、.ai/context.md，仓库内 skills 目录，以及本机 skill 和用户的全局说明文件
   ${tool} show PATH [--from N --to M]                      读文件（路径相对项目根），表头给出来源等级和最后修改日期
   ${tool} ls PATH
   ${tool} log-s [--repo R] TEXT                            查所有本地分支上引入/删除该文本的提交

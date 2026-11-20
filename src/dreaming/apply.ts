@@ -7,6 +7,7 @@ import type { MemoryCategory } from "../memories/categories.js";
 import { dreamingPolicyVersion } from "../memories/origins.js";
 import { assessExactCompact } from "../memories/representations.js";
 import { readCanonicalMemory, SecretContentError, writeCanonicalMemory, type CanonicalMemory } from "../vault/index.js";
+import { hostImports } from "./imports.js";
 import type { DreamModel, ModelUsage, Reconciliation, Verdict } from "./model.js";
 
 /**
@@ -59,10 +60,10 @@ interface ActiveMemory {
   readonly source?: string;
 }
 
-/** Passages of user-wide instruction files: paragraphs, with each list item on its own. */
+/** Passages of user-wide instruction files and the files they import: paragraphs, with each list item on its own. */
 async function instructionPassages(files: readonly string[]): Promise<ActiveMemory[]> {
   const passages: ActiveMemory[] = [];
-  for (const file of files) {
+  for (const file of [...files, ...await hostImports(files)]) {
     const text = await readFile(file, "utf8").catch(() => "");
     for (const block of text.split(/\n\s*\n/u)) {
       const lines = block.split("\n").map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#"));

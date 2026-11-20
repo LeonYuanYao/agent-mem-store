@@ -7,6 +7,7 @@ import { z } from "zod";
 import { MemStoreCommandError } from "../contracts/envelope.js";
 import { openRuntimeDatabaseReadOnly } from "../runtime/database.js";
 import { readCanonicalMemory } from "../vault/index.js";
+import { hostImports } from "./imports.js";
 import type { DreamModel, InstructionJudgment, ModelUsage } from "./model.js";
 
 /**
@@ -117,10 +118,13 @@ export async function refreshInstructionSuggestions(request: {
   const state = await readInstructionSuggestions(request.runtimeRoot);
   const judge = request.model.judgeInstructions?.bind(request.model);
   if (request.files.length === 0 || judge === undefined) return { state, outcome: "no_files" };
-  const files = await Promise.all(request.files.map(async (path, index) => ({
-    id: `F${String(index + 1)}`, path,
-    text: (await readFile(expandHome(path), "utf8").catch(() => "")).slice(0, fileCharacters)
-  })));
+  // A file's text includes what it imports with `@path`, which its agent loads with it (ADR-0185).
+  const files = await Promise.all(request.files.map(async (path, index) => {
+    const imported = await hostImports([expandHome(path)]);
+    const parts = [await readFile(expandHome(path), "utf8").catch(() => ""),
+      ...await Promise.all(imported.map(async (file) => `\n\n（以下内容由 @ 引用加载：${file}）\n${await readFile(file, "utf8").catch(() => "")}`))];
+    return { id: `F${String(index + 1)}`, path, text: parts.join("").slice(0, fileCharacters) };
+  }));
   const rules = (await globalRules(request.runtimeRoot, request.vaultRoot)).filter((rule) => state.dismissed[rule.memoryId] === undefined);
   const inputKey = sha256(JSON.stringify([
     rules.map((rule) => `${rule.memoryId}:${rule.revisionId}`),

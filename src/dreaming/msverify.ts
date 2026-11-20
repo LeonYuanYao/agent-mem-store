@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 import { git } from "./git.js";
+import { hostImports, repositoryImports } from "./imports.js";
 import { ownerUnmergedBranches, routePath, type RepoEntry, type RepoMap } from "./repo-map.js";
 
 /**
@@ -15,7 +16,8 @@ import { ownerUnmergedBranches, routePath, type RepoEntry, type RepoMap } from "
 export const outputLineCap = 120;
 /**
  * Guidance an agent already receives: instruction files at any depth (nested ones
- * load when work moves into that directory) and skills kept in the repository.
+ * load when work moves into that directory) and skills kept in the repository, plus
+ * the files a CLAUDE.md imports with `@path` (ADR-0185).
  */
 export const autoloadPathspecs = [
   ":(glob)**/AGENTS.md", ":(glob)**/CLAUDE.md", ":(glob)**/.ai/bootstrap.md", ":(glob)**/.ai/context.md", ":(glob)**/skills/**/*.md"
@@ -36,6 +38,7 @@ export class EvidenceReader {
   readonly #map: RepoMap;
   readonly #dates = new Map<string, string>();
   #hostSkills: Promise<{ readonly path: string; readonly lines: readonly string[] }[]> | undefined;
+  readonly #imports = new Map<string, Promise<string[]>>();
 
   public constructor(map: RepoMap) {
     this.#map = map;
@@ -69,7 +72,7 @@ export class EvidenceReader {
       if (repo.sha === null || (options.repo !== undefined && repo.path !== options.repo)) continue;
       if (options.autoload === true && repo.kind === "submodule") continue;
       const args = ["grep", "-n", "-I", "--full-name", "-E", ...(options.ignoreCase === true ? ["-i"] : []), "-e", pattern, repo.sha];
-      if (options.autoload === true) args.push("--", ...autoloadPathspecs);
+      if (options.autoload === true) args.push("--", ...autoloadPathspecs, ...(await this.#repositoryImports(repo)).map((path) => `:(literal)${path}`));
       else if (options.path !== undefined) args.push("--", options.path);
       const result = await git(repo.directory, args);
       if (result.code !== 0 && result.code !== 1) {
@@ -87,6 +90,17 @@ export class EvidenceReader {
     return lines.length > 0 ? lines : ["no matches in any repository baseline"];
   }
 
+  /** Files the repository's CLAUDE.md files import, found once per reader. */
+  #repositoryImports(repo: RepoEntry): Promise<string[]> {
+    const key = `${repo.directory}\0${repo.sha ?? ""}`;
+    let found = this.#imports.get(key);
+    if (found === undefined) {
+      found = repo.sha === null ? Promise.resolve([]) : repositoryImports(repo.directory, repo.sha);
+      this.#imports.set(key, found);
+    }
+    return found;
+  }
+
   /** Host skill files are read once per reader; verification greps them many times. */
   #hostSkillFiles(): Promise<{ readonly path: string; readonly lines: readonly string[] }[]> {
     this.#hostSkills ??= (async () => {
@@ -101,13 +115,17 @@ export class EvidenceReader {
           else if (entry.name.endsWith(".md")) files.push({ path, lines: (await readFile(path, "utf8").catch(() => "")).split("\n") });
         }
       };
+      const instructionFiles: string[] = [];
       for (const root of this.#map.hostSkillRoots) {
         // A root may also be a single instruction file.
         if (root.endsWith(".md") && (await stat(root).catch(() => undefined))?.isFile() === true) {
-          files.push({ path: root, lines: (await readFile(root, "utf8").catch(() => "")).split("\n") });
+          instructionFiles.push(root);
         } else {
           await visit(root, 0);
         }
+      }
+      for (const path of [...instructionFiles, ...await hostImports(instructionFiles)]) {
+        if (!files.some((file) => file.path === path)) files.push({ path, lines: (await readFile(path, "utf8").catch(() => "")).split("\n") });
       }
       return files;
     })();

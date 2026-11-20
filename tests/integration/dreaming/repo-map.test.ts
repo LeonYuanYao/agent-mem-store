@@ -65,6 +65,39 @@ async function fixture() {
   return { root, clone };
 }
 
+test("files a CLAUDE.md imports with @ count as guidance the agent already has", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-imports-"));
+  directories.push(root);
+  const origin = await clonedRepository(root, "workspace", {
+    "CLAUDE.md": "@AGENT.md\n",
+    "AGENT.md": "Temporary files go under tmp/ (zorkrule).\nMemStore work starts from @docs/handoff.md.\n",
+    "docs/handoff.md": "Read the handoff first (frobrule).\n",
+    "docs/other.md": "Not imported (frobrule too).\n",
+    "sub/CLAUDE.md": "Quoted `@ignored.md` is not an import. See @../shared.md, please.\n",
+    "shared.md": "Shared xyzzyrule.\n",
+    "ignored.md": "plughrule\n"
+  });
+  const clone = join(root, "clone");
+  run(root, "clone", "-q", origin, clone);
+  const map = await buildRepoMap([clone], new Date().toISOString(), []);
+  const reader = new EvidenceReader(map);
+  expect((await reader.grep("zorkrule", { autoload: true })).join("\n")).toContain("AGENT.md:1");
+  // Imports are followed transitively, relative to the importing file.
+  const nested = (await reader.grep("frobrule", { autoload: true })).join("\n");
+  expect(nested).toContain("docs/handoff.md:1");
+  expect(nested).not.toContain("docs/other.md");
+  expect((await reader.grep("xyzzyrule", { autoload: true })).join("\n")).toContain("shared.md:1");
+  expect((await reader.grep("plughrule", { autoload: true })).join("\n")).toBe("no matches in any repository baseline");
+
+  // A user-wide CLAUDE.md's imports are searched with it, and apply compares with them too.
+  const host = join(root, "host");
+  await mkdir(join(host, "rules"), { recursive: true });
+  await writeFile(join(host, "CLAUDE.md"), "# Rules\n\n@rules/extra.md\n");
+  await writeFile(join(host, "rules", "extra.md"), "- Host imported quuxrule.\n");
+  expect((await new EvidenceReader({ ...map, hostSkillRoots: [join(host, "CLAUDE.md")] }).grep("quuxrule", { autoload: true })).join("\n"))
+    .toContain("rules/extra.md:1");
+});
+
 test("the repository map reads every repository at its baseline, never the checkout", async () => {
   const { clone } = await fixture();
   // Uncommitted and branch-only edits must not change baseline evidence.
