@@ -12,6 +12,7 @@ import { openRuntimeDatabase } from "../runtime/database.js";
 import { cloneOf, sessionSourceBranches, type SourceBranch } from "./branches.js";
 import { resolveSkipRoots, skippedRoots, type DreamingConfiguration } from "./config.js";
 import { DreamModelError, transientModelErrors, type Appraisal, type DreamModel, type Verdict } from "./model.js";
+import { activeAgents, documentedFor, guidanceContext } from "./coverage.js";
 import { EvidenceReader } from "./msverify.js";
 import { presearch, renderPresearch } from "./presearch.js";
 import { buildRepoMap, repoMapSchema, temporaryRootPattern, type RepoMap } from "./repo-map.js";
@@ -774,6 +775,10 @@ async function stepRun(
       const catchAllProject = roots.length > 0 && roots.every((root) => isCatchAllRoot(root, homedir()));
       const items = database.prepare("SELECT * FROM dream_items WHERE run_id = ?").all(run.runId);
       const counts: Record<string, number> = {};
+      // Documented guidance counts only when every agent working in the Project loads it (ADR-0187).
+      const agents = activeAgents(database, run.projectId, now);
+      const reader = map === undefined ? undefined : new EvidenceReader(map);
+      let guidance: Awaited<ReturnType<typeof guidanceContext>> | undefined;
       for (const item of items) {
         const appraisal = parseJson<Appraisal | undefined>(item.appraisal_json, undefined);
         if (appraisal !== undefined && !appraisal.value.startsWith("keep")) {
@@ -785,8 +790,23 @@ async function stepRun(
         }
         const verdict = parseJson<Verdict | undefined>(item.verdict_json, undefined);
         const defense = parseJson<{ final_verdict?: string; branch?: string } | undefined>(item.defense_json, undefined);
-        const finalVerdict = defense?.final_verdict ?? verdict?.verdict ?? "inconclusive";
+        let finalVerdict = defense?.final_verdict ?? verdict?.verdict ?? "inconclusive";
         const scope = verdict?.scope ?? (item.scope === "global" ? "global" : "project");
+        let documentedAt = verdict?.documented_at ?? "";
+        if (documentedAt !== "") {
+          guidance ??= await guidanceContext(reader, map?.hostSkillRoots ??
+            [...configuration.host_skill_roots, ...configuration.host_instruction_files].map(expandHome));
+          const covered = await documentedFor(documentedAt, reader, guidance);
+          const missing = agents.filter((agent) => !covered.includes(agent));
+          if (missing.length > 0) {
+            // The guidance states it, so it holds; the agents without that guidance still need it.
+            documentedAt = "";
+            if (finalVerdict === "documented") finalVerdict = "confirmed";
+            counts.documented_for_some_agents = (counts.documented_for_some_agents ?? 0) + 1;
+          }
+          database.prepare("UPDATE dream_items SET verdict_json = json_set(verdict_json, '$.documented_missing', json(?)) WHERE item_id = ?")
+            .run(JSON.stringify(missing), String(item.item_id));
+        }
         const { tier, reason } = tierOf({
           scope,
           catchAllProject,
@@ -800,7 +820,7 @@ async function stepRun(
           branch: defense?.branch || verdict?.branch || "",
           explicitUser: item.explicit_user === 1,
           ...(verdict?.user_support === undefined ? {} : { userSupport: verdict.user_support }),
-          ...(verdict?.documented_at === undefined ? {} : { documentedAt: verdict.documented_at }),
+          documentedAt,
           sessionCount: parseJson<string[]>(item.session_ids_json, []).length,
           sourceBranches: parseJson<SourceBranch[]>(item.source_branches_json, []),
           relevantRepos: relevantRepositories({

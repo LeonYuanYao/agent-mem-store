@@ -26,11 +26,12 @@ function git(cwd: string, ...args: string[]): void {
     GIT_COMMITTER_NAME: "Owner", GIT_COMMITTER_EMAIL: "owner@example.com" } });
 }
 
-async function workspace(root: string): Promise<string> {
+async function workspace(root: string, files: Record<string, string> = {}): Promise<string> {
   const seed = join(root, "seed");
   await mkdir(join(seed, "src"), { recursive: true });
   git(seed, "init", "-q", "-b", "main");
   await writeFile(join(seed, "src", "preview.ts"), "export function setVideo() { reloadEffect(); }\n");
+  for (const [path, content] of Object.entries(files)) await writeFile(join(seed, path), content);
   git(seed, "add", "-A");
   git(seed, "commit", "-q", "-m", "baseline");
   git(root, "clone", "-q", "--bare", seed, join(root, "origin.git"));
@@ -378,6 +379,66 @@ test("in apply mode a nightly run writes its inject tier as dreaming Memory befo
   const report = await readFile(join(vaultRoot, "_MemStore", "Dreams", reports[0] ?? ""), "utf8");
   expect(report).toContain("## 写入正式记忆 · 2");
   expect(report).toMatch(/### 新建 · 2[\s\S]*→ M:\d+/u);
+});
+
+test("guidance only one agent loads does not make a claim documented for the other agent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "memstore-dream-agents-"));
+  directories.push(root);
+  const runtimeRoot = join(root, "runtime");
+  const vaultRoot = join(root, "vault");
+  await mkdir(vaultRoot, { recursive: true });
+  // Claude Code loads CLAUDE.md, Codex loads AGENTS.md; only the MR rule is in both.
+  const clone = await workspace(root, {
+    "CLAUDE.md": "- TTEH 的 setVideo 在预览中会重新加载特效。\n- 提 MR 一律用 Bits，不用别的平台。\n",
+    "AGENTS.md": "# Rules\n\n- 提 MR 一律用 Bits，不用别的平台。\n"
+  });
+  const project = await resolveProject({ sessionId: "agents-session", path: clone, runtimeRoot });
+  if (project.status !== "resolved") throw new Error("Project did not resolve.");
+  const events = [
+    { eventKind: "UserPromptSubmit", turnId: "t1", payload: { prompt: "以后提 MR 都用 Bits。看看 setVideo 做了什么" } },
+    { eventKind: "PostToolUse", turnId: "t1", payload: { toolName: "Bash", cwd: clone, input: { command: "cat src/preview.ts" },
+      response: "export function setVideo() { reloadEffect(); }" } },
+    { eventKind: "Stop", turnId: "t1", payload: { assistantMessage: "setVideo 会重新加载特效。" } },
+    { eventKind: "SessionEnd", payload: { reason: "other" } }
+  ] as const;
+  for (const [index, event] of events.entries()) {
+    await captureEvent({ runtimeRoot, event: {
+      schemaVersion: 1, eventId: `msevent_agents_${String(index)}`, deduplicationKey: `agents:${String(index)}`, agent: "codex",
+      eventKind: event.eventKind, occurredAt: new Date().toISOString(), projectId: project.projectId, sessionId: "agents-session",
+      ...("turnId" in event ? { turnId: event.turnId } : {}), payload: event.payload
+    } });
+  }
+  const now = new Date(Date.now() + 60_000).toISOString();
+  await handOffCaptureToDreaming({ runtimeRoot, now, minimumAgeMilliseconds: 0 });
+  const base = fakeModel([]);
+  const model: DreamModel = { ...base, verify: async (request) => {
+    const { results, usage } = await base.verify(request);
+    return { usage, results: results.map((verdict) => {
+      const claim = request.claims.find((candidate) => candidate.id === verdict.id);
+      return claim?.text.startsWith(statements.code) === true ? { ...verdict, documented_at: "CLAUDE.md:1" }
+        : claim?.text.startsWith(statements.preference) === true ? { ...verdict, documented_at: "AGENTS.md:3" } : verdict;
+    }) };
+  } };
+  // Too few Sessions to tell which agents work here, so both count.
+  await startDreamRun({ runtimeRoot, projectId: project.projectId, now });
+  for (let step = 0; step < 50; step += 1) {
+    const result = await runNextDreamStep({ runtimeRoot, vaultRoot, now, model, allowTemporaryRoots: true,
+      configuration: dreamingConfigurationSchema.parse({ enabled: true, verify_batch_size: 8 }) });
+    if (result.state === "idle") break;
+  }
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    const rows = Object.fromEntries(database.prepare("SELECT statement, tier, tier_reason, json_extract(verdict_json, '$.documented_missing') AS missing FROM dream_items")
+      .all().map((row) => [String(row.statement), `${String(row.tier)}:${String(row.tier_reason)}:${String(row.missing)}`]));
+    // Codex does not load CLAUDE.md, so the claim stays; the MR rule is in both files and is dropped.
+    expect(rows[statements.code]).toBe('inject:confirmed:["codex"]');
+    expect(rows[statements.preference]).toBe("drop:already_in_autoloaded_docs:[]");
+  } finally {
+    database.close();
+  }
+  const reports = (await readdir(join(vaultRoot, "_MemStore", "Dreams"))).filter((name) => name !== "总览.md");
+  const report = await readFile(join(vaultRoot, "_MemStore", "Dreams", reports[0] ?? ""), "utf8");
+  expect(report).toContain("已写在：CLAUDE.md:1，但 Codex 不加载它，照常处理");
 });
 
 test("a Session belongs to the Project it started in, and later activity is read once more as a new segment", async () => {

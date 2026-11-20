@@ -90,6 +90,18 @@ export class EvidenceReader {
     return lines.length > 0 ? lines : ["no matches in any repository baseline"];
   }
 
+  /** Files CLAUDE.md files import, in repositories and on the host, named the way grep names them (ADR-0187). */
+  public async claudeImports(): Promise<Set<string>> {
+    const paths = new Set<string>();
+    for (const repo of this.#map.repos) {
+      if (repo.sha === null || repo.kind === "submodule") continue;
+      for (const path of await this.#repositoryImports(repo)) paths.add(repo.path === "." ? path : `${repo.path}/${path}`);
+    }
+    const instructionFiles = this.#map.hostSkillRoots.filter((root) => root.endsWith(".md"));
+    for (const path of await hostImports(instructionFiles)) paths.add(path.replace(homedir(), "~"));
+    return paths;
+  }
+
   /** Files the repository's CLAUDE.md files import, found once per reader. */
   #repositoryImports(repo: RepoEntry): Promise<string[]> {
     const key = `${repo.directory}\0${repo.sha ?? ""}`;

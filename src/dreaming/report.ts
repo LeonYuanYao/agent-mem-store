@@ -44,6 +44,8 @@ const reasonLabels: Record<string, string> = {
   low_value_one_off: "一次性信息"
 };
 
+const agentNames: Record<string, string> = { claude: "Claude Code", codex: "Codex" };
+
 const userSupportLabels: Record<string, string> = {
   user_stated_rule: "用户本人表达",
   user_task_instruction: "用户对当次任务的要求",
@@ -214,7 +216,7 @@ export async function writeDreamReport(request: {
     lines.push(`## ${tierTitles[tier] ?? tier} · ${String(group.length)}`, "");
     for (const item of group) {
       const verdict = parse<{ verdict?: string; evidence?: string[]; reason?: string; user_support?: string; documented_at?: string;
-        withdrawn_refinement?: string }>(item.verdict_json, {});
+        withdrawn_refinement?: string; documented_missing?: string[] }>(item.verdict_json, {});
       const defense = parse<{ decision?: string; final_verdict?: string; reason?: string } | undefined>(item.defense_json, undefined);
       const sessions = parse<string[]>(item.session_ids_json, []).length;
       // The refined statement is what dreaming would keep; the original is shown for review.
@@ -232,7 +234,12 @@ export async function writeDreamReport(request: {
       const defended = defense === undefined ? "" : ` → defense ${defense.decision ?? "-"}: ${defense.final_verdict ?? "-"}`;
       lines.push(`  - ${reasonLabel(tier, String(item.tier_reason))} · verdict: ${verdict.verdict ?? "-"}${defended}` +
         ` · scope: ${String(item.scope)} · sessions: ${String(sessions)}` + userSupportNote);
-      if ((verdict.documented_at ?? "") !== "") lines.push(`  - 已写在：${escapeLine(verdict.documented_at ?? "")}`);
+      if ((verdict.documented_at ?? "") !== "") {
+        // Guidance only some agents load does not count as documented for the others (ADR-0187).
+        const missing = (verdict.documented_missing ?? []).map((agent) => agentNames[agent] ?? agent);
+        lines.push(missing.length === 0 ? `  - 已写在：${escapeLine(verdict.documented_at ?? "")}`
+          : `  - 已写在：${escapeLine(verdict.documented_at ?? "")}，但 ${missing.join("、")} 不加载它，照常处理`);
+      }
       for (const evidence of (verdict.evidence ?? []).slice(0, 2)) lines.push(`  - 证据：${escapeLine(evidence).slice(0, 240)}`);
       if (tier === "review" || tier === "branch") lines.push(`  - 理由：${escapeLine(defense?.reason ?? verdict.reason ?? "").slice(0, 240)}`);
     }
