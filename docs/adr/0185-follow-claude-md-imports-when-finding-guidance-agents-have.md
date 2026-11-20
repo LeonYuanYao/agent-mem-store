@@ -27,6 +27,15 @@ Across the 14 repositories of the recent runs, two use imports: AgentScratchpad 
 tteh, whose Ask AI workspace templates import their `AGENTS.md` (already searched) and
 `EDIT_DSL_REFERENCE.md`. The user-wide files import nothing.
 
+Evaluation: the verifier was replayed on historical items with each run's kept repository map,
+pre-search recomputed by the code under test. Of five written AgentScratchpad Memories that
+looked like repeats of `AGENT.md`, three are (two state things `AGENT.md` does not). Over three
+replays each, the old code marked them documented 0 times of 9 and the new code 3 times of 9,
+once citing `AGENT.md:28` and twice the handoff document `AGENT.md` tells agents to read first.
+The search now finds `AGENT.md`; whether the verifier then calls a claim documented is its own
+judgment and stays uneven. None of 16 other written items of AgentScratchpad and tteh was marked
+documented.
+
 Known limit, unchanged by this decision: guidance counts as known whichever agent loads it. A
 rule only in `AGENT.md` (Claude Code) or only in a Codex skill is dropped though the other agent
 never sees it; AgentScratchpad's `AGENT.md` and `AGENTS.md` differ, and the MemStore handoff rule
