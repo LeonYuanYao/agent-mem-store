@@ -556,7 +556,7 @@ async function stepRun(
       try {
         const { candidates, usage } = await request.model.extract({
           projectLabel: roots.join(", ") || run.projectId, chunk: text, index, total: stream?.chunks.length ?? index,
-          ...(run.request === undefined ? {} : { requested: true }),
+          ...(run.request === undefined ? {} : { requested: true, requestedScope: run.request.scope }),
           ...(configuration.retired.length === 0 ? {} : { retired: configuration.retired.map((entry) => entry.note) })
         });
         const source = text.replace(/\s+/gu, "").toLowerCase();

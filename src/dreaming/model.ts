@@ -143,6 +143,8 @@ export interface DreamModel {
     readonly projectLabel: string; readonly chunk: string; readonly index: number; readonly total: number;
     /** The user asked to remember this material (`remember extract`). */
     readonly requested?: boolean;
+    /** The scope the user asked for; a global request is stated so it holds in every project (ADR-0184). */
+    readonly requestedScope?: "project" | "global";
     /** Notes on systems the user retired (ADR-0165). */
     readonly retired?: readonly string[];
   }):
@@ -187,6 +189,14 @@ export interface ReconcileItem {
 
 // A requested extraction keeps what the user chose to preserve; the nightly prompt stays conservative.
 const requestedPreface = `用户明确要求把下面这段内容存为长期记忆（memstore remember extract）。提炼其中所有长期有用的知识：身份与别名、文件和资源的位置、约定、规则和用户的决定，即使它们写成任务说明的样子也要保留；仍然不要提炼凭证、密钥、token 的具体值和只对这一次成立的状态。
+`;
+
+// The extractor names the project or tool a statement belongs to; for a global request that
+// turned a general rule into one about the current project or about Codex (ADR-0184).
+const requestedGlobalPreface = `用户要求按「全局」作用域保存（--scope global）：写入后它们会注入到所有项目、所有 agent 的会话里。所以：
+- 不要因为材料出自本项目，就在 statement 里加上本项目名或仓库名（例如「在 AgentScratchpad 中」「本仓库的」）；材料没有把规则、做法或坑限定给某个 agent 时，也不要把 Codex、Claude Code 写成主语或条件。
+- 材料给出的真实适用条件照常保留：只在某台机器、某个操作系统、某个工具或配置、某种运行环境下才成立的，写明这个条件（例如「在 Windows 上」「这台构建机」「某个 CLI 的 2.x 版本」「某个服务的生产环境」）。
+scope 一律填 global。
 `;
 
 const retiredLines = (retired: readonly string[] | undefined, instruction: string): string =>
@@ -497,8 +507,11 @@ export class CodexDreamModel implements DreamModel {
     }
   }
 
-  public async extract(request: { projectLabel: string; chunk: string; index: number; total: number; requested?: boolean; retired?: readonly string[] }) {
+  public async extract(request: {
+    projectLabel: string; chunk: string; index: number; total: number; requested?: boolean; requestedScope?: "project" | "global"; retired?: readonly string[];
+  }) {
     const { output, usage } = await this.#invoke((request.requested === true ? requestedPreface : "") +
+      (request.requested === true && request.requestedScope === "global" ? requestedGlobalPreface : "") +
       extractPrompt(request.projectLabel, request.index, request.total, request.retired) + request.chunk,
       extractionSchema, this.#options.extractEffort, false);
     return { candidates: output.candidates, usage };

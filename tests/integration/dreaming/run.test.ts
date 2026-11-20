@@ -555,9 +555,11 @@ test("remember extract hands its selection to dreaming, which verifies and write
   }
   const now = new Date().toISOString();
   const chunks: string[] = [];
+  const scopes: (string | undefined)[] = [];
   const model: DreamModel = {
     extract(request) {
       chunks.push(request.chunk);
+      scopes.push(request.requestedScope);
       expect(request.requested).toBe(true);
       const statement = request.chunk.includes("### T01 FILE") ? "奥德赛的商港先补食物再补木料。" : "奥德赛的归航资源奖励只在归航成功时发放。";
       return Promise.resolve({ usage: { tokens: 1, seconds: 1 }, candidates: [{ statement,
@@ -604,6 +606,8 @@ test("remember extract hands its selection to dreaming, which verifies and write
   await drain();
   expect(chunks[1]).toContain("### T01 FILE");
   expect(chunks[1]).toContain("奥德赛的归航奖励只在成功归航时发放。");
+  // The extractor is told which scope the user asked for (ADR-0184).
+  expect(scopes).toEqual(["project", "global"]);
   const after = await openRuntimeDatabase(runtimeRoot);
   try {
     expect(after.prepare("SELECT scope_kind, COUNT(*) AS n FROM memory_catalog GROUP BY scope_kind ORDER BY scope_kind").all())
