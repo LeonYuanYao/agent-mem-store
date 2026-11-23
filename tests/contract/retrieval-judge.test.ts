@@ -53,7 +53,7 @@ test("the explicit retrieval judge pins Terra low to the standard service tier",
   if (request === undefined) throw new Error("Expected a Terra process request.");
   expect(request.arguments).toEqual(expect.arrayContaining([
     "--model",
-    "gpt-5.6-terra",
+    "gpt-6.1-terra",
     "-c",
     'model_reasoning_effort="low"',
     "-c",

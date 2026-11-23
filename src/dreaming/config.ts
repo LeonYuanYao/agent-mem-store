@@ -4,6 +4,7 @@ import { join, resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { parse } from "smol-toml";
 import { z } from "zod";
+import { terraModelIdentity } from "../luna/model.js";
 
 const reasoningEffortSchema = z.enum(["low", "medium", "high", "xhigh"]);
 
@@ -22,7 +23,7 @@ export const dreamingConfigurationSchema = z.object({
   // Codex models: extraction and verification carry nearly all tokens and stay on Luna; merge,
   // reconciliation and defense decide what joins or replaces Memory and use Terra (ADR-0157).
   model: z.string().min(1).default("gpt-6-luna"),
-  judge_model: z.string().min(1).default("gpt-6.1-terra"),
+  judge_model: z.string().min(1).default(terraModelIdentity),
   // After merging, the judge model keeps only items of lasting value; the rest skip verification
   // and are not written as Memory. Runs the user asked for are not appraised (ADR-0177).
   appraise: z.boolean().default(true),

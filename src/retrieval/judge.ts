@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 import { codexSessionArguments } from "../luna/codex-sessions.js";
+import { terraModelIdentity } from "../luna/model.js";
 
 const judgmentSchema = z.object({
   schemaVersion: z.literal(1),
@@ -207,7 +208,7 @@ export class CodexTerraRetrievalJudge implements RetrievalJudge {
           "-c",
           'service_tier="default"',
           "--model",
-          "gpt-5.6-terra",
+          terraModelIdentity,
           ...codexSessionArguments(this.#options.codexHome),
           "--sandbox",
           "read-only",
