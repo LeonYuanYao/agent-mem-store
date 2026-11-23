@@ -493,7 +493,6 @@ test("the Luna adapter invokes only gpt-6-luna in an isolated read-only process"
       "exec",
       "--model",
       "gpt-6-luna",
-      "--ephemeral",
       "--sandbox",
       "read-only",
       "--disable",
@@ -508,6 +507,8 @@ test("the Luna adapter invokes only gpt-6-luna in an isolated read-only process"
       "-"
     ])
   );
+  // A Codex home other than ~/.codex keeps its session files (ADR-0189).
+  expect(request.arguments).not.toContain("--ephemeral");
   expect(request.arguments).toEqual(expect.arrayContaining([
     "-c",
     'service_tier="default"',

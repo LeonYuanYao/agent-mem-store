@@ -36,16 +36,21 @@ const proxyEnvironment = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", 
 /**
  * An evaluation session sees only its prompt: a Codex home holding nothing but the login, and a
  * working directory outside any workspace, so no AGENTS.md, hooks, MCP servers or skills apply.
+ * The user's evaluation home `~/.codex-eval` (or MEMSTORE_LABEL_CODEX_HOME) is used when it holds a
+ * login: it keeps the session files that usage reporters count (ADR-0189). Otherwise a temporary
+ * home is made and removed, and the sessions stay ephemeral.
  */
-function isolatedCodexHome(): string {
+function labelCodexHome(): { readonly home: string; readonly temporary: boolean } {
+  const kept = process.env.MEMSTORE_LABEL_CODEX_HOME ?? join(homedir(), ".codex-eval");
+  if (existsSync(join(kept, "auth.json"))) return { home: kept, temporary: false };
   const home = mkdtempSync(join(tmpdir(), "memstore-label-home-"));
   symlinkSync(join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "auth.json"), join(home, "auth.json"));
-  return home;
+  return { home, temporary: true };
 }
 
 interface BatchResult { readonly labels: Map<string, Label> | undefined; readonly diagnostic: string }
 
-function labelBatch(codexHome: string, model: string, effort: string, batch: readonly LabelCase[]): Promise<BatchResult> {
+function labelBatch(codexHome: string, ephemeral: boolean, model: string, effort: string, batch: readonly LabelCase[]): Promise<BatchResult> {
   const work = mkdtempSync(join(tmpdir(), "memstore-label-"));
   writeFileSync(join(work, "schema.json"), JSON.stringify(labelSchema));
   const aliases = new Map<string, string>();
@@ -57,7 +62,7 @@ function labelBatch(codexHome: string, model: string, effort: string, batch: rea
     }) }));
   const args = ["exec", "--model", model, "-c", `model_reasoning_effort="${effort}"`, "-c", 'service_tier="default"',
     "-c", "skills.include_instructions=false", "--sandbox", "read-only",
-    "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--color", "never"];
+    ...(ephemeral ? ["--ephemeral"] : []), "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--color", "never"];
   for (const feature of ["hooks", "apps", "plugins", "memories", "multi_agent", "image_generation", "browser_use", "in_app_browser",
     "browser_use_external", "browser_use_full_cdp_access", "shell_tool", "unified_exec", "code_mode_host"]) args.push("--disable", feature);
   args.push("--cd", work, "--output-schema", join(work, "schema.json"), "-o", join(work, "out.json"), "-");
@@ -110,14 +115,14 @@ export async function labelRelevance(request: {
   if (current.length > 0) batches.push(current);
   const queue = batches.map((batch, index) => ({ batch, file: join(request.out, "labels", `batch-${String(index).padStart(3, "0")}.json`) }))
     .filter(job => !existsSync(job.file));
-  const codexHome = isolatedCodexHome();
+  const { home: codexHome, temporary } = labelCodexHome();
   let failedBatches = 0;
   const worker = async (): Promise<void> => {
     for (let job = queue.shift(); job !== undefined; job = queue.shift()) {
       const expected = job.batch.flatMap(entry => entry.candidates.map(candidate => `${entry.id}|${candidate.memoryId}`));
       // One retry: a model occasionally skips a pair.
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const { labels, diagnostic } = await labelBatch(codexHome, request.model, request.effort, job.batch);
+        const { labels, diagnostic } = await labelBatch(codexHome, temporary, request.model, request.effort, job.batch);
         if (labels !== undefined && expected.every(pair => labels.has(pair))) { writeFileSync(job.file, JSON.stringify(Object.fromEntries(labels))); break; }
         if (attempt === 1) {
           failedBatches += 1;
@@ -128,7 +133,7 @@ export async function labelRelevance(request: {
     }
   };
   try { await Promise.all(Array.from({ length: request.parallel }, worker)); }
-  finally { rmSync(codexHome, { recursive: true, force: true }); }
+  finally { if (temporary) rmSync(codexHome, { recursive: true, force: true }); }
   const labels = new Map(readdirSync(join(request.out, "labels")).flatMap(file =>
     Object.entries(JSON.parse(readFileSync(join(request.out, "labels", file), "utf8")) as Record<string, Label>)));
   return { labels, batches: batches.length, failedBatches };

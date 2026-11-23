@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { expect, test } from "vitest";
 
 import { isCatchAllRoot, relevantRepositories, tierOf, type TierInput, retiredEvidence } from "../../../src/dreaming/tier.js";
@@ -88,15 +90,21 @@ test("pre-search identifiers come from code spans and identifier-shaped words", 
 });
 
 test("verification keeps the command tools Codex needs; extraction disables them", () => {
-  const common = { effort: "high", work: "/w", schemaPath: "/w/s.json", outputPath: "/w/o.json" };
+  const common = { effort: "high", work: "/w", schemaPath: "/w/s.json", outputPath: "/w/o.json", codexHome: "/w/codex-home" };
   const verify = codexArguments({ ...common, shell: true });
   const extract = codexArguments({ ...common, shell: false });
   for (const feature of ["shell_tool", "unified_exec", "code_mode_host"]) {
     expect(verify.join(" ")).not.toContain(`--disable ${feature}`);
     expect(extract.join(" ")).toContain(`--disable ${feature}`);
   }
-  expect(verify).toEqual(expect.arrayContaining(["--sandbox", "read-only", "--ephemeral", "--ignore-user-config"]));
+  expect(verify).toEqual(expect.arrayContaining(["--sandbox", "read-only", "--ignore-user-config"]));
   expect(verify.join(" ")).toContain("--disable plugins");
+});
+
+test("dreaming calls stay ephemeral only in the user's own Codex home (ADR-0189)", () => {
+  const common = { effort: "high", shell: false, work: "/w", schemaPath: "/w/s.json", outputPath: "/w/o.json" };
+  expect(codexArguments({ ...common, codexHome: join(homedir(), ".codex") })).toContain("--ephemeral");
+  expect(codexArguments({ ...common, codexHome: join(homedir(), ".codex-eval") })).not.toContain("--ephemeral");
 });
 
 test("only the branches of repositories the item is about scope it", () => {

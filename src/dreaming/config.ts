@@ -58,7 +58,8 @@ export const dreamingConfigurationSchema = z.object({
   // Suggest Global rules that hold in every session for those files (ADR-0181); never edits them.
   instruction_suggestions: z.boolean().default(true),
   // Codex home for dreaming's model calls. Independent of MEMSTORE_LUNA_CODEX_HOME so enabling
-  // dreaming does not also restart legacy Luna governance and quality work.
+  // dreaming does not also restart legacy Luna governance and quality work. Calls in `~/.codex` stay
+  // ephemeral; a home kept for these calls keeps their session files (ADR-0189).
   codex_home: z.string().min(1).default("~/.codex")
 }).strict();
 

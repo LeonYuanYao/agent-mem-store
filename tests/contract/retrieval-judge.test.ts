@@ -63,6 +63,8 @@ test("the explicit retrieval judge pins Terra low to the standard service tier",
     "read-only"
   ]));
   expect(request.arguments).not.toContain('service_tier="fast"');
+  // A Codex home other than ~/.codex keeps its session files (ADR-0189).
+  expect(request.arguments).not.toContain("--ephemeral");
   expect(request.standardInput).toContain("changes the answer or next safe action now");
   expect(request.standardInput).not.toContain("msmem_release");
 });

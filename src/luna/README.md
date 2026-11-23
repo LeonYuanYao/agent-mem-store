@@ -42,7 +42,7 @@ classify a failure as authentication.
 
 ## State and side effects
 
-Spawns Codex and uses isolated runtime work files; operation records live in SQLite. Unit/contract mocks verify protocol behavior, not real-model knowledge quality.
+Spawns Codex and uses isolated runtime work files; operation records live in SQLite. [codex-sessions.ts](codex-sessions.ts) decides whether a `codex exec` call of Luna, dreaming or the retrieval judge is ephemeral: only in the user's own `~/.codex` (ADR-0189). Unit/contract mocks verify protocol behavior, not real-model knowledge quality.
 
 ## Invariants and change risks
 

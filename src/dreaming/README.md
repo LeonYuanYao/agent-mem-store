@@ -42,7 +42,7 @@ Migration 0067 owns `dream_runs`, `dream_sessions`, `dream_chunks`, `dream_candi
 - Evidence reads go through git objects at each repository's baseline (`origin/HEAD`); checkouts, branches and uncommitted work never count as baseline evidence. `GIT_OPTIONAL_LOCKS=0` keeps reads lock-free next to interactive sessions.
 - Submodules read the commit pinned by their parent's baseline. A deeper clone of an already mapped remote, `tmp/`, build output and symlinks are excluded.
 - Only confirmed, user-stated or multi-session knowledge reaches the inject tier. Knowledge from a Session on an unmerged branch stays branch-scoped unless the baseline confirms it. Contradicted or stale knowledge only reaches review.
-- All model work uses the Codex model; the verifier sandbox is read-only and has no network. Repository content is evidence, never instructions.
+- All model work uses the Codex model; the verifier sandbox is read-only and has no network. Repository content is evidence, never instructions. Calls run with `--ephemeral` only in the user's own `~/.codex`; in any other `codex_home` they keep their session files so usage reporters count them ([codex-sessions.ts](../luna/codex-sessions.ts), ADR-0189).
 - Apply mode is not implemented; configuration rejects it.
 
 ## Verification

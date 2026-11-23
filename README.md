@@ -207,7 +207,7 @@ extracting what only it holds and drops items whose evidence lies only under its
 neither captured nor retrieved for unless `[adapters] subagents_enabled = true`
 ([ADR-0165](docs/adr/0165-retired-systems-and-subagents-out-of-dreaming.md)).
 
-Model calls go through Codex (`codex_home`, default `~/.codex`; independent of the legacy Luna adapter): Luna medium for extraction, Luna high for verification (`model`, `extract_effort`, `verify_effort`, `verify_parallelism`); merge, apply-time reconciliation and defense use `judge_model`, default `gpt-6.1-terra` ([ADR-0157](docs/adr/0157-terra-for-dreaming-judgments.md)). See the Nightly dreaming section of the [SPEC](SPEC.md) and [ADR-0147](docs/adr/0147-nightly-dreaming.md).
+Model calls go through Codex (`codex_home`, default `~/.codex`; independent of the legacy Luna adapter). In `~/.codex` they run with `--ephemeral`; set `codex_home` to a Codex home kept for such calls to keep their session files, so tools that read Codex sessions count their token usage ([ADR-0189](docs/adr/0189-keep-model-call-sessions-in-a-dedicated-codex-home.md)). Models: Luna medium for extraction, Luna high for verification (`model`, `extract_effort`, `verify_effort`, `verify_parallelism`); merge, apply-time reconciliation and defense use `judge_model`, default `gpt-6.1-terra` ([ADR-0157](docs/adr/0157-terra-for-dreaming-judgments.md)). See the Nightly dreaming section of the [SPEC](SPEC.md) and [ADR-0147](docs/adr/0147-nightly-dreaming.md).
 
 ### Skills and MCP tools
 

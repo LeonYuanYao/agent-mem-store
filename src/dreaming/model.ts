@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
+import { codexSessionArguments } from "../luna/codex-sessions.js";
 import { lunaModelIdentity } from "../luna/model.js";
 
 /**
@@ -396,10 +397,11 @@ export interface CodexDreamModelOptions {
  */
 export function codexArguments(request: {
   readonly effort: string; readonly shell: boolean; readonly work: string; readonly schemaPath: string; readonly outputPath: string;
-  readonly model?: string;
+  readonly codexHome: string; readonly model?: string;
 }): string[] {
   const args = ["exec", "--model", request.model ?? lunaModelIdentity, "-c", `model_reasoning_effort="${request.effort}"`, "-c", 'service_tier="default"',
-    "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--color", "never"];
+    "--sandbox", "read-only", ...codexSessionArguments(request.codexHome), "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
+    "--color", "never"];
   const disabled = ["apps", "plugins", "memories", "multi_agent", "image_generation", "browser_use", "in_app_browser",
     "browser_use_external", "browser_use_full_cdp_access", ...(request.shell ? [] : ["shell_tool", "unified_exec", "code_mode_host"])];
   for (const feature of disabled) args.push("--disable", feature);
@@ -456,7 +458,8 @@ export class CodexDreamModel implements DreamModel {
       const outputPath = join(work, "out.json");
       await writeFile(schemaPath, JSON.stringify(jsonSchemaOf(schema)), { mode: 0o600 });
       const model = (judgment ? this.#options.judgeModel : undefined) ?? this.#options.model;
-      const args = codexArguments({ effort, shell, work, schemaPath, outputPath, ...(model === undefined ? {} : { model }) });
+      const args = codexArguments({ effort, shell, work, schemaPath, outputPath, codexHome: this.#options.codexHome,
+        ...(model === undefined ? {} : { model }) });
       const environment: Record<string, string> = {};
       for (const name of passthroughEnvironment) {
         const value = process.env[name];

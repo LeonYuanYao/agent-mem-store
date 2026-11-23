@@ -3,6 +3,7 @@ import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path";
 import { getEncoding } from "js-tiktoken";
 import { z } from "zod";
+import { codexSessionArguments } from "./codex-sessions.js";
 import { lunaModelIdentity } from "./model.js";
 import { retentionValueSchema, retentionValuePolicyVersion, retentionValueRules } from "../capacity/retention-value.js";
 import { enforceGovernanceDecisionPolicy } from "../governance/decision-policy.js";
@@ -1780,7 +1781,7 @@ export class CodexLunaAdapter {
           'model_reasoning_effort="medium"',
           "--model",
           lunaModelIdentity,
-          "--ephemeral",
+          ...codexSessionArguments(this.#options.codexHome),
           "--sandbox",
           "read-only",
           "--disable",
