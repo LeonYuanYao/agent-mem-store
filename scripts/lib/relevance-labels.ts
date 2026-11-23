@@ -7,7 +7,7 @@
  * `<out>/labeling-errors.log`, so callers can refuse to report incomplete numbers as results.
  */
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -34,6 +34,15 @@ const labelSchema = { type: "object", additionalProperties: false, required: ["r
 const proxyEnvironment = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"];
 
 /**
+ * Temporary directories are made under the real path of the system temporary directory. Codex
+ * refuses to write its `-o` file through a symlinked directory ("Not a directory (os error 20)"),
+ * and some launchers set TMPDIR to such a path (botmux: `/tmp/bm501/<id>` links into `~/.cache`).
+ */
+function temporaryDirectory(prefix: string): string {
+  return mkdtempSync(join(realpathSync(tmpdir()), prefix));
+}
+
+/**
  * An evaluation session sees only its prompt: a Codex home holding nothing but the login, and a
  * working directory outside any workspace, so no AGENTS.md, hooks, MCP servers or skills apply.
  * The user's evaluation home `~/.codex-eval` (or MEMSTORE_LABEL_CODEX_HOME) is used when it holds a
@@ -43,7 +52,7 @@ const proxyEnvironment = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", 
 function labelCodexHome(): { readonly home: string; readonly temporary: boolean } {
   const kept = process.env.MEMSTORE_LABEL_CODEX_HOME ?? join(homedir(), ".codex-eval");
   if (existsSync(join(kept, "auth.json"))) return { home: kept, temporary: false };
-  const home = mkdtempSync(join(tmpdir(), "memstore-label-home-"));
+  const home = temporaryDirectory("memstore-label-home-");
   symlinkSync(join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "auth.json"), join(home, "auth.json"));
   return { home, temporary: true };
 }
@@ -51,7 +60,7 @@ function labelCodexHome(): { readonly home: string; readonly temporary: boolean 
 interface BatchResult { readonly labels: Map<string, Label> | undefined; readonly diagnostic: string }
 
 function labelBatch(codexHome: string, ephemeral: boolean, model: string, effort: string, batch: readonly LabelCase[]): Promise<BatchResult> {
-  const work = mkdtempSync(join(tmpdir(), "memstore-label-"));
+  const work = temporaryDirectory("memstore-label-");
   writeFileSync(join(work, "schema.json"), JSON.stringify(labelSchema));
   const aliases = new Map<string, string>();
   const payload = batch.map(entry => ({ current_user_message: entry.prompt.slice(0, 1500), recent_user_messages: entry.recent.map(text => text.slice(0, 400)),
