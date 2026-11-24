@@ -1,6 +1,6 @@
 import type { SourceBranch } from "./branches.js";
 
-export type DreamTier = "inject" | "branch" | "pool" | "review" | "drop";
+export type DreamTier = "inject" | "suggest" | "branch" | "pool" | "review" | "drop";
 
 export interface TierInput {
   /** All evidence lies under paths of systems the user retired (ADR-0165). */
@@ -40,6 +40,11 @@ export interface TierInput {
    * (ADR-0177). The verifier's durability guess on the lone claim does not override that (ADR-0179).
    */
   readonly appraisedLasting?: boolean;
+  /**
+   * The appraisal judged the item a rule of the user's own (`keep_rule`): how agents should work,
+   * reply or what not to do for this user. The user decides on those (ADR-0191).
+   */
+  readonly appraisedRule?: boolean;
 }
 
 /**
@@ -51,11 +56,6 @@ export function isCatchAllRoot(root: string, home: string): boolean {
   return root === home || root === "/" || home.startsWith(`${root}/`);
 }
 
-/**
- * Local admission. Only repository-confirmed, user-stated or recurring knowledge
- * is injected automatically; knowledge from unmerged branches stays with its
- * branch unless the baseline confirms it; everything else remains searchable.
- */
 /**
  * Whether all of an item's evidence lies under paths of systems the user retired (ADR-0165):
  * code that still exists verifies as true, but no longer describes what is in use.
@@ -69,7 +69,25 @@ export function retiredEvidence(evidence: readonly string[], prefixes: readonly 
   return evidence.every(under);
 }
 
+/**
+ * Local admission, then the user's say over their own rules (ADR-0191): knowledge that would be
+ * injected but rests on the user's words, or that the appraisal judged a rule of the user's own,
+ * becomes a suggestion the user accepts or dismisses. A run the user asked for is not asked again.
+ */
 export function tierOf(input: TierInput): { readonly tier: DreamTier; readonly reason: string } {
+  const admitted = admissionOf(input);
+  if (admitted.tier !== "inject" || input.userRequested === true) return admitted;
+  // A quote the verifier found the user never said as their own rule does not make it the user's.
+  const userWords = input.explicitUser && !["pasted_task_instruction", "not_user_stated"].includes(input.userSupport ?? "");
+  return userWords || input.appraisedRule === true ? { tier: "suggest", reason: admitted.reason } : admitted;
+}
+
+/**
+ * Local admission. Only repository-confirmed, user-stated or recurring knowledge
+ * is injected automatically; knowledge from unmerged branches stays with its
+ * branch unless the baseline confirms it; everything else remains searchable.
+ */
+function admissionOf(input: TierInput): { readonly tier: DreamTier; readonly reason: string } {
   if (input.retiredOnly === true) return { tier: "drop", reason: "retired_subject" };
   // The user's own instruction for one task may still be a preference: keep it searchable instead of dropping it.
   const userTaskInstruction = input.explicitUser && input.userSupport === "user_task_instruction";

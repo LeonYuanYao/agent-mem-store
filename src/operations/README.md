@@ -16,7 +16,7 @@ Provides user-facing use cases shared by command and tool surfaces: setup, recal
 
 ## Flow and collaborators
 
-Start at the file matching the command. project.ts and session-migration.ts manage scope changes; portability.ts owns handoff/backup; quality.ts and knowledge-verification.ts expose quality workflows.
+Start at the file matching the command. project.ts and session-migration.ts manage scope changes; portability.ts owns handoff/backup; quality.ts and knowledge-verification.ts expose quality workflows. rule-suggestions.ts accepts or dismisses the user's own rules dreaming found (`memstore rules`, ADR-0191); accepting goes through `remember assert`.
 
 Initialization writes `[adapters].subagents_enabled = false` in machine-local
 configuration. Older configurations receive the same default at Hook read time.

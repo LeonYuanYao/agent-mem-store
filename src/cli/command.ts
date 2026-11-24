@@ -2,6 +2,7 @@
 
 import { dreamDigest } from "../dreaming/digest.js";
 import { dismissInstructionSuggestion, instructionSuggestionLines, readInstructionSuggestions, refreshInstructionSuggestions } from "../dreaming/instructions.js";
+import { acceptRule, dismissRule, listRules } from "../operations/rule-suggestions.js";
 import { recallSources } from "../retrieval/sources.js";
 import { fetchLarkDocument, rememberDocument } from "../operations/remember-document.js";
 import { readDreamingConfiguration, type DreamingConfiguration } from "../dreaming/config.js";
@@ -483,7 +484,7 @@ async function runRepair(arguments_: readonly string[]): Promise<unknown> {
 function writeResult(command: string, result: unknown, json: boolean): void {
   if (json) process.stdout.write(`${JSON.stringify(successEnvelope(command, result))}\n`);
   // The digest is a chat message: plain text unless --json.
-  else if (command === "dream.digest" || command === "instructions.list") process.stdout.write(`${(result as { text: string }).text}\n`);
+  else if (command === "dream.digest" || command === "instructions.list" || command === "rules.list") process.stdout.write(`${(result as { text: string }).text}\n`);
   else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
@@ -995,6 +996,22 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       }),
       json: parsed.values.json
     };
+  }
+  // The user's own rules dreaming found, accepted as Human-authored Memory or dismissed (ADR-0191).
+  if (command === "rules") {
+    const action = parsed.positionals[1];
+    if (action === "accept" || action === "dismiss") {
+      const id = parsed.positionals[2];
+      if (id === undefined) throw new MemStoreCommandError("suggestion_id_required", `rules ${action} requires the suggestion id shown by \`memstore rules\`.`);
+      return action === "accept"
+        ? { command: "rules.accept", json: parsed.values.json, result: await acceptRule({ ...location, id, now, preview: parsed.values.preview,
+            ...(parsed.values.text === undefined ? {} : { text: parsed.values.text }) }) }
+        : { command: "rules.dismiss", json: parsed.values.json, result: await dismissRule({ runtimeRoot: location.runtimeRoot, id, now }) };
+    }
+    if (action !== undefined && action !== "all") {
+      throw new MemStoreCommandError("unknown_command", "Use `memstore rules [all]`, `memstore rules accept <id> [--text TEXT]` or `memstore rules dismiss <id>`.");
+    }
+    return { command: "rules.list", json: parsed.values.json, result: await listRules({ runtimeRoot: location.runtimeRoot, includeClosed: action === "all" }) };
   }
   // Global rules suggested for the user-wide instruction files (ADR-0181).
   if (command === "instructions") {
@@ -1627,6 +1644,10 @@ Everyday use:
   memstore remember assert --scope project|global --text TEXT
   memstore remember doc --file DOC.md | --lark URL [--title TEXT] [--scope project|global]
   memstore recall search QUERY
+  memstore rules [all]
+  memstore rules accept ID [--text TEXT] [--preview]
+  memstore rules dismiss ID
+      Rules of yours that dreaming found; accepted ones become your own Memory.
   memstore recall sources M:123
   memstore archive M:123 [--reason TEXT] [--apply]
   memstore rescope M:123 --scope global|project [--project-id ID] [--reason TEXT] [--apply]
@@ -1845,7 +1866,7 @@ async function run(arguments_: readonly string[]): Promise<void> {
     }
     return;
   }
-  if (["archive", "restore", "rescope", "purge-memory", "doctor", "vault", "worker", "dream", "instructions", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
+  if (["archive", "restore", "rescope", "purge-memory", "doctor", "vault", "worker", "dream", "instructions", "rules", "review", "runtime", "portability", "purge", "shadow", "category", "quality"].includes(command) ||
       (command === "operation" && arguments_[1] === "retry")) {
     const output = await runOperations(arguments_);
     writeResult(output.command, output.result, output.json);

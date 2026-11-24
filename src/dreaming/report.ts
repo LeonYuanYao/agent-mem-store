@@ -21,6 +21,7 @@ const overviewWindowDays = 14;
 
 const tierTitles: Record<string, string> = {
   inject: "注入层（会自动注入）",
+  suggest: "提议（你本人的规则，确认后才写成记忆）",
   branch: "分支层（只在对应分支的会话注入）",
   pool: "可搜索池（不自动注入）",
   review: "需要复核（验证器认为错误或过时）",
@@ -44,6 +45,12 @@ const reasonLabels: Record<string, string> = {
   low_value_one_off: "一次性信息"
 };
 
+const suggestionReasonLabels: Record<string, string> = {
+  explicit_user: "出自你的原话",
+  recurring: "多个会话里你都这样要求",
+  confirmed: "从你的纠正或反复要求里看出来，仓库也能印证"
+};
+
 const agentNames: Record<string, string> = { claude: "Claude Code", codex: "Codex" };
 
 const userSupportLabels: Record<string, string> = {
@@ -59,11 +66,17 @@ const verdictLabels: Record<string, string> = {
 };
 
 function reasonLabel(tier: string, reason: string): string {
+  if (tier === "suggest") return suggestionReasonLabels[reason] ?? "从你的纠正或反复要求里看出来";
   const known = reasonLabels[reason];
   if (known !== undefined) return known;
   if (tier === "branch") return `分支 ${reason}`;
   const verdict = /^single_session_(.+)$/u.exec(reason)?.[1];
   return verdict === undefined ? reason : `仅一个会话出现，${verdictLabels[verdict] ?? verdict}`;
+}
+
+/** The handle a rule suggestion is shown and accepted by (ADR-0191): the item id's first eight hex digits. */
+export function suggestionId(itemId: string): string {
+  return itemId.replace(/^msdi_/u, "").slice(0, 8);
 }
 
 export const applyStateLabels: Record<string, string> = {
@@ -75,9 +88,11 @@ export const applyStateLabels: Record<string, string> = {
   review_due: "已写入的记忆被判错误或过时，停止注入",
   skipped: "跳过",
   failed: "失败，下次重试",
-  pending: "待写入"
+  pending: "待写入",
+  accepted: "你确认的规则，已写成手写记忆",
+  dismissed: "你不要的规则提议"
 };
-const applyStateOrder = ["conflict_human", "written", "revised", "review_due", "observed", "duplicate_human", "skipped", "failed", "pending"];
+const applyStateOrder = ["conflict_human", "written", "revised", "accepted", "review_due", "observed", "duplicate_human", "dismissed", "skipped", "failed", "pending"];
 
 function memoryRefs(database: DatabaseSync, memoryIds: readonly string[]): Map<string, string> {
   const refs = new Map<string, string>();
@@ -197,7 +212,7 @@ export async function writeDreamReport(request: {
   const project = projectDisplay(request.database, request.projectId);
   const date = runDate(run?.scheduled_for, run?.created_at, request.timeZone);
   const items = request.database.prepare(
-    "SELECT statement, refined_statement, tier, tier_reason, scope, verdict_json, defense_json, session_ids_json FROM dream_items WHERE run_id = ? ORDER BY tier, scope DESC, claim_type"
+    "SELECT item_id, statement, refined_statement, tier, tier_reason, scope, verdict_json, defense_json, session_ids_json FROM dream_items WHERE run_id = ? ORDER BY tier, scope DESC, claim_type"
   ).all(request.runId);
   const lines = [
     `# Dreams · ${date} · ${project.label}`,
@@ -211,7 +226,7 @@ export async function writeDreamReport(request: {
       ` · tokens ≈ ${String((stats.extract_tokens ?? 0) + (stats.merge_tokens ?? 0) + (stats.verify_tokens ?? 0) + (stats.defense_tokens ?? 0))}`,
     ""
   ];
-  for (const tier of ["inject", "branch", "review", "pool", "drop"]) {
+  for (const tier of ["inject", "suggest", "branch", "review", "pool", "drop"]) {
     const group = items.filter((item) => item.tier === tier);
     lines.push(`## ${tierTitles[tier] ?? tier} · ${String(group.length)}`, "");
     for (const item of group) {
@@ -242,6 +257,7 @@ export async function writeDreamReport(request: {
       }
       for (const evidence of (verdict.evidence ?? []).slice(0, 2)) lines.push(`  - 证据：${escapeLine(evidence).slice(0, 240)}`);
       if (tier === "review" || tier === "branch") lines.push(`  - 理由：${escapeLine(defense?.reason ?? verdict.reason ?? "").slice(0, 240)}`);
+      if (tier === "suggest") lines.push(`  - 要记住：\`memstore rules accept ${suggestionId(String(item.item_id))}\`；不要：\`memstore rules dismiss ${suggestionId(String(item.item_id))}\``);
     }
     lines.push("");
   }
@@ -278,10 +294,10 @@ export async function writeDreamOverview(request: {
   const rows = request.database.prepare(
     `SELECT i.statement, i.refined_statement, i.tier, i.tier_reason, i.scope, r.project_id, r.report_path
      FROM dream_items i JOIN dream_runs r USING (run_id)
-     WHERE (r.stage = 'completed' OR r.run_id = ?) AND r.created_at >= ? AND i.tier IN ('inject', 'branch', 'pool', 'review')
+     WHERE (r.stage = 'completed' OR r.run_id = ?) AND r.created_at >= ? AND i.tier IN ('inject', 'suggest', 'branch', 'pool', 'review')
      ORDER BY r.created_at DESC, i.claim_type`
   ).all(request.includeRunId ?? null, since);
-  const tierOrder = ["inject", "branch", "pool", "review"];
+  const tierOrder = ["inject", "suggest", "branch", "pool", "review"];
   const labels = new Map<string, string>();
   const groups = new Map<string, Map<string, string[]>>();
   const seen = new Set<string>();

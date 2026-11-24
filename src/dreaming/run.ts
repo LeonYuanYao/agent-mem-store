@@ -460,8 +460,8 @@ async function appraiseNextBatch(
   const { results, usage } = await request.model.appraise({ projectLabel: roots.join(", ") || run.projectId, groups: payload });
   let low = 0;
   for (const [alias, item] of aliases) {
-    // An item the model skipped is kept: appraisal only ever removes what it judged.
-    const result = results.find((candidate) => candidate.id === alias) ?? { id: alias, value: "keep_rule", reason: "appraiser_omitted" };
+    // An item the model skipped is kept: appraisal only ever removes what it judged, and never makes a rule of the user's.
+    const result = results.find((candidate) => candidate.id === alias) ?? { id: alias, value: "keep_usage", reason: "appraiser_omitted" };
     if (!result.value.startsWith("keep")) low += 1;
     database.prepare("UPDATE dream_items SET appraisal_json = ? WHERE item_id = ?")
       .run(json({ value: result.value, reason: result.reason }), String(item.item_id));
@@ -817,6 +817,7 @@ async function stepRun(
           userRequested: run.request !== undefined,
           // Low-value appraisals stopped above, so an appraisal here judged the item worth keeping.
           appraisedLasting: appraisal !== undefined,
+          appraisedRule: appraisal?.value === "keep_rule",
           verdict: finalVerdict,
           durability: verdict?.durability ?? "long_term",
           branch: defense?.branch || verdict?.branch || "",

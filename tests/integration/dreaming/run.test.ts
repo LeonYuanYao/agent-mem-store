@@ -7,10 +7,12 @@ import { afterEach, expect, test } from "vitest";
 import { captureEvent } from "../../../src/capture/index.js";
 import { dreamingConfigurationSchema } from "../../../src/dreaming/config.js";
 import { handOffCaptureToDreaming } from "../../../src/dreaming/handoff.js";
-import { readInstructionSuggestions } from "../../../src/dreaming/instructions.js";
+import { readInstructionSuggestions, refreshInstructionSuggestions } from "../../../src/dreaming/instructions.js";
 import { DreamModelError, type DreamModel, type Verdict } from "../../../src/dreaming/model.js";
 import { inspectDreams, renderDreamReports, runNextDreamStep, scheduleDueDreams, startDreamRun } from "../../../src/dreaming/run.js";
 import { rememberExtract } from "../../../src/operations/remember.js";
+import { acceptRule, dismissRule, listRules } from "../../../src/operations/rule-suggestions.js";
+import { dreamDigest } from "../../../src/dreaming/digest.js";
 import { resolveProject } from "../../../src/projects/index.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { recallSources } from "../../../src/retrieval/sources.js";
@@ -149,7 +151,8 @@ test("a dream run extracts, merges, verifies, defends and tiers a Session withou
       .map((row) => [String(row.statement), `${String(row.tier)}:${String(row.tier_reason)}`]));
     expect(tiers).toEqual({
       [statements.code]: "inject:confirmed",
-      [statements.preference]: "inject:explicit_user",
+      // The user's own rule is left to the user (ADR-0191).
+      [statements.preference]: "suggest:explicit_user",
       [statements.wrong]: "review:contradicted",
       [statements.oneOff]: "drop:episodic"
     });
@@ -176,7 +179,7 @@ test("a dream run extracts, merges, verifies, defends and tiers a Session withou
   const overview = await readFile(join(dreams, "总览.md"), "utf8");
   expect(overview.indexOf("## 全局")).toBeGreaterThan(0);
   expect(overview.indexOf("## 全局")).toBeLessThan(overview.indexOf("## 项目"));
-  expect(overview).toContain(`- ${statements.preference}\n  - 用户明确表达 · 来自 `);
+  expect(overview).toContain(`### 提议（你本人的规则，确认后才写成记忆） · 1\n\n- ${statements.preference}\n  - 出自你的原话 · 来自 `);
   expect(overview).toContain(`- TTEH 的 \`setVideo\` 在预览中调用 \`reloadEffect\` 重新加载特效。\n  - 已用仓库证据验证 · [[${reportName.replace(/\.md$/u, "")}]]`);
   expect(overview).not.toContain(statements.oneOff);
 
@@ -237,7 +240,8 @@ test("an appraised run verifies only the items of lasting value and keeps the re
       appraised.push(...request.groups.map((group) => group.map((item) => item.memory)));
       return Promise.resolve({ usage: { tokens: 20, seconds: 1 }, results: request.groups.flat().map((item) => ({
         id: item.id, reason: "test",
-        value: item.memory.startsWith(statements.wrong) ? "code_detail" as const : item.memory.startsWith(statements.oneOff) ? "one_off" as const : "keep_usage" as const
+        // The code claim read as a rule of the user's own becomes a suggestion once admitted (ADR-0191).
+        value: item.memory.startsWith(statements.wrong) ? "code_detail" as const : item.memory.startsWith(statements.oneOff) ? "one_off" as const : "keep_rule" as const
       })) });
     }
   };
@@ -257,8 +261,8 @@ test("an appraised run verifies only the items of lasting value and keeps the re
     const tiers = Object.fromEntries(database.prepare("SELECT statement, tier, tier_reason FROM dream_items").all()
       .map((row) => [String(row.statement), `${String(row.tier)}:${String(row.tier_reason)}`]));
     expect(tiers).toEqual({
-      [statements.code]: "inject:confirmed",
-      [statements.preference]: "inject:explicit_user",
+      [statements.code]: "suggest:confirmed",
+      [statements.preference]: "suggest:explicit_user",
       [statements.wrong]: "pool:low_value_code_detail",
       [statements.oneOff]: "drop:low_value_one_off"
     });
@@ -271,6 +275,18 @@ test("an appraised run verifies only the items of lasting value and keeps the re
   const dreams = join(vaultRoot, "_MemStore", "Dreams");
   const report = await readFile(join(dreams, (await readdir(dreams)).find((name) => name !== "总览.md") ?? ""), "utf8");
   expect(report).toContain("长期价值低：模块内部的实现细节");
+  expect(report).toMatch(/## 提议（你本人的规则，确认后才写成记忆） · 2[\s\S]*memstore rules accept [0-9a-f]{8}/u);
+  // Dismissing closes a suggestion without writing anything; it is not offered again.
+  const open = (await listRules({ runtimeRoot })).suggestions;
+  expect(open.map((suggestion) => suggestion.reason).sort()).toEqual(["confirmed", "explicit_user"]);
+  const code = open.find((suggestion) => suggestion.reason === "confirmed");
+  await expect(dismissRule({ runtimeRoot, id: code?.id ?? "", now })).resolves.toMatchObject({ state: "dismissed" });
+  await expect(dismissRule({ runtimeRoot, id: code?.id ?? "", now })).resolves.toMatchObject({ state: "dismissed" });
+  await expect(acceptRule({ runtimeRoot, vaultRoot, id: code?.id ?? "", now, preview: false })).rejects.toThrow(/already dismissed/u);
+  expect((await listRules({ runtimeRoot })).suggestions.map((suggestion) => suggestion.reason)).toEqual(["explicit_user"]);
+  expect((await listRules({ runtimeRoot, includeClosed: true })).text).toMatch(/\*\*已处理\*\*\n- `[0-9a-f]{8}` 不要：/u);
+  await expect(acceptRule({ runtimeRoot, vaultRoot, id: "zz", now, preview: false })).rejects.toThrow(/suggestion id/u);
+  await expect(access(join(vaultRoot, "Memories"))).rejects.toThrow();
 });
 
 test("appraisal can be switched off", async () => {
@@ -308,7 +324,7 @@ test("appraisal can be switched off", async () => {
   expect(log).toEqual(["extract:1/1", "merge:2", "verify:4", "defend:1"]);
 });
 
-test("in apply mode a nightly run writes its inject tier as dreaming Memory before reporting it", async () => {
+test("in apply mode a nightly run writes its inject tier as dreaming Memory and leaves the user's rule to the user", async () => {
   const root = await mkdtemp(join(tmpdir(), "memstore-dream-apply-run-"));
   directories.push(root);
   const runtimeRoot = join(root, "runtime");
@@ -337,7 +353,7 @@ test("in apply mode a nightly run writes its inject tier as dreaming Memory befo
   await writeFile(agents, "# Global\n\nBe concise.\n");
   const configuration = dreamingConfigurationSchema.parse({ enabled: true, mode: "apply", verify_batch_size: 8, host_instruction_files: [agents] });
   await startDreamRun({ runtimeRoot, projectId: project.projectId, now });
-  // ADR-0181: the Global rule the run wrote is judged for the instruction file before the report.
+  // ADR-0181: Global rules are judged for the instruction file after apply, before the report.
   const model: DreamModel = { ...fakeModel([]), judgeInstructions: (request) => Promise.resolve({ usage: { tokens: 5, seconds: 1 },
     results: request.rules.map((rule) => ({ id: rule.id, applies_everywhere: true, reason: "every session",
       files: request.files.map((file) => ({ file: file.id, covered: false, merge_into: "", proposal: "Use Bits for every MR." })) })) }) };
@@ -347,18 +363,18 @@ test("in apply mode a nightly run writes its inject tier as dreaming Memory befo
     if (result.state === "idle") break;
     steps.push(`${result.stage ?? ""}:${result.detail ?? ""}`);
   }
-  expect(steps).toContain("report:applied 2");
-  expect(steps.indexOf("report:instruction suggestions judged")).toBeGreaterThan(steps.indexOf("report:applied 2"));
+  expect(steps).toContain("report:applied 1");
+  expect(steps.indexOf("report:instruction suggestions judged")).toBeGreaterThan(steps.indexOf("report:applied 1"));
   expect(steps.filter((step) => step.startsWith("report:instruction"))).toHaveLength(1);
-  expect((await readInstructionSuggestions(runtimeRoot)).suggestions.map((suggestion) => suggestion.files)).toEqual([
-    [{ path: agents, mergeInto: "", text: "Use Bits for every MR." }]
-  ]);
+  // The user's MR rule was not written, so there is no Global rule to suggest yet.
+  expect((await readInstructionSuggestions(runtimeRoot)).suggestions).toEqual([]);
   const database = await openRuntimeDatabase(runtimeRoot);
   try {
     expect(database.prepare("SELECT authority, scope_kind, lifecycle FROM memory_catalog ORDER BY scope_kind").all())
-      .toEqual([{ authority: "agent_derived", scope_kind: "global", lifecycle: "active" }, { authority: "agent_derived", scope_kind: "project", lifecycle: "active" }]);
-    expect(database.prepare("SELECT apply_state, COUNT(*) AS n FROM dream_items GROUP BY apply_state ORDER BY apply_state").all())
-      .toEqual([{ apply_state: null, n: 2 }, { apply_state: "written", n: 2 }]);
+      .toEqual([{ authority: "agent_derived", scope_kind: "project", lifecycle: "active" }]);
+    expect(database.prepare("SELECT tier, apply_state, COUNT(*) AS n FROM dream_items GROUP BY tier, apply_state ORDER BY tier").all())
+      .toEqual([{ tier: "drop", apply_state: null, n: 1 }, { tier: "inject", apply_state: "written", n: 1 },
+        { tier: "review", apply_state: null, n: 1 }, { tier: "suggest", apply_state: null, n: 1 }]);
     // Two layers: the statement is what injection shows, the body adds the detail.
     const written = database.prepare("SELECT apply_memory_id FROM dream_items WHERE statement = ? AND apply_state = 'written'").get(statements.code);
     const memory = (await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(written?.apply_memory_id) }))?.memory;
@@ -377,8 +393,33 @@ test("in apply mode a nightly run writes its inject tier as dreaming Memory befo
   }
   const reports = (await readdir(join(vaultRoot, "_MemStore", "Dreams"))).filter((name) => name !== "总览.md");
   const report = await readFile(join(vaultRoot, "_MemStore", "Dreams", reports[0] ?? ""), "utf8");
-  expect(report).toContain("## 写入正式记忆 · 2");
-  expect(report).toMatch(/### 新建 · 2[\s\S]*→ M:\d+/u);
+  expect(report).toContain("## 写入正式记忆 · 1");
+  expect(report).toMatch(/### 新建 · 1[\s\S]*→ M:\d+/u);
+  expect(report).toMatch(/## 提议（你本人的规则，确认后才写成记忆） · 1\n\n- 〔全局〕用户要求创建 MR 时使用 Bits。\n {2}- 出自你的原话/u);
+
+  // The digest asks the user (ADR-0191); accepting writes the rule as the user's own Global Memory.
+  const later = new Date(Date.parse(now) + 1_000).toISOString();
+  const digest = await dreamDigest({ runtimeRoot, vaultRoot, since: new Date(Date.parse(now) - 3_600_000).toISOString(), now: later, timeZone: "UTC" });
+  expect(digest.ruleSuggestions).toBe(1);
+  expect(digest.text).toMatch(/待你确认的规则 1[\s\S]*\*\*你的规则，要不要记住？\*\*[\s\S]*- `[0-9a-f]{8}` 〔全局〕用户要求创建 MR 时使用 Bits。/u);
+  const [open] = (await listRules({ runtimeRoot })).suggestions;
+  expect(open).toMatchObject({ scope: "global", state: "open", text: statements.preference, reason: "explicit_user" });
+  const preview = await acceptRule({ runtimeRoot, vaultRoot, id: open?.id ?? "", now: later, preview: true });
+  expect(preview).toMatchObject({ remember: { dry_run: true, authority: "human_authored" } });
+  const accepted = await acceptRule({ runtimeRoot, vaultRoot, id: open?.id ?? "", text: "提 MR 一律用 Bits。", now: later, preview: false });
+  expect(accepted).toMatchObject({ state: "accepted", scope: "global", text: "提 MR 一律用 Bits。" });
+  const memory = await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(accepted.memory_id) });
+  expect(memory?.memory).toMatchObject({ authority: "human_authored", body: "提 MR 一律用 Bits。", scope: { kind: "global" } });
+  expect((await listRules({ runtimeRoot })).suggestions).toEqual([]);
+  expect((await listRules({ runtimeRoot, includeClosed: true })).suggestions).toMatchObject([{ state: "accepted", memoryId: accepted.memory_id }]);
+  await expect(acceptRule({ runtimeRoot, vaultRoot, id: open?.id ?? "", now: later, preview: false })).rejects.toThrow(/already accepted/u);
+  // A later digest does not ask again.
+  expect((await dreamDigest({ runtimeRoot, vaultRoot, since: later, now: new Date(Date.parse(later) + 1_000).toISOString(), timeZone: "UTC" })).ruleSuggestions).toBe(0);
+  // Once it is Memory, the Global rule reaches the instruction-file judgment like any other (ADR-0181).
+  await refreshInstructionSuggestions({ runtimeRoot, vaultRoot, files: [agents], model, now: later });
+  expect((await readInstructionSuggestions(runtimeRoot)).suggestions.map((suggestion) => suggestion.files)).toEqual([
+    [{ path: agents, mergeInto: "", text: "Use Bits for every MR." }]
+  ]);
 });
 
 test("guidance only one agent loads does not make a claim documented for the other agent", async () => {

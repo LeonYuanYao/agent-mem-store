@@ -10,9 +10,10 @@ const base: TierInput = {
   verdict: "inconclusive", durability: "long_term", branch: "", explicitUser: false, sessionCount: 1, sourceBranches: []
 };
 
-test("only confirmed, user-stated or recurring knowledge is injected", () => {
+test("only confirmed, user-stated or recurring knowledge is admitted", () => {
   expect(tierOf({ ...base, verdict: "confirmed" })).toEqual({ tier: "inject", reason: "confirmed" });
-  expect(tierOf({ ...base, explicitUser: true })).toEqual({ tier: "inject", reason: "explicit_user" });
+  // The user's own words are admitted, and then left to the user (ADR-0191).
+  expect(tierOf({ ...base, explicitUser: true })).toEqual({ tier: "suggest", reason: "explicit_user" });
   expect(tierOf({ ...base, sessionCount: 2 })).toEqual({ tier: "inject", reason: "recurring" });
   expect(tierOf(base)).toEqual({ tier: "pool", reason: "single_session_inconclusive" });
   expect(tierOf({ ...base, verdict: "not_repo_verifiable" }).tier).toBe("pool");
@@ -35,18 +36,37 @@ test("an item the appraisal kept is not dropped on the verifier's durability gue
   expect(tierOf({ ...base, verdict: "confirmed", durability: "episodic", appraisedLasting: true, documentedAt: "AGENTS.md:3" }).tier).toBe("drop");
 });
 
-test("a user-stated item is injected only when the user's own words support it", () => {
-  expect(tierOf({ ...base, explicitUser: true, userSupport: "user_stated_rule" })).toEqual({ tier: "inject", reason: "explicit_user" });
+test("a user-stated item is admitted only when the user's own words support it", () => {
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "user_stated_rule" })).toEqual({ tier: "suggest", reason: "explicit_user" });
   expect(tierOf({ ...base, explicitUser: true, userSupport: "pasted_task_instruction" })).toEqual({ tier: "pool", reason: "single_session_inconclusive" });
   expect(tierOf({ ...base, explicitUser: true, userSupport: "not_user_stated" }).tier).toBe("pool");
   // The user's instruction for one task stays searchable even when judged one-off, and is injected once it recurs.
   expect(tierOf({ ...base, explicitUser: true, userSupport: "user_task_instruction", durability: "episodic" }))
     .toEqual({ tier: "pool", reason: "user_task_instruction" });
-  expect(tierOf({ ...base, explicitUser: true, userSupport: "user_task_instruction", sessionCount: 2 })).toEqual({ tier: "inject", reason: "recurring" });
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "user_task_instruction", sessionCount: 2 })).toEqual({ tier: "suggest", reason: "recurring" });
   expect(tierOf({ ...base, explicitUser: true, userSupport: "pasted_task_instruction", durability: "episodic" }).tier).toBe("drop");
   expect(tierOf({ ...base, explicitUser: true, userSupport: "not_user_stated", sessionCount: 2 })).toEqual({ tier: "inject", reason: "recurring" });
   // Items verified before the source check keep their earlier admission.
-  expect(tierOf({ ...base, explicitUser: true }).tier).toBe("inject");
+  expect(tierOf({ ...base, explicitUser: true }).tier).toBe("suggest");
+});
+
+test("rules of the user's own become suggestions instead of Memory (ADR-0191)", () => {
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "user_stated_rule", verdict: "not_repo_verifiable" }))
+    .toEqual({ tier: "suggest", reason: "explicit_user" });
+  // A rule the appraisal read from the user's corrections, once admitted.
+  expect(tierOf({ ...base, verdict: "confirmed", appraisedLasting: true, appraisedRule: true })).toEqual({ tier: "suggest", reason: "confirmed" });
+  expect(tierOf({ ...base, sessionCount: 2, appraisedLasting: true, appraisedRule: true })).toEqual({ tier: "suggest", reason: "recurring" });
+  // Below admission it stays where it was: a suggestion is never easier to get than injection.
+  expect(tierOf({ ...base, appraisedLasting: true, appraisedRule: true })).toEqual({ tier: "pool", reason: "single_session_inconclusive" });
+  expect(tierOf({ ...base, verdict: "confirmed", appraisedRule: true, documentedAt: "~/.claude/CLAUDE.md:5" }).tier).toBe("drop");
+  expect(tierOf({ ...base, verdict: "branch_scoped", branch: "feat/x", appraisedRule: true }).tier).toBe("branch");
+  // Words the user never said as a rule, or a pasted task text, do not make confirmed knowledge the user's.
+  expect(tierOf({ ...base, verdict: "confirmed", explicitUser: true, userSupport: "not_user_stated" })).toEqual({ tier: "inject", reason: "confirmed" });
+  expect(tierOf({ ...base, verdict: "confirmed", explicitUser: true, userSupport: "pasted_task_instruction" })).toEqual({ tier: "inject", reason: "confirmed" });
+  expect(tierOf({ ...base, verdict: "confirmed", appraisedLasting: true })).toEqual({ tier: "inject", reason: "confirmed" });
+  // The user already decided when asking to remember the material.
+  expect(tierOf({ ...base, explicitUser: true, userSupport: "user_stated_rule", userRequested: true })).toEqual({ tier: "inject", reason: "user_requested" });
+  expect(tierOf({ ...base, verdict: "confirmed", appraisedRule: true, userRequested: true })).toEqual({ tier: "inject", reason: "confirmed" });
 });
 
 test("material the user asked to remember is injected once it survives verification", () => {
@@ -66,7 +86,7 @@ test("material the user asked to remember is injected once it survives verificat
 test("a catch-all home-directory Project keeps global knowledge only", () => {
   expect(tierOf({ ...base, verdict: "confirmed", catchAllProject: true })).toEqual({ tier: "drop", reason: "catch_all_project" });
   expect(tierOf({ ...base, explicitUser: true, catchAllProject: true }).tier).toBe("drop");
-  expect(tierOf({ ...base, explicitUser: true, scope: "global", catchAllProject: true })).toEqual({ tier: "inject", reason: "explicit_user" });
+  expect(tierOf({ ...base, explicitUser: true, scope: "global", catchAllProject: true })).toEqual({ tier: "suggest", reason: "explicit_user" });
   expect(isCatchAllRoot("/Users/owner", "/Users/owner")).toBe(true);
   expect(isCatchAllRoot("/Users", "/Users/owner")).toBe(true);
   expect(isCatchAllRoot("/Users/owner/projects/app", "/Users/owner")).toBe(false);
@@ -80,7 +100,7 @@ test("knowledge from an unmerged branch stays with the branch unless the baselin
   expect(tierOf({ ...base, verdict: "confirmed", sourceBranches })).toEqual({ tier: "inject", reason: "confirmed" });
   expect(tierOf({ ...base, verdict: "branch_scoped", branch: "feat/x" })).toEqual({ tier: "branch", reason: "feat/x" });
   const merged = [{ repo: "tteh", branch: "develop", mergedIntoBaseline: true }];
-  expect(tierOf({ ...base, explicitUser: true, sourceBranches: merged }).tier).toBe("inject");
+  expect(tierOf({ ...base, explicitUser: true, sourceBranches: merged }).tier).toBe("suggest");
 });
 
 test("pre-search identifiers come from code spans and identifier-shaped words", () => {
@@ -120,8 +140,8 @@ test("only the branches of repositories the item is about scope it", () => {
   expect(relevantRepos).toEqual(["tteh"]);
   expect(relevantRepositories({ evidence: [], sourcePathRepos: [], presearch: [{ baseline: [".:1 files"], ownerBranches: ["tteh@feat/x"] }] }))
     .toEqual([".", "tteh"]);
-  expect(tierOf({ ...base, explicitUser: true, scope: "global", sourceBranches }).tier).toBe("inject");
-  expect(tierOf({ ...base, explicitUser: true, sourceBranches, relevantRepos })).toEqual({ tier: "inject", reason: "explicit_user" });
+  expect(tierOf({ ...base, explicitUser: true, scope: "global", sourceBranches }).tier).toBe("suggest");
+  expect(tierOf({ ...base, explicitUser: true, sourceBranches, relevantRepos })).toEqual({ tier: "suggest", reason: "explicit_user" });
   expect(tierOf({ ...base, explicitUser: true, sourceBranches }).tier).toBe("branch");
   expect(tierOf({ ...base, explicitUser: true, sourceBranches, relevantRepos: ["."] }).tier).toBe("branch");
 });

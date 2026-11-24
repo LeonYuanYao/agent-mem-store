@@ -81,7 +81,10 @@ export const refinementCheckSchema = z.object({
 export type RefinementCheck = z.infer<typeof refinementCheckSchema>;
 const refinementChecksSchema = z.object({ results: z.array(refinementCheckSchema) });
 
-/** Long-term value of a merged item (ADR-0177); only the keep_* values are verified and written. */
+/**
+ * Long-term value of a merged item (ADR-0177); only the keep_* values are verified and written. A
+ * kept rule is the user's own and goes to the user as a suggestion instead (ADR-0191).
+ */
 export const appraisalValues = ["keep_rule", "keep_usage", "keep_pitfall", "code_detail", "redundant", "narrow", "one_off"] as const;
 export const appraisalSchema = z.object({
   id: z.string(),
@@ -242,8 +245,8 @@ const mergePrompt = `下面是多个会话各自提炼出的候选记忆。请�
 const appraisePrompt = (projectLabel: string): string => `你是长期记忆库的把关人。下面是从 coding agent 会话里自动提炼、准备写入长期记忆库的知识，项目：${projectLabel}，按来源会话分组。写入后，它们会在以后新的会话里按相关性自动注入给 agent；每多一条低价值的记忆，都会挤占注入名额、增加噪音，还会随着代码变化而过时，所以标准要严。
 一个会话里通常只有少数几条值得长期保留：同一次读代码、排查或实现留下的一串细节，大多只在那次任务里有用。逐组处理：先通读整组，挑出以后在新任务里最可能再用到、而且临时不容易查到的条目；条数多的组，保留的一般不超过三分之一。
 对每条给出 value：
-- keep_rule：用户的长期偏好、规则、决定（包括从用户的纠正、反复要求里能看出来的），或项目、系统必须遵守的约束与约定。
-- keep_usage：使用或操作一个系统时要知道的东西：接口和工具的调用约定（参数要求、互斥选项、坐标与单位约定、返回形式）、命令与入口、配置项和文件位置、用户自己搭的流程和定时任务怎么配置；也包括帮 agent 找方向的简短说明：某个系统、服务或工具是做什么的，由哪几部分组成，某类东西放在哪里。
+- keep_rule：用户本人的长期偏好、要求、决定：agent 以后在这个用户这里应当怎样做事、怎样回复、用什么、不许做什么（包括从用户的纠正、反复要求里能看出来的）。项目或系统本身必须遵守的约束不算，归 keep_usage。
+- keep_usage：使用或操作一个系统时要知道的东西：接口和工具的调用约定（参数要求、互斥选项、坐标与单位约定、返回形式）、命令与入口、配置项和文件位置、用户自己搭的流程和定时任务怎么配置；项目、系统必须遵守的约束与约定；也包括帮 agent 找方向的简短说明：某个系统、服务或工具是做什么的，由哪几部分组成，某类东西放在哪里。
 - keep_pitfall：不显而易见的坑、失败模式及避免或排查办法。
 - code_detail：模块内部是怎么实现的（内部数据结构、队列、调用链、函数内部分支、重试或缓存的具体实现、内部路由归属），只有修改这个模块本身的人才用得上，读这块代码就能知道。
 - redundant：和组内另一条要保留的条目说的是同一件事，或者只是它的补充细节。

@@ -171,7 +171,7 @@ When enabled:
 - New captured events go to dreaming instead of per-turn distillation and Session consolidation; queued Luna work still completes. Capture resumes even with `human_authored_only_injection`; injection authority is unchanged.
 - Each Project runs once a day after 03:00 (Asia/Shanghai) over Sessions that ended in the last 7 days: chunked extraction with tool output → merge per claim type → verification with `msverify`, which reads every repository at its baseline commit → a defense pass for negative verdicts → inject, branch, pool, review and drop tiers.
 - Shadow mode writes only reports under `<vault>/_MemStore/Dreams/` and runtime tables. **It never writes canonical Memory or changes injection.** `总览.md` there lists what dreaming kept in the last 14 days, global knowledge first; each run also has its own report with the verifier's evidence.
-- With `mode = "apply"` the inject tier is also written as canonical Memory (agent-derived, policy version `dreaming-v1`), after comparison with the closest existing Memory in its scope; Human-authored Memory always wins. `[adapters].dreaming_injection = true` admits it to automatic injection while `human_authored_only_injection` keeps other agent-derived Memory out. See [ADR-0148](docs/adr/0148-apply-dreaming-to-canonical-memory.md).
+- With `mode = "apply"` the inject tier is also written as canonical Memory (agent-derived, policy version `dreaming-v1`), after comparison with the closest existing Memory in its scope; Human-authored Memory always wins. Rules of the user's own that dreaming admits are not written: the digest asks, and `memstore rules accept` writes them as Human-authored Memory ([ADR-0191](docs/adr/0191-let-the-user-decide-on-the-rules-dreaming-finds.md)). `[adapters].dreaming_injection = true` admits it to automatic injection while `human_authored_only_injection` keeps other agent-derived Memory out. See [ADR-0148](docs/adr/0148-apply-dreaming-to-canonical-memory.md).
 - Non-Git directories below the home directory all resolve to one catch-all Project once a Session has started in the home directory, and dreaming keeps only global knowledge from it. Give a directory its own Project with `memstore project register --path <dir> [--name <name>]` (`--preview` first), and set `catch_all_projects = false` in `[dreaming]` to stop scheduling runs for the catch-all Project. See [ADR-0171](docs/adr/0171-register-roots-below-the-catch-all-project.md).
 - `skip_roots = ["~/Library/Application Support/SomeEditor"]` in `[dreaming]` stops dreaming for Projects whose every root lies under one of these directories, such as an editor's per-run evaluation workspaces: no nightly run and no recent-work notes. Their Sessions are still captured, and `remember extract` still works. See [ADR-0172](docs/adr/0172-skip-dreaming-under-configured-roots.md).
 
@@ -188,6 +188,9 @@ memstore dream rollback [RUN_ID] [--apply]          # archive Memory dreaming wr
 memstore dream digest [--since ISO]                 # what dreaming changed, as a chat message
 memstore instructions [--refresh]                   # Global rules suggested for the instruction files
 memstore instructions dismiss M:<id>                # never suggest this one again
+memstore rules [all]                                # your own rules dreaming found, waiting for you
+memstore rules accept <id> [--text TEXT]            # keep one as your own Memory (optionally reworded)
+memstore rules dismiss <id>                         # do not keep it
 ```
 
 Rules that hold in every session ("reply in Chinese", "never touch the proxy") are rarely similar
