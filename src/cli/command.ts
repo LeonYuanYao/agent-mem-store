@@ -1005,11 +1005,12 @@ async function runOperations(arguments_: readonly string[]): Promise<{ command: 
       if (id === undefined) throw new MemStoreCommandError("suggestion_id_required", `rules ${action} requires the suggestion id shown by \`memstore rules\`.`);
       return action === "accept"
         ? { command: "rules.accept", json: parsed.values.json, result: await acceptRule({ ...location, id, now, preview: parsed.values.preview,
-            ...(parsed.values.text === undefined ? {} : { text: parsed.values.text }) }) }
+            ...(parsed.values.text === undefined ? {} : { text: parsed.values.text }),
+            ...(parsed.values.scope === undefined ? {} : { scope: scope(parsed.values.scope) }) }) }
         : { command: "rules.dismiss", json: parsed.values.json, result: await dismissRule({ runtimeRoot: location.runtimeRoot, id, now }) };
     }
     if (action !== undefined && action !== "all") {
-      throw new MemStoreCommandError("unknown_command", "Use `memstore rules [all]`, `memstore rules accept <id> [--text TEXT]` or `memstore rules dismiss <id>`.");
+      throw new MemStoreCommandError("unknown_command", "Use `memstore rules [all]`, `memstore rules accept <id> [--text TEXT] [--scope project|global]` or `memstore rules dismiss <id>`.");
     }
     return { command: "rules.list", json: parsed.values.json, result: await listRules({ runtimeRoot: location.runtimeRoot, includeClosed: action === "all" }) };
   }
@@ -1645,7 +1646,7 @@ Everyday use:
   memstore remember doc --file DOC.md | --lark URL [--title TEXT] [--scope project|global]
   memstore recall search QUERY
   memstore rules [all]
-  memstore rules accept ID [--text TEXT] [--preview]
+  memstore rules accept ID [--text TEXT] [--scope project|global] [--preview]
   memstore rules dismiss ID
       Rules of yours that dreaming found; accepted ones become your own Memory.
   memstore recall sources M:123

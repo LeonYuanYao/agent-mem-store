@@ -79,6 +79,17 @@ export function suggestionId(itemId: string): string {
   return itemId.replace(/^msdi_/u, "").slice(0, 8);
 }
 
+/** Where a rule suggestion stands: the commands while open, otherwise what became of it (ADR-0191). */
+function suggestionStateLine(database: DatabaseSync, item: Record<string, unknown>): string {
+  const id = suggestionId(String(item.item_id));
+  const state = typeof item.apply_state === "string" ? item.apply_state : undefined;
+  const note = typeof item.apply_reason === "string" && item.apply_reason !== "" ? item.apply_reason : "";
+  if (state === undefined) return `  - 要记住：\`memstore rules accept ${id}\`；不要：\`memstore rules dismiss ${id}\`${note === "" ? "" : ` · ${escapeLine(note).slice(0, 160)}`}`;
+  if (state === "pending") return "  - 待与已有记忆比对";
+  const ref = typeof item.apply_memory_id === "string" ? memoryRefs(database, [item.apply_memory_id]).get(item.apply_memory_id) ?? "" : "";
+  return `  - ${applyStateLabels[state] ?? state}${ref === "" ? "" : ` → ${ref}`}${note === "" ? "" : ` · ${escapeLine(note).slice(0, 160)}`}`;
+}
+
 export const applyStateLabels: Record<string, string> = {
   written: "新建",
   revised: "修订已有的 dreaming 记忆",
@@ -90,7 +101,8 @@ export const applyStateLabels: Record<string, string> = {
   failed: "失败，下次重试",
   pending: "待写入",
   accepted: "你确认的规则，已写成手写记忆",
-  dismissed: "你不要的规则提议"
+  dismissed: "你不要的规则提议",
+  duplicate_suggestion: "同一条已在等你确认，没有再问"
 };
 const applyStateOrder = ["conflict_human", "written", "revised", "accepted", "review_due", "observed", "duplicate_human", "dismissed", "skipped", "failed", "pending"];
 
@@ -212,7 +224,7 @@ export async function writeDreamReport(request: {
   const project = projectDisplay(request.database, request.projectId);
   const date = runDate(run?.scheduled_for, run?.created_at, request.timeZone);
   const items = request.database.prepare(
-    "SELECT item_id, statement, refined_statement, tier, tier_reason, scope, verdict_json, defense_json, session_ids_json FROM dream_items WHERE run_id = ? ORDER BY tier, scope DESC, claim_type"
+    "SELECT item_id, statement, refined_statement, tier, tier_reason, scope, verdict_json, defense_json, session_ids_json, apply_state, apply_memory_id, apply_reason FROM dream_items WHERE run_id = ? ORDER BY tier, scope DESC, claim_type"
   ).all(request.runId);
   const lines = [
     `# Dreams · ${date} · ${project.label}`,
@@ -257,12 +269,12 @@ export async function writeDreamReport(request: {
       }
       for (const evidence of (verdict.evidence ?? []).slice(0, 2)) lines.push(`  - 证据：${escapeLine(evidence).slice(0, 240)}`);
       if (tier === "review" || tier === "branch") lines.push(`  - 理由：${escapeLine(defense?.reason ?? verdict.reason ?? "").slice(0, 240)}`);
-      if (tier === "suggest") lines.push(`  - 要记住：\`memstore rules accept ${suggestionId(String(item.item_id))}\`；不要：\`memstore rules dismiss ${suggestionId(String(item.item_id))}\``);
+      if (tier === "suggest") lines.push(suggestionStateLine(request.database, item));
     }
     lines.push("");
   }
   const applied = request.database.prepare(
-    "SELECT COALESCE(refined_statement, statement) AS text, apply_state, apply_memory_id, apply_reason FROM dream_items WHERE run_id = ? AND apply_state IS NOT NULL ORDER BY item_id"
+    "SELECT COALESCE(refined_statement, statement) AS text, apply_state, apply_memory_id, apply_reason FROM dream_items WHERE run_id = ? AND apply_state IS NOT NULL AND tier <> 'suggest' ORDER BY item_id"
   ).all(request.runId);
   if (applied.length > 0) {
     lines.push(`## 写入正式记忆 · ${String(applied.length)}`, "", ...applyLines(request.database, applied.map((row) => ({
@@ -294,7 +306,7 @@ export async function writeDreamOverview(request: {
   const rows = request.database.prepare(
     `SELECT i.statement, i.refined_statement, i.tier, i.tier_reason, i.scope, r.project_id, r.report_path
      FROM dream_items i JOIN dream_runs r USING (run_id)
-     WHERE (r.stage = 'completed' OR r.run_id = ?) AND r.created_at >= ? AND i.tier IN ('inject', 'suggest', 'branch', 'pool', 'review')
+     WHERE (r.stage = 'completed' OR r.run_id = ?) AND r.created_at >= ? AND (i.tier IN ('inject', 'branch', 'pool', 'review') OR (i.tier = 'suggest' AND i.apply_state IS NULL))
      ORDER BY r.created_at DESC, i.claim_type`
   ).all(request.includeRunId ?? null, since);
   const tierOrder = ["inject", "suggest", "branch", "pool", "review"];

@@ -84,6 +84,8 @@ export async function rememberAssert(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
   readonly path: string;
+  /** A registered Project to file a Project-scoped assertion under, instead of resolving `path` (ADR-0191). */
+  readonly projectId?: string;
   readonly body: string;
   readonly scope: RememberScope;
   readonly startup: StartupPolicy;
@@ -95,7 +97,9 @@ export async function rememberAssert(request: {
   if (request.preview) {
     const inspected = request.scope === "global"
       ? undefined
-      : await inspectProject({ path: request.path, runtimeRoot: request.runtimeRoot });
+      : request.projectId !== undefined
+        ? { status: "resolved" as const, projectId: request.projectId }
+        : await inspectProject({ path: request.path, runtimeRoot: request.runtimeRoot });
     const plannedScope = request.scope === "global"
       ? ({ kind: "global" } as const)
       : inspected?.status === "resolved"
@@ -126,7 +130,9 @@ export async function rememberAssert(request: {
       ]
     };
   }
-  const scope = await resolveRememberScope(request);
+  const scope: ResolvedScope = request.scope === "project" && request.projectId !== undefined
+    ? { kind: "project", projectId: request.projectId }
+    : await resolveRememberScope(request);
   // A retry after an unreadable result must not save the same assertion twice.
   const existing = sensitivity.state === "normal"
     ? await findSameAssertion({ ...request, body, scope })

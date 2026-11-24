@@ -363,8 +363,9 @@ test("in apply mode a nightly run writes its inject tier as dreaming Memory and 
     if (result.state === "idle") break;
     steps.push(`${result.stage ?? ""}:${result.detail ?? ""}`);
   }
-  expect(steps).toContain("report:applied 1");
-  expect(steps.indexOf("report:instruction suggestions judged")).toBeGreaterThan(steps.indexOf("report:applied 1"));
+  // The user's rule is compared with what is kept before it is put to the user, then left open.
+  expect(steps).toContain("report:applied 2");
+  expect(steps.indexOf("report:instruction suggestions judged")).toBeGreaterThan(steps.indexOf("report:applied 2"));
   expect(steps.filter((step) => step.startsWith("report:instruction"))).toHaveLength(1);
   // The user's MR rule was not written, so there is no Global rule to suggest yet.
   expect((await readInstructionSuggestions(runtimeRoot)).suggestions).toEqual([]);

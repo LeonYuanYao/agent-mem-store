@@ -25,7 +25,9 @@ const comparisonCandidates = 6;
 const provenanceLimit = 24;
 export const applyBatchSize = 8;
 
-export type ApplyState = "pending" | "written" | "revised" | "observed" | "duplicate_human" | "conflict_human" | "review_due" | "skipped" | "failed";
+export type ApplyState = "pending" | "written" | "revised" | "observed" | "duplicate_human" | "conflict_human" | "review_due" | "skipped" | "failed"
+  // A rule of the user's own (ADR-0191): left open for the user, closed as asked before, or answered.
+  | "suggested" | "duplicate_suggestion" | "dismissed" | "accepted";
 
 export interface ApplyItem {
   readonly itemId: string;
@@ -54,6 +56,8 @@ export interface ApplyOutcome {
 interface ActiveMemory {
   readonly memoryId: string;
   readonly human: boolean;
+  /** An earlier rule suggestion (ADR-0191): its item id and what the user made of it (open while undefined). */
+  readonly suggestion?: { readonly itemId: string; readonly state?: string; readonly memoryId?: string };
   readonly text: string;
   readonly grams: ReadonlySet<string>;
   /** Set for a passage of a user-wide instruction file, which counts as Human-authored guidance. */
@@ -190,6 +194,23 @@ async function activeMemories(database: DatabaseSync, request: { readonly vaultR
   return memories;
 }
 
+/** Rule suggestions already put to the user (ADR-0191): open ones of completed screening, and answered ones. */
+function earlierSuggestions(database: DatabaseSync, projectId: string, exclude: ReadonlySet<string>): ActiveMemory[] {
+  return database.prepare(
+    `SELECT i.item_id, COALESCE(i.refined_statement, i.statement) AS text, i.apply_state, i.apply_memory_id
+     FROM dream_items i JOIN dream_runs r USING (run_id)
+     WHERE i.tier = 'suggest' AND (i.scope = 'global' OR r.project_id = ?)
+       AND (i.apply_state IS NULL OR i.apply_state IN ('accepted', 'dismissed'))`
+  ).all(projectId).flatMap((row) => {
+    const itemId = String(row.item_id);
+    if (exclude.has(itemId)) return [];
+    const text = String(row.text);
+    return [{ memoryId: typeof row.apply_memory_id === "string" ? row.apply_memory_id : itemId, human: false, text, grams: bigrams(text),
+      suggestion: { itemId, ...(typeof row.apply_state === "string" ? { state: row.apply_state } : {}),
+        ...(typeof row.apply_memory_id === "string" ? { memoryId: row.apply_memory_id } : {}) } }];
+  });
+}
+
 async function revise(request: {
   readonly vaultRoot: string; readonly runtimeRoot: string; readonly memoryId: string; readonly now: string;
   readonly change: (memory: CanonicalMemory, revisionId: string) => CanonicalMemory;
@@ -253,6 +274,9 @@ export async function applyBatch(request: {
     ...await activeMemories(database, { vaultRoot: request.vaultRoot, runtimeRoot: request.runtimeRoot, projectId }),
     ...await instructionPassages(request.instructionFiles ?? [])
   ];
+  // A rule suggestion is also compared with what was put to the user before, so nothing is asked twice.
+  const suggestions = request.items.some((item) => item.tier === "suggest")
+    ? earlierSuggestions(database, projectId, new Set(request.items.map((item) => item.itemId))) : [];
   const byKey = new Map<string, { memoryId: string; active: boolean }>();
   for (const row of database.prepare(
     `SELECT d.memory_id, d.statement_key, c.lifecycle FROM dream_memories d LEFT JOIN memory_catalog c USING (memory_id)
@@ -263,7 +287,7 @@ export async function applyBatch(request: {
   const toReconcile: ApplyItem[] = [];
   for (const item of request.items) {
     const known = byKey.get(statementKey(item.text));
-    if (item.tier !== "inject") {
+    if (item.tier === "review") {
       // A review-tier item only matters when it contradicts a statement dreaming wrote.
       outcomes.set(item.itemId, known?.active === true
         ? { itemId: item.itemId, state: "review_due", memoryId: known.memoryId, reason: `verifier: ${item.verdict.verdict ?? "-"}` }
@@ -283,12 +307,13 @@ export async function applyBatch(request: {
   const itemGrams = toReconcile.map((item) => bigrams(item.text));
   const prompts = toReconcile.map((item, index) => {
     const grams = itemGrams[index] ?? new Set<string>();
-    const existing = memories.map((memory) => ({ memory, score: similarity(grams, memory.grams) }))
+    const pool = item.tier === "suggest" ? [...memories, ...suggestions] : memories;
+    const existing = pool.map((memory) => ({ memory, score: similarity(grams, memory.grams) }))
       .filter((entry) => entry.score >= 0.08).sort((left, right) => right.score - left.score).slice(0, comparisonCandidates)
       .map(({ memory }) => {
         let alias = [...aliases].find(([, value]) => value === memory)?.[0];
         if (alias === undefined) {
-          alias = `${memory.human ? "H" : "D"}${String(aliases.size + 1)}`;
+          alias = `${memory.suggestion !== undefined ? "S" : memory.human ? "H" : "D"}${String(aliases.size + 1)}`;
           aliases.set(alias, memory);
         }
         return { id: alias, text: memory.text };
@@ -329,6 +354,10 @@ export async function applyBatch(request: {
     const targetId = targetMemory === undefined ? targetItemMemory : targetMemory.memoryId;
     const humanTarget = targetMemory?.human === true;
     let outcome: ApplyOutcome;
+    if (item.tier === "suggest") {
+      outcomes.set(item.itemId, screenSuggestion(item, decision, targetMemory, targetId, itemAliases.get(decision.target)));
+      continue;
+    }
     if (decision.decision !== "new" && targetMemory?.source !== undefined) {
       // Guidance every session already loads; nothing to write, and the user owns it.
       outcome = {
@@ -397,11 +426,52 @@ export async function applyBatch(request: {
       }
     }
     for (const outcome of outcomes.values()) {
+      // An open suggestion has no apply_state: that is what the digest and `memstore rules` list.
       database.prepare("UPDATE dream_items SET apply_state = ?, apply_memory_id = ?, apply_reason = ? WHERE item_id = ?")
-        .run(outcome.state, outcome.memoryId ?? null, outcome.reason.slice(0, 300), outcome.itemId);
+        .run(outcome.state === "suggested" ? null : outcome.state, outcome.memoryId ?? null, outcome.reason.slice(0, 300), outcome.itemId);
     }
   }
   return { outcomes: request.items.map((item) => outcomes.get(item.itemId) ?? { itemId: item.itemId, state: "failed", reason: "no_outcome" }), ...(usage === undefined ? {} : { usage }) };
+}
+
+/**
+ * Where a rule suggestion stands after comparison (ADR-0191). Nothing is written: a rule the user
+ * already keeps (their Memory, the instruction files, an accepted suggestion) or that dreaming
+ * already wrote is not asked again, one the user dismissed stays dismissed, one already waiting is
+ * not listed twice; anything else, including a contradiction of what is kept, goes to the user.
+ */
+function screenSuggestion(item: ApplyItem, decision: Reconciliation, target: ActiveMemory | undefined, targetId: string | undefined,
+  targetItem: ApplyItem | undefined): ApplyOutcome {
+  const same = decision.decision === "duplicate" || decision.decision === "refines";
+  const open = { itemId: item.itemId, state: "suggested" as const, reason: decision.decision === "new" ? "" : decision.reason };
+  if (decision.decision === "new" || (target === undefined && targetItem === undefined)) return open;
+  if (target?.suggestion !== undefined) {
+    if (!same) return { ...open, reason: `${decision.reason}（与之前的提议 ${target.suggestion.itemId} 不同）` };
+    if (target.suggestion.state === "dismissed") return { itemId: item.itemId, state: "dismissed", reason: `你之前不要过（${target.suggestion.itemId}）` };
+    if (target.suggestion.state === "accepted") {
+      return { itemId: item.itemId, state: "duplicate_human", ...(target.suggestion.memoryId === undefined ? {} : { memoryId: target.suggestion.memoryId }),
+        reason: "你之前确认过同一条" };
+    }
+    return { itemId: item.itemId, state: "duplicate_suggestion", reason: `同一条已在等你确认（${target.suggestion.itemId}）` };
+  }
+  if (targetItem !== undefined) {
+    // An earlier item of this batch: another suggestion, or knowledge written for injection just now.
+    if (!same) return open;
+    return targetItem.tier === "suggest" ? { itemId: item.itemId, state: "duplicate_suggestion", reason: "同一批里已有同一条提议" }
+      : { itemId: item.itemId, state: "observed", ...(targetId === undefined ? {} : { memoryId: targetId }), reason: decision.reason };
+  }
+  if (target?.source !== undefined) {
+    return same ? { itemId: item.itemId, state: "duplicate_human", reason: `${decision.reason}（${target.source}）` }
+      : { ...open, reason: `${decision.reason}（与 ${target.source} 不同）` };
+  }
+  if (target?.human === true) {
+    return same ? { itemId: item.itemId, state: "duplicate_human", ...(targetId === undefined ? {} : { memoryId: targetId }), reason: decision.reason }
+      : { ...open, reason: `${decision.reason}（与你的手写记忆不同）` };
+  }
+  // Dreaming Memory written before ADR-0191: already injected; only something new about it is asked.
+  return decision.decision === "duplicate"
+    ? { itemId: item.itemId, state: "observed", ...(targetId === undefined ? {} : { memoryId: targetId }), reason: decision.reason }
+    : { ...open, reason: decision.reason };
 }
 
 /**

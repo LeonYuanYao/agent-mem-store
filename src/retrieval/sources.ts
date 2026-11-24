@@ -137,7 +137,8 @@ export async function recallSources(request: {
         at: event.at, user: clip(promptOf(decode(database, event.eventId)), timelineCharacters), tools: []
       })) };
     });
-    const note = memory.authority === "human_authored"
+    // A Human-authored Memory has sources only when the user accepted it from a rule suggestion (ADR-0191).
+    const note = memory.authority === "human_authored" && sessions.length === 0
       ? "A Human-authored Memory has no source conversation; its origin is in `memstore recall provenance`."
       : sessions.length === 0 ? "No source Session is recorded for this Memory." : undefined;
     return {

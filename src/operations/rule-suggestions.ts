@@ -1,7 +1,4 @@
-import { stat } from "node:fs/promises";
-
 import { MemStoreCommandError } from "../contracts/envelope.js";
-import { temporaryRootPattern } from "../dreaming/repo-map.js";
 import { findRuleSuggestion, listRuleSuggestions, ruleSuggestionLines, type RuleSuggestion } from "../dreaming/suggestions.js";
 import { openRuntimeDatabase, openRuntimeDatabaseReadOnly } from "../runtime/database.js";
 import { rememberAssert } from "./remember.js";
@@ -35,53 +32,43 @@ export async function listRules(request: { readonly runtimeRoot: string; readonl
   }
 }
 
-async function liveRoot(roots: readonly string[]): Promise<string | undefined> {
-  for (const root of roots.filter((candidate) => !temporaryRootPattern.test(candidate))) {
-    if (await stat(root).then((entry) => entry.isDirectory(), () => false)) return root;
-  }
-  return undefined;
-}
-
 export async function acceptRule(request: {
   readonly runtimeRoot: string;
   readonly vaultRoot: string;
   readonly id: string;
   readonly text?: string;
+  /** Overrides the suggestion's scope; Project scope is the run's Project. */
+  readonly scope?: "project" | "global";
   readonly now: string;
   readonly preview: boolean;
 }): Promise<Record<string, unknown>> {
   let suggestion: RuleSuggestion;
-  let roots: string[];
   const database = await openRuntimeDatabaseReadOnly(request.runtimeRoot);
   try {
     suggestion = findRuleSuggestion(database, request.id);
-    roots = database.prepare("SELECT canonical_root FROM project_roots WHERE project_id = ? ORDER BY last_used_at DESC")
-      .all(suggestion.projectId).map((row) => String(row.canonical_root));
   } finally {
     database.close();
   }
   if (suggestion.state !== "open") {
-    throw new MemStoreCommandError("suggestion_closed", `Suggestion ${suggestion.id} is already ${suggestion.state}.`);
+    throw new MemStoreCommandError("suggestion_closed", `Suggestion ${suggestion.id} is already ${suggestion.state}${suggestion.note === "" ? "" : `: ${suggestion.note}`}.`);
   }
+  // The text the user saw, or the user's rewrite; detail the user was not shown is not made theirs.
   const body = (request.text ?? suggestion.text).trim();
   if (body === "") throw new MemStoreCommandError("invalid_content_input", "The rule text is empty.");
-  const root = suggestion.scope === "global" ? undefined : await liveRoot(roots);
-  if (suggestion.scope === "project" && root === undefined) {
-    throw new MemStoreCommandError("project_unresolved", `No existing root of ${suggestion.projectLabel} to file the rule under.`);
-  }
+  const scope = request.scope ?? suggestion.scope;
   const result = await rememberAssert({
-    runtimeRoot: request.runtimeRoot, vaultRoot: request.vaultRoot, path: root ?? process.cwd(), body,
-    scope: suggestion.scope, startup: "auto", preview: request.preview, assertedAt: request.now
+    runtimeRoot: request.runtimeRoot, vaultRoot: request.vaultRoot, path: process.cwd(), body, scope,
+    ...(scope === "project" ? { projectId: suggestion.projectId } : {}), startup: "auto", preview: request.preview, assertedAt: request.now
   }) as { readonly state?: string; readonly memoryId?: string; readonly memoryRef?: number };
-  const suggestionFields = { suggestion: suggestion.id, text: body, scope: suggestion.scope,
-    ...(suggestion.scope === "project" ? { project: suggestion.projectLabel } : {}) };
+  const suggestionFields = { suggestion: suggestion.id, text: body, scope, ...(scope === "project" ? { project: suggestion.projectLabel } : {}) };
   if (request.preview) return { ...suggestionFields, remember: result };
   // Only a Memory that now holds the rule closes the suggestion; a conflict or a sensitive value leaves it open.
   if ((result.state === "created" || result.state === "unchanged") && typeof result.memoryId === "string") {
     const writable = await openRuntimeDatabase(request.runtimeRoot);
     try {
-      writable.prepare("UPDATE dream_items SET apply_state = 'accepted', apply_memory_id = ?, apply_reason = ? WHERE item_id = ? AND apply_state IS NULL")
-        .run(result.memoryId, request.text === undefined ? `accepted ${request.now}` : `accepted ${request.now}, rewritten by the user`, suggestion.itemId);
+      // The rule is the user's Memory now, whatever a concurrent dismissal recorded.
+      writable.prepare("UPDATE dream_items SET apply_state = 'accepted', apply_memory_id = ?, apply_reason = ? WHERE item_id = ?")
+        .run(result.memoryId, request.text === undefined ? `accepted ${request.now}` : `accepted ${request.now}; 改写为：${body}`.slice(0, 300), suggestion.itemId);
     } finally {
       writable.close();
     }
@@ -97,9 +84,13 @@ export async function dismissRule(request: { readonly runtimeRoot: string; reado
     if (suggestion.state === "accepted") {
       throw new MemStoreCommandError("suggestion_closed", `Suggestion ${suggestion.id} was accepted; archive its Memory instead.`);
     }
-    database.prepare("UPDATE dream_items SET apply_state = 'dismissed', apply_reason = ? WHERE item_id = ? AND apply_state IS NULL")
-      .run(`dismissed ${request.now}`, suggestion.itemId);
-    return { suggestion: suggestion.id, state: "dismissed", text: suggestion.text };
+    const changed = database.prepare("UPDATE dream_items SET apply_state = 'dismissed', apply_reason = ? WHERE item_id = ? AND apply_state IS NULL")
+      .run(`dismissed ${request.now}`, suggestion.itemId).changes;
+    const now = findRuleSuggestion(database, suggestion.itemId);
+    if (Number(changed) === 0 && now.state === "accepted") {
+      throw new MemStoreCommandError("suggestion_closed", `Suggestion ${suggestion.id} was accepted; archive its Memory instead.`);
+    }
+    return { suggestion: suggestion.id, state: now.state, text: suggestion.text, ...(now.note === "" ? {} : { note: now.note }) };
   } finally {
     database.close();
   }

@@ -27,16 +27,25 @@ Decision:
   should work, reply or what not to do for this user. Constraints a project or system must follow
   move to `keep_usage` and are written as before. An item the appraisal omits counts as
   `keep_usage`, so an omission never becomes a suggestion.
-- `memstore dream digest` lists the suggestions of runs completed in its window, once, with
+- Before it is put to the user, apply mode compares a suggestion as it compares items it writes
+  (ADR-0148), with the closest Human-authored and dreaming Memory, the instruction files, and
+  also the suggestions put to the user before. A rule the user already keeps (their Memory, an
+  instruction file, an accepted suggestion) or that dreaming wrote before is not asked again; one
+  the user dismissed stays dismissed; one already waiting is not listed twice. A contradiction of
+  what is kept, or something new about a dreaming Memory, is asked with a note.
+- `memstore dream digest` lists the open suggestions of runs completed in its window, once, with
   their handle (the item id's first eight hex digits). `memstore rules [all]` lists them;
-  `memstore rules accept <id> [--text TEXT]` writes the text, or the user's rewrite, through
-  `remember assert` as Human-authored Memory in the item's scope (a Project scope files it
-  under a live root of the run's Project) and records `accepted` and the Memory;
+  `memstore rules accept <id> [--text TEXT] [--scope project|global]` writes the statement the
+  user saw, or the user's rewrite, through `remember assert` as Human-authored Memory and
+  records `accepted` and the Memory; detail the user was not shown is not written.
   `memstore rules dismiss <id>` records `dismissed`. A suggestion the user never answers stays
-  open and is not written. An accepted Global rule then reaches the instruction-file judgment
-  of ADR-0181 like any other Global Memory.
+  open and is not written. A suggestion is Global only for the user's own lasting rule the
+  verifier read as Global, as for written Memory (ADR-0006); otherwise it is filed under the
+  run's Project by id. An accepted Global rule then reaches the instruction-file judgment of
+  ADR-0181 like any other Global Memory.
 - Migration 0079 rebuilds `dream_items` so its tier may be `suggest`; a suggestion's outcome is
-  its `apply_state` (open while NULL). Existing Memory is not changed.
+  its `apply_state` (open while NULL; `accepted`, `dismissed`, or closed by comparison).
+  Existing Memory is not changed. Runs tiered before this change keep their inject items.
 
 Evaluation of the appraisal change, on the 424 dreaming Memories in use not stated by the user,
 as items grouped by source Session and judged through the production `appraise` call (Terra,

@@ -928,15 +928,16 @@ export async function renderDreamReports(request: {
 }
 
 /**
- * Queues a run's items for apply mode: every inject item, and review items whose
+ * Queues a run's items for apply mode: every inject item, every rule suggestion (compared with
+ * what is kept and what was asked before, never written; ADR-0191), and review items whose
  * statement dreaming already wrote (their Memory becomes review_due).
  */
 function markApplyPending(database: DatabaseSync, runId: string): void {
   const written = new Set(database.prepare("SELECT statement_key FROM dream_memories").all().map((row) => String(row.statement_key)));
   for (const row of database.prepare(
-    "SELECT item_id, tier, COALESCE(refined_statement, statement) AS text FROM dream_items WHERE run_id = ? AND apply_state IS NULL AND tier IN ('inject', 'review')"
+    "SELECT item_id, tier, COALESCE(refined_statement, statement) AS text FROM dream_items WHERE run_id = ? AND apply_state IS NULL AND tier IN ('inject', 'suggest', 'review')"
   ).all(runId)) {
-    if (row.tier === "inject" || written.has(statementKey(String(row.text)))) {
+    if (row.tier !== "review" || written.has(statementKey(String(row.text)))) {
       database.prepare("UPDATE dream_items SET apply_state = 'pending' WHERE item_id = ?").run(String(row.item_id));
     }
   }

@@ -7,6 +7,7 @@ import { afterEach, expect, test } from "vitest";
 import { applyBatch, loadApplyItems, statementKey } from "../../../src/dreaming/apply.js";
 import type { DreamModel, ReconcileItem } from "../../../src/dreaming/model.js";
 import { applyCompletedRuns, rollbackDreamMemories } from "../../../src/dreaming/run.js";
+import { acceptRule, listRules } from "../../../src/operations/rule-suggestions.js";
 import { resolveProject } from "../../../src/projects/index.js";
 import { openRuntimeDatabase } from "../../../src/runtime/database.js";
 import { readCanonicalMemory, writeCanonicalMemory } from "../../../src/vault/index.js";
@@ -33,7 +34,7 @@ function fakeModel(calls: ReconcileItem[][]): DreamModel {
     reconcile(request) {
       calls.push([...request.items]);
       return Promise.resolve({ usage: { tokens: 7, seconds: 1 }, results: request.items.map((item) => {
-        const same = item.candidates.find((candidate) => candidate.id.startsWith("H") && statementKey(candidate.text) === statementKey(item.text));
+        const same = item.candidates.find((candidate) => /^[HS]/u.test(candidate.id) && statementKey(candidate.text) === statementKey(item.text));
         if (same !== undefined) return { id: item.id, decision: "duplicate" as const, target: same.id, merged_statement: "", reason: "already stated" };
         const human = item.candidates.find((candidate) => candidate.id.startsWith("H") && candidate.text.includes("Bits"));
         const earlier = item.candidates.find((candidate) => candidate.id.startsWith("N") && statementKey(candidate.text) === statementKey(item.text));
@@ -265,6 +266,71 @@ test("the digest lists what a run wrote and how to undo it", async () => {
   // Nothing since: one line.
   await expect(dreamDigest({ runtimeRoot, vaultRoot, since: "2026-10-30T00:00:00.000Z", now: "2026-10-31T01:00:00.000Z", timeZone: "Asia/Shanghai" }))
     .resolves.toMatchObject({ text: "MemStore 10-31：dreaming 没有改动记忆。" });
+});
+
+test("a rule suggestion is compared with what the user keeps and was asked before, and never written (ADR-0191)", async () => {
+  const { runtimeRoot, vaultRoot, projectId, humanId } = await fixture();
+  const earlier = "msdream_00000020-0000-4000-8000-000000000020";
+  const runId = "msdream_00000021-0000-4000-8000-000000000021";
+  const s2 = "msdi_5e2a0000-0000-4000-8000-000000000002";
+  const s5 = "msdi_5e5a0000-0000-4000-8000-000000000005";
+  await addRun(runtimeRoot, projectId, earlier, "2026-10-28T19:00:00.000Z", [
+    { id: "msdi_dismissed", text: "回复用户时先给结论。", tier: "suggest" },
+    { id: "msdi_waiting", text: "评测一律用 Codex。", tier: "suggest" }
+  ]);
+  await addRun(runtimeRoot, projectId, runId, "2026-10-29T19:00:00.000Z", [
+    { id: "msdi_s1", text: texts.sameAsHuman, tier: "suggest", explicit: true, userSupport: "user_stated_rule" },
+    { id: s2, text: texts.againstHuman, tier: "suggest", scope: "global", explicit: true, userSupport: "user_stated_rule" },
+    { id: "msdi_s3", text: "回复用户时先给结论。", tier: "suggest" },
+    { id: "msdi_s4", text: "评测一律用 Codex。", tier: "suggest" },
+    { id: s5, text: "周报每条只写一个核心数字。", tier: "suggest", scope: "global" },
+    { id: "msdi_s6", text: "周报每条只写一个核心数字。", tier: "suggest" }
+  ]);
+  const database = await openRuntimeDatabase(runtimeRoot);
+  try {
+    database.prepare("UPDATE dream_items SET apply_state = 'dismissed' WHERE item_id = 'msdi_dismissed'").run();
+    database.prepare("UPDATE dream_items SET apply_state = 'pending' WHERE run_id = ?").run(runId);
+    const calls: ReconcileItem[][] = [];
+    const items = loadApplyItems(database, "i.run_id = ? AND i.apply_state = 'pending'", runId);
+    const { outcomes } = await applyBatch({ database, vaultRoot, runtimeRoot, items, model: fakeModel(calls), now: "2026-10-30T00:00:00.000Z", preview: false });
+    expect(Object.fromEntries(outcomes.map((outcome) => [outcome.itemId, outcome.state]))).toEqual({
+      msdi_s1: "duplicate_human", [s2]: "suggested", msdi_s3: "dismissed", msdi_s4: "duplicate_suggestion", [s5]: "suggested", msdi_s6: "duplicate_suggestion"
+    });
+    // Earlier suggestions are offered for comparison only to suggestions.
+    expect(calls.flat().find((item) => item.text === "回复用户时先给结论。")?.candidates.some((candidate) => candidate.id.startsWith("S"))).toBe(true);
+    const rows = Object.fromEntries(database.prepare("SELECT item_id, apply_state, apply_memory_id, apply_reason FROM dream_items WHERE run_id = ?").all(runId)
+      .map((row) => [String(row.item_id), { state: row.apply_state, memory: row.apply_memory_id, reason: String(row.apply_reason ?? "") }]));
+    expect(rows.msdi_s1).toMatchObject({ state: "duplicate_human", memory: humanId });
+    // A contradiction of the user's own Memory is still the user's call; it stays open with a note.
+    expect(rows[s2]).toMatchObject({ state: null });
+    expect(rows[s2]?.reason).toContain("与你的手写记忆不同");
+    expect(rows.msdi_s3?.reason).toContain("msdi_dismissed");
+    expect(rows[s5]).toMatchObject({ state: null, reason: "" });
+    expect(database.prepare("SELECT COUNT(*) AS n FROM dream_memories").get()?.n).toBe(0);
+    database.prepare("UPDATE dream_runs SET completed_at = created_at").run();
+  } finally {
+    database.close();
+  }
+  expect(Object.keys(await catalog(runtimeRoot))).toEqual([humanId]);
+  const digest = await dreamDigest({ runtimeRoot, vaultRoot, since: "2026-10-29T00:00:00.000Z", now: "2026-10-30T01:00:00.000Z", timeZone: "Asia/Shanghai" });
+  expect(digest.ruleSuggestions).toBe(2);
+  expect(digest.text).toMatch(/\*\*MemStore 10-30\*\*：dreaming 没有新的记忆改动；有 2 条你的规则等你确认。/u);
+  expect(digest.text).toContain(`${texts.againstHuman}（`);
+  expect(digest.text).not.toContain("回复用户时先给结论");
+  // Global only for the user's own lasting rule; a rule the appraisal read off goes to the run's Project.
+  const open = Object.fromEntries((await listRules({ runtimeRoot })).suggestions.map((suggestion) => [suggestion.itemId, suggestion]));
+  expect(open[s2]).toMatchObject({ scope: "global" });
+  expect(open[s5]).toMatchObject({ scope: "project" });
+  // Accepted under the run's Project by id, without resolving a directory; the user may narrow a Global rule.
+  // The full item id names it as well as the short handle does.
+  const accepted = await acceptRule({ runtimeRoot, vaultRoot, id: s5, now: "2026-10-30T02:00:00.000Z", preview: false });
+  expect(accepted).toMatchObject({ state: "accepted", scope: "project" });
+  const narrowed = await acceptRule({ runtimeRoot, vaultRoot, id: open[s2]?.id ?? "", scope: "project", now: "2026-10-30T02:00:00.000Z", preview: false });
+  expect(narrowed).toMatchObject({ state: "accepted", scope: "project" });
+  for (const memoryId of [accepted.memory_id, narrowed.memory_id]) {
+    expect((await readCanonicalMemory({ vaultRoot, runtimeRoot, memoryId: String(memoryId) }))?.memory)
+      .toMatchObject({ authority: "human_authored", scope: { kind: "project", projectId } });
+  }
 });
 
 test("detail goes into the body, survives a revision without detail, and is dropped when evidence contradicts it", async () => {

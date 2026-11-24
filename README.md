@@ -189,7 +189,7 @@ memstore dream digest [--since ISO]                 # what dreaming changed, as 
 memstore instructions [--refresh]                   # Global rules suggested for the instruction files
 memstore instructions dismiss M:<id>                # never suggest this one again
 memstore rules [all]                                # your own rules dreaming found, waiting for you
-memstore rules accept <id> [--text TEXT]            # keep one as your own Memory (optionally reworded)
+memstore rules accept <id> [--text TEXT] [--scope project|global]  # keep one as your own Memory
 memstore rules dismiss <id>                         # do not keep it
 ```
 
