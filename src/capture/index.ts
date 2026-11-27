@@ -13,7 +13,7 @@ export const captureEventSchema = z.object({
   schemaVersion: z.literal(1),
   eventId: z.string().min(1),
   deduplicationKey: z.string().min(1),
-  agent: z.enum(["codex", "claude"]),
+  agent: z.enum(["codex", "claude", "antigravity"]),
   eventKind: z.enum([
     "SessionStart",
     "UserPromptSubmit",

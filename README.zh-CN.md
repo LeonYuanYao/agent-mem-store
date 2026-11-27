@@ -116,6 +116,8 @@ host_skill_roots = ["~/.agents/skills", "~/.codex/skills", "~/.claude/skills"]
 
 Claude Code 和 Codex 共用同一个记忆库：在 `~/.claude/settings.json` 的 SessionStart、UserPromptSubmit、PostToolUse、Stop、SessionEnd hook 中运行 `node <repo>/dist/cli/hook.js claude <Event>`，并设置 `MEMSTORE_RUNTIME_ROOT`。开启 dreaming 时这些 hook 负责采集；再设置 `MEMSTORE_INJECTION_MODE=active`，并把 UserPromptSubmit hook 设为同步，就会像 Codex 一样注入记忆（`[adapters].claude_hook_display` 控制界面显示，默认只显示一行摘要）。见 [ADR-0149](docs/adr/0149-inject-memory-into-claude-code.md)。
 
+Antigravity（CLI、App、IDE）也共用这个记忆库：在 `~/.gemini/config/hooks.json` 的 SessionStart、PreInvocation、PostToolUse、Stop hook 中用同样的环境变量运行 `node <repo>/dist/cli/hook.js antigravity <Event>`。PreInvocation 充当“用户提问”：只有每轮用户提问后的第一次模型调用会被采集并注入记忆，注入方式是一条 system message（`[adapters].antigravity_hook_display` 控制界面显示，默认只显示一行摘要）。见 [ADR-0192](docs/adr/0192-capture-and-inject-in-antigravity.md) 和[适配器说明](src/adapters/antigravity/README.md)。
+
 手动试跑和查看状态：
 
 ```sh
@@ -202,7 +204,7 @@ TypeSafe 会按地区拒绝请求（HTTP 451，回执中显示为 `http_error`�
 
 ### Hook 注入内容的显示方式
 
-在机器本地 `<runtime>/config.toml` 的 `[adapters]` 段中，将 `hook_display` 设置为 `"off"`、`"summary"`（默认）、`"items"` 或 `"full"`（Claude Code 用 `claude_hook_display`，取值相同）：
+在机器本地 `<runtime>/config.toml` 的 `[adapters]` 段中，将 `hook_display` 设置为 `"off"`、`"summary"`（默认）、`"items"` 或 `"full"`（Claude Code 用 `claude_hook_display`，Antigravity 用 `antigravity_hook_display`，取值相同）：
 
 - `summary`：显示事件、记忆条数、按顺序排列的引用和注入 token 数。
 - `items`：在摘要下每条记忆一行，显示编号、项目/全局、手写/自动沉淀和内容，不显示注入文本里的说明和标签。

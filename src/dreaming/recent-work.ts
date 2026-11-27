@@ -20,6 +20,7 @@ const summaryCharacters = 400;
 // The first prompt gets this many of the Project's latest notes (ADR-0174; two before).
 const notesInjected = 3;
 const refreshMinutes = 60;
+const agentLabels: Readonly<Record<string, string>> = { claude: "Claude Code", codex: "Codex", antigravity: "Antigravity" };
 
 export type RecentWorkStepResult =
   | { readonly state: "idle" }
@@ -130,7 +131,7 @@ export async function recentWorkContext(request: {
   const lines = notes.map((note) => {
     const at = Temporal.Instant.from(note.at).toZonedDateTimeISO(request.configuration.timezone);
     const when = `${at.toPlainDate().toString().slice(5)} ${at.toPlainTime().toString().slice(0, 5)}`;
-    return `- ${when} · ${note.agent === "claude" ? "Claude Code" : "Codex"}：${note.summary.replace(/\s*\n\s*/gu, " ")}`;
+    return `- ${when} · ${agentLabels[note.agent] ?? "Codex"}：${note.summary.replace(/\s*\n\s*/gu, " ")}`;
   });
   return {
     count: notes.length,

@@ -177,6 +177,8 @@ When enabled:
 
 Claude Code shares the same store: run `node <repo>/dist/cli/hook.js claude <Event>` with `MEMSTORE_RUNTIME_ROOT` from the SessionStart, UserPromptSubmit, PostToolUse, Stop and SessionEnd hooks in `~/.claude/settings.json`. With dreaming enabled the hooks capture sessions; with `MEMSTORE_INJECTION_MODE=active` and a synchronous UserPromptSubmit hook they also inject memory like Codex (`[adapters].claude_hook_display` sets the line shown, default `summary`). See [ADR-0149](docs/adr/0149-inject-memory-into-claude-code.md).
 
+Antigravity (CLI, App and IDE) shares it too: run `node <repo>/dist/cli/hook.js antigravity <Event>` with the same environment from the SessionStart, PreInvocation, PostToolUse and Stop hooks in `~/.gemini/config/hooks.json`. PreInvocation stands in for a submitted prompt: only the first model call of a user turn is captured and gets the injection, as a system message (`[adapters].antigravity_hook_display`, default `summary`, sets the line shown). See [ADR-0192](docs/adr/0192-capture-and-inject-in-antigravity.md) and the [adapter guide](src/adapters/antigravity/README.md).
+
 Run once by hand and inspect runs:
 
 ```sh
@@ -363,8 +365,8 @@ Set `hook_display` in the `[adapters]` section of the machine-local
 `summary` shows the event, Memory count, ordered references, and injected token
 count. `items` adds one line per Memory (reference, scope, authority and text)
 without the pack's legend and tags. `full` adds the exact model-facing injection
-text, not the full Vault notes. `claude_hook_display` takes the same values for
-Claude Code.
+text, not the full Vault notes. `claude_hook_display` and `antigravity_hook_display`
+take the same values for Claude Code and Antigravity.
 `off` hides successful injection notices but preserves capture failure warnings.
 Empty retrievals stay silent. Both SessionStart and UserPromptSubmit use the same
 setting, which is read on each successful retrieval without a Worker restart.

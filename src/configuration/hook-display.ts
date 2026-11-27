@@ -18,9 +18,12 @@ export const adapterDisplaySchema = z.object({
   human_authored_only_injection: z.boolean().default(false),
   dreaming_injection: z.boolean().default(false),
   // Claude Code shows a Hook systemMessage on every prompt, so a one-line summary is its default.
-  claude_hook_display: hookDisplaySchema.default("summary")
+  claude_hook_display: hookDisplaySchema.default("summary"),
+  // Antigravity shows the injection inline on every prompt as well.
+  antigravity_hook_display: hookDisplaySchema.default("summary")
 }).loose().default({ hook_display: "summary", session_start_injection: false, subagents_enabled: false,
-  exec_sessions_enabled: true, excluded_roots: [], human_authored_only_injection: false, dreaming_injection: false, claude_hook_display: "summary" });
+  exec_sessions_enabled: true, excluded_roots: [], human_authored_only_injection: false, dreaming_injection: false,
+  claude_hook_display: "summary", antigravity_hook_display: "summary" });
 
 export async function readHumanAuthoredOnlyInjection(runtimeRoot: string): Promise<boolean> {
   try {
@@ -133,12 +136,20 @@ export async function readHookDisplay(runtimeRoot: string): Promise<HookDisplay>
 }
 
 export async function readClaudeHookDisplay(runtimeRoot: string): Promise<HookDisplay> {
+  return readAdapterHookDisplay(runtimeRoot, "claude_hook_display");
+}
+
+export async function readAntigravityHookDisplay(runtimeRoot: string): Promise<HookDisplay> {
+  return readAdapterHookDisplay(runtimeRoot, "antigravity_hook_display");
+}
+
+async function readAdapterHookDisplay(runtimeRoot: string, key: "claude_hook_display" | "antigravity_hook_display"): Promise<HookDisplay> {
   try {
     const config = z.object({
       schema_version: z.literal(1),
       adapters: adapterDisplaySchema
     }).parse(parse(await readFile(join(runtimeRoot, "config.toml"), "utf8")));
-    return config.adapters.claude_hook_display;
+    return config.adapters[key];
   } catch {
     return "summary";
   }

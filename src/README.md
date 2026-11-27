@@ -46,13 +46,14 @@ The CLI and MCP delegate to application operations. SQLite stores durable work a
 | [retrieval](retrieval/README.md) | Builds derived search snapshots, selects relevant memories and serves both explicit recall and automatic hook injection. |
 | [adapters](adapters/README.md) | Contains host-specific translations at the edge of MemStore; domain rules remain in shared modules. |
 | [adapters/codex](adapters/codex/README.md) | Maps supported Codex events into project-scoped, durable capture and bounded session evidence. |
-| [adapters/claude](adapters/claude/README.md) | Captures Claude Code sessions for dreaming (capture only, no injection). |
+| [adapters/claude](adapters/claude/README.md) | Captures Claude Code sessions for dreaming and injects memory through the shared foreground retrieval. |
+| [adapters/antigravity](adapters/antigravity/README.md) | Captures Antigravity conversations for dreaming and injects memory before the first model call of a user turn. |
 | [adapters/macos](adapters/macos/README.md) | Implements the notifier port used by reminder delivery. |
 | [retrieval/embeddings](retrieval/embeddings/README.md) | Loads configured embedding artifacts and provides normalized vectors for index building and query retrieval. |
 
 ## Cross-cutting changes
 
-- Host payload or hook timing: adapters/codex, cli, capture and retrieval.
+- Host payload or hook timing: adapters/codex, adapters/claude, adapters/antigravity, cli, capture and retrieval.
 - Canonical schema or identity: vault, memories, candidates, migrations and retrieval rebuilds.
 - Model output: luna contracts, the consuming worker/quality/governance path, and schema tests.
 - Project identity: projects, session migration, capture and explicit recall scope resolution.

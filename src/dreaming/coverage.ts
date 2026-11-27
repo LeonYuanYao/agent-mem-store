@@ -21,13 +21,14 @@ export const everyAgent: readonly Agent[] = ["claude", "codex"];
 
 /**
  * Agents with a meaningful share of the Project's Sessions in the last 60 days: at least three
- * Sessions and a tenth of them. A Project without such Sessions counts every agent.
+ * Sessions and a tenth of them. A Project without such Sessions counts every agent. Antigravity
+ * loads AGENTS.md files as Codex does, so its Sessions count as Codex's (ADR-0192).
  */
 export function activeAgents(database: DatabaseSync, projectId: string, now: string): Agent[] {
   const since = new Date(Date.parse(now) - 60 * 86_400_000).toISOString();
   const rows = database.prepare(
-    `SELECT agent, COUNT(DISTINCT session_id) AS sessions FROM capture_events
-     WHERE project_id = ? AND created_at >= ? GROUP BY agent`
+    `SELECT CASE agent WHEN 'antigravity' THEN 'codex' ELSE agent END AS agent, COUNT(DISTINCT session_id) AS sessions
+     FROM capture_events WHERE project_id = ? AND created_at >= ? GROUP BY 1`
   ).all(projectId, since);
   const total = rows.reduce((sum, row) => sum + Number(row.sessions), 0);
   const active = everyAgent.filter((agent) => rows.some((row) =>

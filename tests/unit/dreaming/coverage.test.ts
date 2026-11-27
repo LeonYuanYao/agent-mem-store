@@ -59,6 +59,31 @@ test("guidance files belong to the agents that load them, and other files to non
   }
 });
 
+// ADR-0192: Antigravity loads the AGENTS.md files Codex loads.
+test("Antigravity Sessions count as Codex's when deciding which agents work in a Project", async () => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "memstore-coverage-"));
+  const projectId = "msproj_123e4567-e89b-42d3-a456-426614174001";
+  try {
+    for (const [agent, count] of [["claude", 5], ["antigravity", 20]] as const) {
+      for (let index = 0; index < count; index += 1) {
+        const sessionId = `${agent}-${String(index)}`;
+        await captureEvent({ runtimeRoot, event: {
+          schemaVersion: 1, eventId: `msevent_${sessionId}`, deduplicationKey: sessionId, agent, eventKind: "SessionStart",
+          occurredAt: new Date().toISOString(), projectId, sessionId, payload: { source: "startup" }
+        } });
+      }
+    }
+    const database = await openRuntimeDatabase(runtimeRoot);
+    try {
+      expect(activeAgents(database, projectId, new Date(Date.now() + 60_000).toISOString())).toEqual(["claude", "codex"]);
+    } finally {
+      database.close();
+    }
+  } finally {
+    await rm(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
 test("documented_at answers name one or more path:line references", () => {
   expect(documentedReferences("AGENT.md:28; docs/memstore-handoff.md:1-5")).toEqual([
     { path: "AGENT.md", from: 28, to: 28 }, { path: "docs/memstore-handoff.md", from: 1, to: 5 }]);

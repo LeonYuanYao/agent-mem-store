@@ -47,8 +47,8 @@ export interface CodexHookRequest {
   readonly receivedAt?: string;
   readonly progress?: CaptureProgress;
   readonly captureEnabled?: boolean;
-  /** Host agent; Claude Code hooks share this mapping for capture. */
-  readonly agent?: "codex" | "claude";
+  /** Host agent; Claude Code and Antigravity hooks share this mapping for capture. */
+  readonly agent?: CaptureEvent["agent"];
   /**
    * Directory that decides the Project, when it differs from the event's cwd:
    * Claude Code reports the shell's current directory, but a Session belongs to
@@ -181,7 +181,7 @@ function hookPayload(input: z.infer<typeof hookInputSchema>): unknown {
   return { reason: input.reason ?? "other" };
 }
 
-function hookIdentity(input: z.infer<typeof hookInputSchema>, agent: "codex" | "claude"): {
+function hookIdentity(input: z.infer<typeof hookInputSchema>, agent: CaptureEvent["agent"]): {
   readonly eventId: string;
   readonly deduplicationKey: string;
 } {

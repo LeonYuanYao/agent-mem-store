@@ -9,11 +9,13 @@ Contains host-specific translations at the edge of MemStore; domain rules remain
 ## Start here
 
 - [codex/hook.ts](codex/hook.ts)
+- [claude/README.md](claude/README.md)
+- [antigravity/README.md](antigravity/README.md)
 - [macos/notifier.ts](macos/notifier.ts)
 
 ## Flow and collaborators
 
-Codex converts host lifecycle events into capture requests; macOS converts reminder delivery into a notifier subprocess call.
+Codex converts host lifecycle events into capture requests; Claude Code and Antigravity translate their own hook payloads onto the same mapping; macOS converts reminder delivery into a notifier subprocess call.
 
 - [../capture/README.md](../capture/README.md)
 - [../review/README.md](../review/README.md)
@@ -31,7 +33,7 @@ Keep host payload quirks here rather than copying Candidate or Vault policy into
 Run from the repository root:
 
 ```sh
-pnpm exec vitest run tests/contract/codex-hook.test.ts tests/integration/review/reminder-delivery.test.ts
+pnpm exec vitest run tests/contract/codex-hook.test.ts tests/contract/claude-hook-entrypoint.test.ts tests/contract/antigravity-hook-entrypoint.test.ts tests/integration/review/reminder-delivery.test.ts
 ```
 
 Check these test scenarios before changing behavior.
